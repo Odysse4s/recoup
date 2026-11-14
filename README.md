@@ -1,22 +1,16 @@
 # Recoup
 
-**Makes the supplier call you avoid. Rehearsed, approved, reversible.**
+**Safety-first enterprise agent for vendor audits, staged ERP changes, and reversible recovery.**
 
-Restaurant groups lose money every week to deliveries that arrive short, damaged, late or billed above
-contract. Recovering it means reading the receiving note, checking the contract, doing the math,
-chasing the supplier and booking the credit. Nobody has time, so the money is never claimed.
+Enterprise finance and operations teams lose thousands every month to vendor shipments that arrive short, damaged, past SLA, or billed above contracted rates — yet enterprises refuse to let autonomous AI agents touch live ERP tables or contact external vendors without strict guardrails.
 
-Recoup is an agent that does the whole job for an operations manager:
+Recoup is a **safety-first office operations agent** built so enterprises can trust autonomous execution:
 
-1. **Reads the evidence**: receiving notes, invoices and delivery photos.
-2. **Builds the tools it lacks**: when no calculator exists for a contract clause, it writes one,
-   tests it against worked examples in a sandbox, and only then uses it.
-3. **Rehearses every change**: database updates, claim letters and supplier emails are applied to a
-   private copy first, producing an exact diff before anything real is touched.
-4. **Asks before it acts**: claims above the policy threshold and any supplier contact wait for a
-   one-tap or spoken approval on the manager's phone.
-5. **Makes it reversible**: every committed change can be undone step by step.
-6. **Finds the next one**: after a claim lands, it looks for similar unclaimed credits and offers them.
+1. **Isolated Rehearsal Before Execution**: every SQLite ERP mutation, audit memo, and outbound vendor message runs inside a private rehearsal copy first, generating an exact row-by-row and file diff before production is touched.
+2. **Sandboxed Tool Synthesis**: when a contract clause requires custom math, Recoup writes a pure Python tool, validates its AST, runs unit tests in a locked subprocess sandbox, and only registers it when every test passes.
+3. **Deterministic Risk Gate + Mobile Voice Approval**: LLM output never decides safety. Policy thresholds (`>= EUR 250` or any external email/call) pause execution and push a spoken summary to the manager's phone (`/mobile`) for 1-tap or voice sign-off.
+4. **Transactional Replay & Step-by-Step Undo**: approved changes verify workspace fingerprints before committing and store pre-image receipts for instant LIFO rollback.
+5. **Proactive Ledger Audit**: once a claim is committed, Recoup scans historical paid invoices in idle time and stages a ready-to-approve recovery offer.
 
 ## Quickstart
 
@@ -26,8 +20,8 @@ cd backend && uv sync && uv run uvicorn app.server:app --reload
 cd frontend && npm install && npm run dev
 ```
 
-Runs fully offline with `LLM_PROVIDER=fake`. Set `LLM_PROVIDER=gemini` and `GEMINI_API_KEY` for live runs.
+Runs 100% offline with `LLM_PROVIDER=fake`. Set `LLM_PROVIDER=gemini` and `GEMINI_API_KEY` for live inference.
 
 ## Built with
 
-Google Gemini, fal, Wonderful, FastAPI, SQLite, React, Vite, Tailwind CSS, Framer Motion.
+Google Gemini, Wonderful, fal, FastAPI, SQLite, React, Vite, Tailwind CSS, Framer Motion.

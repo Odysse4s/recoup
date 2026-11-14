@@ -1,6 +1,6 @@
 """Domain definition for Recoup: schema, seed data, brand and the scripted offline run.
 
-Everything domain-specific lives here so the engine, agent and HUD stay generic:
+Everything domain-specific lives here so the safety runtime, agent and HUD stay generic:
 - the seeder builds the SQLite database and workspace files from `tables_sql`, `seed_rows` and `files`;
 - the offline provider (`LLM_PROVIDER=fake`) replays `demo` step by step;
 - `GET /api/state` exposes the brand and presets to the HUD.
@@ -13,13 +13,13 @@ BRAND_COLORS = ("indigo", "emerald", "amber", "rose", "cyan", "violet")
 
 BRAND: dict[str, str] = {
     "brand_name": "Recoup",
-    "brand_tagline": "Makes the supplier call you avoid. Rehearsed, approved, reversible.",
+    "brand_tagline": "Safety-first enterprise agent for vendor audits, staged ERP changes & reversible recovery.",
     "primary_color": "emerald",
 }
 
-PERSONA = "Operations manager at a six-location restaurant group in Athens"
-HERO_GOAL = "Recover what Kappa Foods owes us for delivery D-1042 and send them the claim"
-FOLLOW_UP_GOAL = "Recover what Kappa Foods owes us for deliveries D-1017 and D-1031"
+PERSONA = "Finance & Workplace Operations Lead at a 350-person enterprise office"
+HERO_GOAL = "Audit shipment D-1042 against our Kappa Office Systems contract, hold the overbilled invoice, and send the credit claim"
+FOLLOW_UP_GOAL = "Recover unclaimed vendor credits across earlier Kappa Office Systems shipments D-1017 and D-1031"
 
 CLAIM_LETTER_PATH = "claims/CLM-D-1042.md"
 FOLLOW_UP_PATH = "claims/CLM-KAPPA-FOLLOWUP.md"
@@ -49,78 +49,79 @@ _FORGE_CODE = '''def compute_supplier_claim(args: dict) -> dict:
     }
 '''
 
-_CLAIM_LETTER = """# Claim CLM-D-1042: Kappa Foods S.A.
+_CLAIM_LETTER = """# Vendor Credit Claim CLM-D-1042: Kappa Office Systems S.A.
 
-**Delivery:** D-1042 (Extra virgin olive oil 5L, SKU OIL-5L)
+**Shipment:** D-1042 (USB-C Enterprise Workstation Hub, SKU HUB-USBC)
 **Invoice:** INV-7781 (billed EUR 2,268.00)
 
 | Line item | Basis | Amount |
 |---|---|---|
-| Price above contract | 120 cases x (EUR 18.90 - EUR 17.50) | EUR 168.00 |
-| Short delivery | 16 cases x EUR 17.50 | EUR 280.00 |
-| Damaged on arrival | 6 cases x EUR 17.50 | EUR 105.00 |
-| Late delivery penalty | 2 days x 1% of EUR 1,715.00 accepted goods | EUR 34.30 |
-| **Total credit requested** | | **EUR 587.30** |
+| Rate above master contract | 120 units x (EUR 18.90 - EUR 17.50) | EUR 168.00 |
+| Short-shipped units | 16 units x EUR 17.50 | EUR 280.00 |
+| Damaged in transit (DOA) | 6 units x EUR 17.50 | EUR 105.00 |
+| SLA late-delivery penalty | 2 days x 1% of EUR 1,715.00 accepted goods | EUR 34.30 |
+| **Total credit note requested** | | **EUR 587.30** |
 
-Per clauses 2-4 of our supply terms, please issue a credit note for EUR 587.30 against INV-7781
-within 7 days. Receiving note and photos are attached.
+Per clauses 2-4 of our Master Procurement Agreement, please issue a credit note for EUR 587.30
+against INV-7781 within 7 business days. IT receiving log and inspection notes are attached.
 """
 
-_FOLLOW_UP = """# Follow-up claim: Kappa Foods S.A.
+_FOLLOW_UP = """# Follow-up Vendor Audit: Kappa Office Systems S.A.
 
-| Delivery | Invoice | Issue | Amount |
+| Shipment | Invoice | Discrepancy | Amount |
 |---|---|---|---|
-| D-1017 | INV-7702 (paid) | 6 cases short x EUR 17.50 | EUR 105.00 |
-| D-1031 | INV-7735 (paid) | 4 cases damaged x EUR 17.50 | EUR 70.00 |
+| D-1017 | INV-7702 (paid) | 6 units short-shipped x EUR 17.50 | EUR 105.00 |
+| D-1031 | INV-7735 (paid) | 4 units DOA damaged x EUR 17.50 | EUR 70.00 |
 | **Total** | | | **EUR 175.00** |
 """
 
 DOMAIN: dict[str, Any] = {
-    "label": "Supplier Claims",
+    "label": "Enterprise Vendor Ops",
     **BRAND,
     "persona": PERSONA,
-    "vertical": "Supplier dispute recovery for restaurant groups",
+    "vertical": "Safety-first enterprise back-office procurement & AP dispute automation",
     "primary_table": "claims",
     "default_goal": HERO_GOAL,
     "presets": [
         {
-            "title": "Recover a short, damaged and overpriced delivery",
+            "title": "Audit IT Shipment Discrepancy, Stage ERP Hold & Gate Vendor Claim",
             "badge": "HERO RUN",
             "goal": HERO_GOAL,
             "desc": (
-                "Reads the receiving note, checks the contract, builds a claim calculator on the fly, "
-                "stages the claim and invoice dispute, and holds the supplier email for approval."
+                "Cross-checks IT receiving log against the master contract, synthesizes a sandboxed SLA "
+                "calculator, stages the ERP invoice hold + credit claim as a diff, and gates outbound dispatch."
             ),
         },
         {
-            "title": "Sweep earlier deliveries for unclaimed credits",
+            "title": "Sweep Paid AP Ledger for Unclaimed Vendor SLA Credits",
             "badge": "FOLLOW-UP",
             "goal": FOLLOW_UP_GOAL,
-            "desc": "Finds shortages and damages on already-paid invoices and drafts one bundled claim.",
+            "desc": "Finds short-shipped and DOA units on already-paid invoices and stages one consolidated claim.",
         },
     ],
     "files": {
         "inbox/D-1042_receiving_note.md": (
-            "# Receiving note: delivery D-1042\n\n"
-            "- Supplier: Kappa Foods S.A.\n"
-            "- Promised: 2026-11-10, arrived: 2026-11-12\n"
-            "- Ordered 120 cases of OIL-5L, counted 104 on the pallet.\n"
-            "- 6 cases crushed and leaking, set aside for return.\n"
-            "- Signed by: kitchen receiving, Kolonaki branch\n"
+            "# IT Receiving Log: Shipment D-1042\n\n"
+            "- Vendor: Kappa Office Systems S.A.\n"
+            "- SLA promised date: 2026-11-10, delivered: 2026-11-12\n"
+            "- PO quantity: 120 units of HUB-USBC; IT stockroom counted 104 units delivered.\n"
+            "- 6 units arrived with crushed enclosures / DOA ports, quarantined for RMA.\n"
+            "- Logged by: Workplace IT Operations, HQ Floor 4\n"
         ),
         "contracts/kappa_foods_terms.md": (
-            "# Supply terms: Kappa Foods S.A.\n\n"
-            "1. OIL-5L contract price: EUR 17.50 per case for 2026.\n"
-            "2. Short deliveries are credited at the contract price.\n"
-            "3. Goods damaged on arrival are credited at the contract price.\n"
-            "4. Late delivery: 1% of accepted goods value per day late, capped at 10%.\n"
-            "5. Claims must be raised within 14 days of delivery.\n"
+            "# Master Procurement Agreement: Kappa Office Systems S.A.\n\n"
+            "1. HUB-USBC contracted unit price: EUR 17.50 per unit for FY2026.\n"
+            "2. Short-shipped units are credited at the contracted unit price.\n"
+            "3. DOA / transit-damaged hardware is credited at the contracted unit price.\n"
+            "4. Late SLA delivery penalty: 1% of accepted hardware value per day late, capped at 10%.\n"
+            "5. Credit claims must be submitted within 14 days of delivery.\n"
         ),
         "policies/claims_policy.md": (
-            "# Supplier claims policy\n\n"
-            "- Any claim of EUR 250 or more needs manager approval before it is sent.\n"
-            "- Any outbound supplier contact (email or call) needs manager approval.\n"
-            "- Accept settlement offers of 85% of the claim or more; escalate anything lower.\n"
+            "# Enterprise Agent Safety & Governance Policy\n\n"
+            "- Every database write, file edit, and outbound action must be rehearsed in an isolated copy first.\n"
+            "- Any vendor claim of EUR 250 or more requires human manager approval at the Risk Gate.\n"
+            "- Any external communication (email, webhook, or voice call) requires human approval.\n"
+            "- During vendor negotiation calls, accept credit settlements >= 85% of claim value; escalate lower offers.\n"
         ),
     },
     "tables_sql": [
@@ -181,24 +182,24 @@ DOMAIN: dict[str, Any] = {
     ],
     "seed_rows": {
         "suppliers": [
-            ("SUP-KAPPA", "Kappa Foods S.A.", "accounts@kappafoods.example", "+30 210 000 0001"),
-            ("SUP-THESS", "Thessaly Dairy", "billing@thessalydairy.example", "+30 241 000 0002"),
+            ("SUP-KAPPA", "Kappa Office Systems S.A.", "accounts@kappaoffice.example", "+30 210 000 0001"),
+            ("SUP-NOVA", "Nova Workplace Cloud", "billing@novacloud.example", "+30 210 000 0002"),
         ],
         "contract_prices": [
-            (1, "SUP-KAPPA", "OIL-5L", "Extra virgin olive oil 5L", 17.50, 1.0, 10.0),
-            (2, "SUP-THESS", "FETA-2KG", "PDO feta 2kg tin", 14.20, 0.5, 5.0),
+            (1, "SUP-KAPPA", "HUB-USBC", "USB-C Enterprise Workstation Hub", 17.50, 1.0, 10.0),
+            (2, "SUP-NOVA", "KEY-MECH", "Wireless Office Keyboard", 14.20, 0.5, 5.0),
         ],
         "deliveries": [
-            ("D-1017", "SUP-KAPPA", "OIL-5L", 80, 74, 0, "2026-11-02", "2026-11-02", "received"),
-            ("D-1031", "SUP-KAPPA", "OIL-5L", 60, 60, 4, "2026-11-06", "2026-11-06", "received"),
-            ("D-1042", "SUP-KAPPA", "OIL-5L", 120, 104, 6, "2026-11-10", "2026-11-12", "received"),
-            ("D-1050", "SUP-THESS", "FETA-2KG", 40, 40, 0, "2026-11-11", "2026-11-11", "received"),
+            ("D-1017", "SUP-KAPPA", "HUB-USBC", 80, 74, 0, "2026-11-02", "2026-11-02", "received"),
+            ("D-1031", "SUP-KAPPA", "HUB-USBC", 60, 60, 4, "2026-11-06", "2026-11-06", "received"),
+            ("D-1042", "SUP-KAPPA", "HUB-USBC", 120, 104, 6, "2026-11-10", "2026-11-12", "received"),
+            ("D-1050", "SUP-NOVA", "KEY-MECH", 40, 40, 0, "2026-11-11", "2026-11-11", "received"),
         ],
         "invoices": [
             ("INV-7702", "SUP-KAPPA", "D-1017", 80, 17.50, 1400.00, "paid"),
             ("INV-7735", "SUP-KAPPA", "D-1031", 60, 17.50, 1050.00, "paid"),
             ("INV-7781", "SUP-KAPPA", "D-1042", 120, 18.90, 2268.00, "unpaid"),
-            ("INV-7790", "SUP-THESS", "D-1050", 40, 14.20, 568.00, "unpaid"),
+            ("INV-7790", "SUP-NOVA", "D-1050", 40, 14.20, 568.00, "unpaid"),
         ],
         "claims": [],
     },
@@ -210,7 +211,7 @@ DOMAIN: dict[str, Any] = {
         "max_auto_deleted_rows": 0,
     },
     "negotiation": {
-        "counterparty": "Kappa Foods accounts team",
+        "counterparty": "Kappa Office Systems AR desk",
         "claim_id": "CLM-D-1042",
         "claim_amount": 587.30,
         "accept_floor_pct": 85,
@@ -218,12 +219,12 @@ DOMAIN: dict[str, Any] = {
     },
     "demo": {
         "evidence": {
-            "intent": "Read the receiving note for delivery D-1042",
+            "intent": "Read IT receiving log for shipment D-1042",
             "path": "inbox/D-1042_receiving_note.md",
-            "thought": "Checking what the kitchen actually received against the order.",
+            "thought": "Checking stockroom receiving log against the vendor purchase order.",
         },
         "lookup": {
-            "intent": "Look up the delivery, invoice and contract price",
+            "intent": "Cross-check shipment, AP invoice and master contract rates",
             "sql": (
                 "SELECT d.id, d.qty_ordered, d.qty_received, d.qty_damaged, d.promised_date, "
                 "d.delivered_date, i.id AS invoice_id, i.qty_billed, i.unit_price AS billed_unit_price, "
@@ -235,11 +236,11 @@ DOMAIN: dict[str, Any] = {
         },
         "forge": {
             "name": "compute_supplier_claim",
-            "trigger_keywords": ["recover", "claim", "owes", "credit"],
-            "step_title": "Calculate the claim under the supply contract",
+            "trigger_keywords": ["recover", "claim", "owes", "credit", "audit"],
+            "step_title": "Synthesize & verify SLA contract claim calculator",
             "purpose": (
-                "Compute overcharge, shortage, damage and capped late-delivery credits for one delivery "
-                "and return each line item plus the total, rounded to cents"
+                "Compute unit overcharge, short-shipped, DOA damaged and capped SLA late-delivery credits "
+                "for an office vendor shipment and return each line item plus total rounded to cents"
             ),
             "signature": "def compute_supplier_claim(args: dict) -> dict",
             "code": _FORGE_CODE,
@@ -286,7 +287,7 @@ DOMAIN: dict[str, Any] = {
         },
         "mutations": [
             {
-                "intent": "Open claim CLM-D-1042 for EUR 587.30",
+                "intent": "Stage vendor credit claim CLM-D-1042 for EUR 587.30",
                 "table": "claims",
                 "pk_col": "id",
                 "row": {
@@ -295,38 +296,38 @@ DOMAIN: dict[str, Any] = {
                     "reason": "overcharge 168.00, short 280.00, damaged 105.00, late 34.30",
                     "status": "drafted",
                 },
-                "thought": "Recording the EUR 587.30 claim against delivery D-1042.",
+                "thought": "Staging EUR 587.30 vendor credit claim against shipment D-1042.",
             },
             {
-                "intent": "Mark invoice INV-7781 as disputed so it is not paid in full",
+                "intent": "Place AP payment hold (`disputed`) on invoice INV-7781",
                 "table": "invoices",
                 "pk_col": "id",
                 "row": {"id": "INV-7781", "status": "disputed"},
-                "thought": "Holding INV-7781 so accounts payable does not pay the overbilled amount.",
+                "thought": "Holding INV-7781 in AP so finance does not auto-pay the overbilled invoice.",
             },
         ],
         "report": {
-            "intent": "Write the claim letter",
+            "intent": "Draft formal vendor credit claim memo",
             "path": CLAIM_LETTER_PATH,
             "content": _CLAIM_LETTER,
         },
         "notify": {
-            "intent": "Email the claim to Kappa Foods",
-            "criterion": "claim email queued for Kappa Foods",
-            "to": "accounts@kappafoods.example",
-            "subject": "Claim CLM-D-1042 for delivery D-1042: EUR 587.30",
+            "intent": "Dispatch credit claim notice to Kappa Office Systems AR desk",
+            "criterion": "claim email queued for Kappa Office Systems",
+            "to": "accounts@kappaoffice.example",
+            "subject": "Credit Claim CLM-D-1042 on Invoice INV-7781: EUR 587.30",
             "body": (
-                "Hello Kappa Foods team,\n\nDelivery D-1042 arrived 2 days late with 16 cases short, "
-                "6 damaged, and was invoiced above our contract price. Please issue a credit note of "
-                "EUR 587.30 against INV-7781. The full breakdown is attached.\n\nThank you."
+                "Hello Kappa Office Systems AR team,\n\nShipment D-1042 arrived 2 days past SLA with "
+                "16 units short, 6 DOA units, and unit pricing above our FY2026 Master Agreement. "
+                "Please issue a credit note of EUR 587.30 against INV-7781. Full audit attached.\n\nRegards,\nFinance & Workplace Ops"
             ),
         },
         "anticipate": {
-            "need": "Bundle a EUR 175.00 follow-up claim for two earlier Kappa Foods deliveries",
+            "need": "Recover EUR 175.00 in unclaimed credits across two paid AP invoices",
             "goal_prompt": FOLLOW_UP_GOAL,
             "evidence": (
-                "D-1017 arrived 6 cases short and D-1031 had 4 damaged cases, "
-                "but invoices INV-7702 and INV-7735 were paid in full"
+                "Shipments D-1017 (6 units short) and D-1031 (4 DOA units) were paid in full "
+                "on INV-7702 and INV-7735 without credit notes"
             ),
             "path": FOLLOW_UP_PATH,
             "content": _FOLLOW_UP,
