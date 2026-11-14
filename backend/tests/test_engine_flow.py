@@ -585,3 +585,59 @@ async def test_goal_endpoint_double_submit_cancels_prior_run(isolated_goal_serve
 
     rows = await _poll(_claim_rows)
     assert rows == [(587.30, "drafted")], "the cancelled run must not have written a duplicate/partial claim"
+
+
+async def test_offload_blocking_does_not_wedge_the_event_loop():
+    """A slow sync voice/vision call routed through `_offload_blocking` must not block other
+    concurrently-running coroutines - this is the exact bug that froze /api/health for minutes
+    during a live call when a sync httpx call was awaited directly instead of offloaded."""
+    import time as time_mod
+
+    def slow_sync_call(seconds: float) -> str:
+        time_mod.sleep(seconds)
+        return "done"
+
+    ticks: list[int] = []
+
+    async def tick_every(n: int, delay: float) -> None:
+        for i in range(n):
+            await asyncio.sleep(delay)
+            ticks.append(i)
+
+    start = time_mod.monotonic()
+    slow_task = asyncio.create_task(server._offload_blocking(slow_sync_call, 0.5))
+    tick_task = asyncio.create_task(tick_every(8, 0.05))
+    result = await slow_task
+    elapsed_for_slow_call = time_mod.monotonic() - start
+    await tick_task
+
+    assert result == "done"
+    assert elapsed_for_slow_call < 0.5 + 0.2, "the offloaded call itself should still finish promptly"
+    # If the sync call had blocked the loop instead of running in a thread, the concurrent
+    # 0.05s ticks (8 of them, 0.4s total) could not have made meaningful progress during the
+    # 0.5s blocking call; with a real thread offload, most of them complete well before it.
+    assert len(ticks) >= 5, f"event loop appears to have been blocked; only {len(ticks)} ticks ran"
+
+
+async def test_offload_blocking_awaits_coroutine_function_directly():
+    """A coroutine function (e.g. a test double patched in as `async def`) must be awaited
+    directly, not scheduled onto a thread (which would just create the coroutine object)."""
+
+    async def fake_async_fn(x: int) -> int:
+        await asyncio.sleep(0)
+        return x * 2
+
+    assert await server._offload_blocking(fake_async_fn, 21) == 42
+
+
+async def test_offload_blocking_awaits_result_of_sync_mock_returning_awaitable():
+    """A sync callable whose return value is itself awaitable (e.g. a MagicMock configured
+    with a coroutine return_value) must have that inner awaitable awaited too."""
+
+    async def _inner() -> str:
+        return "inner-result"
+
+    def sync_fn_returning_coroutine():
+        return _inner()
+
+    assert await server._offload_blocking(sync_fn_returning_coroutine) == "inner-result"

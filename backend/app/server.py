@@ -91,6 +91,22 @@ def _get_call_audio_member(name: str, fallback: Any = None) -> Any:
     return fallback
 
 
+async def _offload_blocking(fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """Call a synchronous, network-bound helper (TTS/STT/vision/LLM) without blocking the event loop.
+
+    Several agent/voice helpers are plain synchronous functions making blocking httpx calls with
+    multi-second timeouts; calling them directly from an `async def` route wedges the entire
+    single-worker server for every concurrent request until they return (this is what caused
+    `/api/health` to hang for minutes during a live call). Route the real, synchronous case
+    through a thread; still support test doubles patched in as an `async def`/coroutine, or a
+    sync mock that itself returns an awaitable.
+    """
+    if inspect.iscoroutinefunction(fn):
+        return await fn(*args, **kwargs)
+    result = await asyncio.to_thread(fn, *args, **kwargs)
+    return await result if inspect.isawaitable(result) else result
+
+
 def _classify_realtime_outcome(*args: Any, **kwargs: Any) -> Any:
     fn = _get_call_audio_member("classify_realtime_call_outcome", classify_realtime_call_outcome)
     if callable(fn):
@@ -1411,8 +1427,7 @@ async def voice_briefing(req: VoiceBriefingRequest):
             and not os.getenv("VOICE_PROVIDER", "").strip()
         )
         if not pytest_turn_offline:
-            maybe_turn = synthesize_call_turn("agent", text)
-            candidate = await maybe_turn if inspect.isawaitable(maybe_turn) else maybe_turn
+            candidate = await _offload_blocking(synthesize_call_turn, "agent", text)
             if candidate:
                 audio_bytes = candidate
 
@@ -1429,8 +1444,7 @@ async def voice_briefing(req: VoiceBriefingRequest):
                 and not os.getenv("VOICE_PROVIDER", "").strip()
             )
             if not pytest_offline:
-                maybe_audio = synthesize_briefing(text)
-                candidate = await maybe_audio if inspect.isawaitable(maybe_audio) else maybe_audio
+                candidate = await _offload_blocking(synthesize_briefing, text)
                 if candidate:
                     audio_bytes = candidate
 
@@ -1552,8 +1566,7 @@ async def upload_evidence(request: Request):
     with contextlib.suppress(Exception):
         from .agent.vision import inspect_evidence_file  # type: ignore[import-not-found]
 
-        maybe_ev = inspect_evidence_file(saved_path)
-        inspected = await maybe_ev if inspect.isawaitable(maybe_ev) else maybe_ev
+        inspected = await _offload_blocking(inspect_evidence_file, saved_path)
         if isinstance(inspected, EvidencePayload):
             evidence = inspected
         elif isinstance(inspected, dict):
@@ -1678,8 +1691,9 @@ async def negotiate_vendor_call(req: NegotiateCallRequest | None = None):
         with contextlib.suppress(Exception):
             from .agent.negotiator import run_vendor_negotiation  # type: ignore[import-not-found]
 
-            maybe_neg = run_vendor_negotiation(claim_id, REAL, accept_floor_pct=body.floor_pct)
-            raw_neg = await maybe_neg if inspect.isawaitable(maybe_neg) else maybe_neg
+            raw_neg = await _offload_blocking(
+                run_vendor_negotiation, claim_id, REAL, accept_floor_pct=body.floor_pct
+            )
             negotiated = _normalize_negotiation_output(raw_neg, claim_id, claim_amount, floor_pct)
 
     if negotiated is None:
@@ -1800,8 +1814,7 @@ async def voice_turn_audio(req: TurnAudioRequest):
             and not os.getenv("VOICE_PROVIDER", "").strip()
         )
         if not pytest_turn_offline:
-            maybe_turn = synthesize_call_turn("agent", text)
-            candidate = await maybe_turn if inspect.isawaitable(maybe_turn) else maybe_turn
+            candidate = await _offload_blocking(synthesize_call_turn, "agent", text)
             if candidate:
                 audio_bytes = candidate
 
@@ -1818,8 +1831,7 @@ async def voice_turn_audio(req: TurnAudioRequest):
                 and not os.getenv("VOICE_PROVIDER", "").strip()
             )
             if not pytest_brief_offline:
-                maybe_audio = synthesize_briefing(text)
-                candidate = await maybe_audio if inspect.isawaitable(maybe_audio) else maybe_audio
+                candidate = await _offload_blocking(synthesize_briefing, text)
                 if candidate:
                     audio_bytes = candidate
 
@@ -1906,8 +1918,7 @@ async def voice_decision(request: Request):
                 kwargs["content_type"] = mime_type
             if "filename" in sig.parameters:
                 kwargs["filename"] = filename
-            maybe_res = transcribe_and_decide(audio_bytes, **kwargs)
-            res = await maybe_res if inspect.isawaitable(maybe_res) else maybe_res
+            res = await _offload_blocking(transcribe_and_decide, audio_bytes, **kwargs)
             if isinstance(res, tuple) and len(res) == 2:
                 transcript = str(res[0] or transcript)
                 decision = str(res[1])
@@ -2173,8 +2184,7 @@ async def _transcribe_operator_consult_audio(
                 kwargs["content_type"] = mime_type
             if "filename" in sig.parameters:
                 kwargs["filename"] = filename
-            maybe_out = fn(audio_bytes, **kwargs)
-            out = await maybe_out if inspect.isawaitable(maybe_out) else maybe_out
+            out = await _offload_blocking(fn, audio_bytes, **kwargs)
             if isinstance(out, str) and out.strip():
                 return out.strip()
             if isinstance(out, tuple) and out and isinstance(out[0], str) and out[0].strip():
@@ -2191,8 +2201,7 @@ async def _transcribe_operator_consult_audio(
         if callable(fn_el):
             sig = inspect.signature(fn_el)
             kwargs = {"mime_type": mime_type} if "mime_type" in sig.parameters else {}
-            maybe_out = fn_el(audio_bytes, **kwargs)
-            out = await maybe_out if inspect.isawaitable(maybe_out) else maybe_out
+            out = await _offload_blocking(fn_el, audio_bytes, **kwargs)
             if isinstance(out, str) and out.strip():
                 return out.strip()
             if isinstance(out, dict):

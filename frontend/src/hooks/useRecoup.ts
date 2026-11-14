@@ -784,7 +784,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           voiceRef.current &&
           turn.speaker === "agent" &&
           Boolean(turn.text) &&
-          !windowsEnabledRef.current;
+          !windowsEnabledRef.current &&
+          isConnected; // never auto-speak while the call is still ringing - the user hasn't picked up yet
 
         if (shouldAutoSpeakTurn && turn.text) {
           speakCallTurn("agent", turn.text, {

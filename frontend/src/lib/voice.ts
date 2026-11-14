@@ -651,6 +651,13 @@ export function speakCallTurn(
 
   const now = Date.now();
   if (!interrupt && cleanText === lastTurnKey && now - lastTurnAt < 2000) {
+    // Same line fired twice in quick succession (e.g. a duplicate SSE delivery) - skip
+    // re-synthesizing it, but still settle the caller's hooks so UI state (speaking/
+    // activeSpeaker flags) never gets stuck waiting for an onEnd that would otherwise
+    // never arrive.
+    hooks?.onStart?.();
+    hooks?.onProgress?.(1);
+    hooks?.onEnd?.();
     return;
   }
   lastTurnKey = cleanText;

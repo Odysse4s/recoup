@@ -58,9 +58,11 @@ def _clean_phase2_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path
         monkeypatch.delenv(env_key, raising=False)
     cache_dir = tmp_path / ".voice_cache"
     monkeypatch.setattr(call_audio_module, "VOICE_CACHE_DIR", cache_dir)
+    call_audio_module._turn_audio_lru.clear()
     for tool_name in _PHASE2_FORGE_TOOLS:
         REGISTRY.pop(tool_name, None)
     yield cache_dir
+    call_audio_module._turn_audio_lru.clear()
     for tool_name in _PHASE2_FORGE_TOOLS:
         REGISTRY.pop(tool_name, None)
 
@@ -168,6 +170,64 @@ class TestDualSpeakerCallSynthesis:
         assert synthesize_call_turn("agent", shared_line) == agent_audio
         assert synthesize_call_turn("counterparty", shared_line) == counterparty_audio
         assert len(requests_log) == call_count_before
+
+        # And once warm, repeated lines are served from the in-memory LRU without even
+        # touching disk (deleting the backing .mp3 files must not change the result).
+        for f in cached_files:
+            f.unlink()
+        assert synthesize_call_turn("agent", shared_line) == agent_audio
+        assert synthesize_call_turn("counterparty", shared_line) == counterparty_audio
+        assert len(requests_log) == call_count_before
+
+    def test_turn_audio_lru_evicts_oldest_entry_past_max_size(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        _clean_phase2_state: Path,
+    ) -> None:
+        monkeypatch.setenv("FAL_KEY", "fal-live-key")
+
+        post_count = {"n": 0}
+
+        class FalLruClient:
+            def __init__(self, **kwargs: Any) -> None:
+                pass
+
+            def __enter__(self) -> Self:
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                return None
+
+            def post(self, url: str, headers: dict[str, str], json: dict[str, Any]) -> _StubHTTPResponse:
+                post_count["n"] += 1
+                return _StubHTTPResponse(
+                    json_data={"audio": {"url": f"https://fal.media/turn-{post_count['n']}.mp3"}},
+                    content_type="application/json",
+                )
+
+            def get(self, url: str) -> _StubHTTPResponse:
+                return _StubHTTPResponse(content=f"MP3::{url}".encode(), content_type="audio/mpeg")
+
+        monkeypatch.setattr(call_audio_module.httpx, "Client", FalLruClient)
+
+        max_size = call_audio_module._TURN_AUDIO_LRU_MAX
+        first_line = "Line number zero, the oldest one."
+        synthesize_call_turn("agent", first_line)
+        for i in range(1, max_size + 5):
+            synthesize_call_turn("agent", f"Line number {i}, filler to push the LRU past capacity.")
+
+        assert len(call_audio_module._turn_audio_lru) == max_size
+        # Deleting the disk cache proves whether an entry is still warm in the LRU or not.
+        for f in call_audio_module.VOICE_CACHE_DIR.glob("*.mp3"):
+            f.unlink()
+
+        recent_line = f"Line number {max_size + 4}, filler to push the LRU past capacity."
+        calls_before = post_count["n"]
+        assert synthesize_call_turn("agent", recent_line) is not None  # still in the LRU
+        assert post_count["n"] == calls_before  # no new network call needed
+
+        assert synthesize_call_turn("agent", first_line) is not None  # evicted long ago -> refetched
+        assert post_count["n"] == calls_before + 1
 
     def test_elevenlabs_and_env_override_send_distinct_voice_ids(
         self,

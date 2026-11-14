@@ -9,6 +9,7 @@ import json
 import os
 import re
 import struct
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -234,11 +235,34 @@ def synthesize_grok_tts(text: str, voice: str | None = None) -> bytes | None:
     return None
 
 
+_TURN_AUDIO_LRU_MAX = 64
+_turn_audio_lru: OrderedDict[str, bytes] = OrderedDict()
+
+
+def _lru_get(cache_key: str) -> bytes | None:
+    hit = _turn_audio_lru.get(cache_key)
+    if hit is not None:
+        _turn_audio_lru.move_to_end(cache_key)
+    return hit
+
+
+def _lru_put(cache_key: str, audio_bytes: bytes) -> None:
+    _turn_audio_lru[cache_key] = audio_bytes
+    _turn_audio_lru.move_to_end(cache_key)
+    while len(_turn_audio_lru) > _TURN_AUDIO_LRU_MAX:
+        _turn_audio_lru.popitem(last=False)
+
+
 def synthesize_call_turn(
     speaker: Literal["agent", "counterparty"],
     text: str,
 ) -> bytes | None:
-    """Synthesize a vendor negotiation turn using distinct voices per speaker role."""
+    """Synthesize a vendor negotiation turn using distinct voices per speaker role.
+
+    Repeated lines (e.g. a recurring opening/confirmation phrase) hit an in-memory LRU
+    before even touching disk, so they come back in well under 100ms instead of paying
+    a disk read on every turn.
+    """
     cleaned = _SPEAKER_TAG_PREFIX_RE.sub("", (text or "").strip()).strip()
     if not cleaned:
         return None
@@ -251,11 +275,16 @@ def synthesize_call_turn(
     voice = _resolve_speaker_voice(role)
     cache_key = hashlib.sha256(f"{role}:{voice}:{cleaned}".encode()).hexdigest()
 
+    lru_hit = _lru_get(cache_key)
+    if lru_hit is not None:
+        return lru_hit
+
     cache_dir = _resolve_cache_dir()
     cache_path = cache_dir / f"{cache_key}.mp3"
     if cache_path.is_file():
         cached_bytes = cache_path.read_bytes()
         if cached_bytes:
+            _lru_put(cache_key, cached_bytes)
             return cached_bytes
 
     if "PYTEST_CURRENT_TEST" in os.environ and getattr(httpx.Client, "__module__", "").startswith("httpx"):
@@ -271,6 +300,7 @@ def synthesize_call_turn(
         grok_voice = "eve" if role == "counterparty" else "ara"
         grok_bytes = synthesize_grok_tts(cleaned, voice=grok_voice)
         if grok_bytes:
+            _lru_put(cache_key, grok_bytes)
             return grok_bytes
 
     order = ["fal", "wonderful", "elevenlabs"]
@@ -292,6 +322,7 @@ def synthesize_call_turn(
             if audio_bytes:
                 cache_dir.mkdir(parents=True, exist_ok=True)
                 cache_path.write_bytes(audio_bytes)
+                _lru_put(cache_key, audio_bytes)
                 return audio_bytes
         except httpx.HTTPError:
             continue

@@ -676,15 +676,22 @@ function OperatorEscalationCall({
     unlockAudioSession("play-and-record");
     onUnlockAudio();
 
-    // 2. Open warm mic MediaStream once
+    // 2. Play Recoup's opening question immediately, synchronously within this tap gesture -
+    //    onEnd transitions automatically into listening! This must fire BEFORE any `await`
+    //    below: delaying it behind a mic-permission prompt or a slow network round trip can
+    //    lose the browser's user-activation window (iOS Safari especially), which is why
+    //    pickup sometimes played no audio at all.
+    speakAgentLine(openingText, true);
+    setAnswered(true);
+
+    // 3. Open warm mic MediaStream once (can proceed while the opening line is speaking).
     const stream = await getWarmMicStream();
     if (stream) {
       setWarmStream(stream);
     }
 
-    setAnswered(true);
-
-    // 3. Ensure server consult is active and notify desktop immediately via pickup
+    // 4. Ensure server consult is active and notify desktop immediately via pickup. Neither
+    //    of these needs to block the opening line, so they run after it's already started.
     try {
       if (!consult?.active) {
         await fetch("/api/call/user-consult", {
@@ -705,9 +712,6 @@ function OperatorEscalationCall({
     } catch {
       // offline / demo
     }
-
-    // 4. Play Recoup opening question aloud; onEnd transitions automatically into listening!
-    speakAgentLine(openingText, true);
   }, [claimId, consult?.active, consult?.callId, onUnlockAudio, openingText, reqId, speakAgentLine]);
 
   // Red End Call Button Handler: tells server to hang up, transitions to completed summary
