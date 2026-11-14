@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import time
 import uuid
@@ -214,8 +215,15 @@ async def ask_human(run_id: str, payload: dict[str, Any], timeout: float | None 
         PENDING_PAYLOADS.pop(req_id, None)
 
 
-def _spoken_summary_for(tool_name: str, reason: str) -> str:
-    clean_tool = tool_name.replace("_", " ")
+def _spoken_summary_for(payload: dict[str, Any]) -> str:
+    with contextlib.suppress(Exception):
+        from ..voice.elevenlabs_agent import build_briefing_script
+
+        script = build_briefing_script(payload)
+        if script:
+            return script
+    clean_tool = str(payload.get("tool_name", "action")).replace("_", " ")
+    reason = str(payload.get("risk_reason", "policy threshold"))
     return (
         f"Recoup risk gate active: holding {clean_tool}. Reason: {reason}. "
         "Approve to commit staged changes, or reject to roll back."
@@ -242,18 +250,16 @@ async def replay(
                 log.undo_steps(committed_in_run, REGISTRY, real)
             return "blocked"
         if decision == RiskDecision.ASK:
-            outcome = await ask_human(
-                run_id,
-                {
-                    "req_id": f"req_{uuid.uuid4().hex[:8]}",
-                    "tool_name": call.name,
-                    "args": call.args,
-                    "diff_preview": previews.get(call.id, ""),
-                    "risk_reason": reason,
-                    "spoken_summary": _spoken_summary_for(call.name, reason),
-                    "report": report.model_dump(),
-                },
-            )
+            gate_payload: dict[str, Any] = {
+                "req_id": f"req_{uuid.uuid4().hex[:8]}",
+                "tool_name": call.name,
+                "args": call.args,
+                "diff_preview": previews.get(call.id, ""),
+                "risk_reason": reason,
+                "report": report.model_dump(),
+            }
+            gate_payload["spoken_summary"] = _spoken_summary_for(gate_payload)
+            outcome = await ask_human(run_id, gate_payload)
             BUS.emit(
                 run_id,
                 EventType.APPROVAL_RESULT,

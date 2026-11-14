@@ -185,7 +185,19 @@ def build_briefing_script(summary: dict[str, Any]) -> str:
             amount = float(num_candidate)
             break
     if amount is None:
-        m_amt = _EUR_AMOUNT_RE.search(corpus)
+        priority_corpus = "\n".join(
+            [
+                *(str(item.get("subject") or "") for item in outbox),
+                *(str(item.get("body") or "") for item in outbox),
+                *(
+                    line
+                    for line in corpus.splitlines()
+                    if "total" in line.lower() or "credit" in line.lower() or "claim" in line.lower()
+                ),
+                corpus,
+            ]
+        )
+        m_amt = _EUR_AMOUNT_RE.search(priority_corpus)
         if m_amt:
             raw_num = (m_amt.group(1) or m_amt.group(2) or "").replace(",", "")
             if raw_num:

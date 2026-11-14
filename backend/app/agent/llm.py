@@ -103,7 +103,7 @@ class FakeProvider:
             }
         else:
             notify_args = {
-                "to": notify.get("to", "accounts@kappafoods.example"),
+                "to": notify.get("to", "accounts@kappaoffice.example"),
                 "subject": notify.get("subject", "Claim notification"),
                 "body": notify.get("body", ""),
             }
@@ -161,8 +161,8 @@ class FakeProvider:
             if need_forge:
                 intents.append((f"[Forge Engineer] {forge_title}", f"MISSING:{forge_name}"))
             for m in self._mutations():
-                intents.append((f"[Shadow Executor] {m['intent']}", "upsert_row"))
-            intents.append((f"[Shadow Executor] {demo['report']['intent']}", "write_file"))
+                intents.append((f"[Rehearsal Executor] {m['intent']}", "upsert_row"))
+            intents.append((f"[Rehearsal Executor] {demo['report']['intent']}", "write_file"))
             intents.append((f"[Compliance Critic] {notify['intent']}", notify_tool))
             steps = [{"id": i, "intent": intent, "tool": tool} for i, (intent, tool) in enumerate(intents, 1)]
             return LLMResponse(
@@ -178,7 +178,7 @@ class FakeProvider:
             )
 
         # 2. Forge spec prompt (Forge Engineer)
-        if "return strict json matching forgespecpayload" in sys_low:
+        if "forgespecpayload" in sys_low:
             m = re.search(r"Missing tool:\s*([^\n\r]+)", user_last)
             req_name = m.group(1).strip() if m else forge_name
             if forge_cfg and req_name == forge_name:
@@ -225,7 +225,7 @@ class FakeProvider:
             return LLMResponse(text=json.dumps(spec_payload), input_tokens=220, output_tokens=130)
 
         # 3. Forge codegen prompt (Forge Engineer)
-        if "write only pure python code" in sys_low:
+        if "write only pure python" in sys_low:
             m = re.search(r"Function name:\s*([a-zA-Z0-9_]+)", user_last)
             fn_name = m.group(1).strip() if m else forge_name
             if forge_cfg and fn_name == forge_name and forge_cfg.get("code"):
@@ -319,7 +319,7 @@ class FakeProvider:
                                 "pk_col": mutation["pk_col"],
                                 "row": dict(mutation["row"]),
                             },
-                            thought=f"[Shadow Executor] {mutation['thought']}",
+                            thought=f"[Rehearsal Executor] {mutation['thought']}",
                         )
                     )
             report = demo["report"]
@@ -328,11 +328,11 @@ class FakeProvider:
                     id="c_report",
                     name="write_file",
                     args={"path": report["path"], "content": report["content"]},
-                    thought=f"[Shadow Executor] Writing claim dossier `{report['path']}`.",
+                    thought=f"[Rehearsal Executor] Writing claim dossier `{report['path']}`.",
                 )
             )
             return LLMResponse(
-                text="[Shadow Executor] Staging claim calculation, database holds, and claim letter.",
+                text="[Rehearsal Executor] Staging claim calculation, database holds, and claim letter.",
                 tool_calls=calls,
                 input_tokens=230,
                 output_tokens=105,

@@ -347,7 +347,7 @@ async def test_orchestrator_hero_run_rehearse_replay_undo_and_anticipate(tmp_pat
             ev = await q.get()
             seen_types.append(ev.type)
             if ev.type == EventType.APPROVAL_NEEDED:
-                assert ev.payload["spoken_summary"].startswith("Recoup risk gate active")
+                assert ev.payload["spoken_summary"].startswith("Recoup ")
                 req_id = ev.payload["req_id"]
                 if req_id in orchestrator.PENDING and not orchestrator.PENDING[req_id].done():
                     orchestrator.PENDING[req_id].set_result(True)
