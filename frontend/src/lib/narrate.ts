@@ -125,6 +125,7 @@ export function narrate(ev: ServerEvent, brandName = "Recoup"): string {
       const r = ev.payload as { status?: string; fingerprint?: string };
       if (r.status === "committed") return `Run committed. Live workspace SHA-256 fingerprint is now ${r.fingerprint ?? "updated"}.`;
       if (r.status === "aborted_by_human") return "Run aborted by manager. Live workspace preserved at its exact prior state.";
+      if (r.status === "timed_out") return "Risk Gate approval timed out before a decision arrived. Live workspace preserved unchanged.";
       if (r.status === "blocked") return "Run blocked by deterministic governance policy. Zero live changes made.";
       return `Run finished with status \`${r.status ?? "unknown"}\`.`;
     }

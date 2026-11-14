@@ -9,4 +9,4 @@ RUN uv sync --frozen --no-dev
 COPY app ./app
 
 EXPOSE 8000
-CMD ["uv", "run", "--no-dev", "uvicorn", "app.server:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uv", "run", "--no-dev", "uvicorn", "app.server:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/app", "--timeout-graceful-shutdown", "2"]

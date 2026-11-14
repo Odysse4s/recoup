@@ -742,13 +742,18 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       return;
     }
     try {
-      await fetch(`/api/approve/${reqId}`, {
+      const res = await fetch(`/api/approve/${reqId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ approved }),
       });
+      if (!res.ok) {
+        setRunStatus("error");
+        setNarration(`Risk Gate decision could not be delivered (HTTP ${res.status}). Workspace unchanged.`);
+      }
     } catch {
-      // offline demo
+      setRunStatus("error");
+      setNarration("Backend unreachable while submitting Risk Gate decision. Workspace unchanged.");
     }
     refreshState();
   };
