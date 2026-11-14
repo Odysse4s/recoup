@@ -32,7 +32,7 @@ from app.agent.llm import (
 )
 from app.agent.loop import critic_precheck_call, make_plan, run_agent_loop, verify_goal
 from app.contracts import EventType, PlanPayload, ToolCall, ToolResult
-from app.domain_config import FOLLOW_UP_GOAL, HERO_GOAL, get_domain
+from app.domain_config import ATLAS_GOAL, FOLLOW_UP_GOAL, HERO_GOAL, ORION_GOAL, get_domain
 
 
 class _StubTool:
@@ -126,6 +126,37 @@ def _build_stub_registry() -> dict[str, _StubTool]:
     }
 
 
+def _code_for_forge_tool(name: str) -> str:
+    """Find which seeded demo scenario forges a tool by this name and return its source."""
+    for scenario in get_domain()["demo_scenarios"].values():
+        forge_cfg = scenario.get("forge")
+        if forge_cfg and forge_cfg.get("name") == name:
+            return str(forge_cfg["code"])
+    raise KeyError(f"no seeded scenario forges a tool named {name!r}")
+
+
+def _make_fake_forge(registry: dict[str, _StubTool]) -> Any:
+    """Bypass the real sandboxed forge pipeline: exec the seeded tool's own source directly and
+    register it into the test's local stub registry, exactly as the real pipeline would if the
+    AST + 3/3 example checks passed."""
+
+    def _fake_forge(
+        llm: Any,
+        missing_name: str,
+        goal: str,
+        emit: Any = None,
+        save_dir: Path | None = None,
+        max_attempts: int = 3,
+    ) -> bool:
+        ns: dict[str, Any] = {}
+        exec(_code_for_forge_tool(missing_name), ns)  # noqa: S102
+        fn = ns[missing_name]
+        registry[missing_name] = _StubTool(missing_name, lambda args, _env, fn=fn: fn(args))
+        return True
+
+    return _fake_forge
+
+
 def test_fake_provider_plans_hero_and_followup_goals(tmp_path: Path) -> None:
     env = _seed_recoup_env(tmp_path)
     llm = FakeProvider()
@@ -159,7 +190,10 @@ def test_prompt_injection_firewall_and_forensic_auditor(tmp_path: Path) -> None:
     assert "[REDACTED_UNTRUSTED_DIRECTIVE" in clean
 
     ev_list = audit_workspace_evidence(env)
-    assert len(ev_list) == 2
+    # One evidence entry per seeded `inbox/*` file - derived rather than hardcoded so adding a
+    # new seeded scenario's receiving note doesn't make this assertion stale again.
+    expected_inbox_count = sum(1 for rel in get_domain()["files"] if rel.startswith("inbox/"))
+    assert len(ev_list) == expected_inbox_count
     poisoned_ev = next(e for e in ev_list if e.source == "inbox/D-1042_receiving_note.md")
     assert any("Security alert" in f for f in poisoned_ev.findings)
 
@@ -225,22 +259,7 @@ def test_run_agent_loop_end_to_end_multi_agent_and_three_way_verify(
     registry = _build_stub_registry()
     monkeypatch.setattr(loop_mod, "REGISTRY", registry)
 
-    def _fake_forge(
-        llm: Any,
-        missing_name: str,
-        goal: str,
-        emit: Any = None,
-        save_dir: Path | None = None,
-        max_attempts: int = 3,
-    ) -> bool:
-        code = get_domain()["demo"]["forge"]["code"]
-        ns: dict[str, Any] = {}
-        exec(code, ns)  # noqa: S102
-        fn = ns[missing_name]
-        registry[missing_name] = _StubTool(missing_name, lambda args, _env: fn(args))
-        return True
-
-    monkeypatch.setattr(loop_mod, "forge_missing_tool", _fake_forge)
+    monkeypatch.setattr(loop_mod, "forge_missing_tool", _make_fake_forge(registry))
 
     events: list[tuple[EventType, dict[str, Any], str | None]] = []
 
@@ -281,6 +300,89 @@ def test_run_agent_loop_end_to_end_multi_agent_and_three_way_verify(
     assert pred is not None
     assert "D-1017" in pred.evidence and "D-1031" in pred.evidence
     assert pred.goal_prompt == FOLLOW_UP_GOAL
+
+
+def test_run_agent_loop_end_to_end_orion_small_auto_sla_credit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """D-2010 (Orion): reuses compute_supplier_claim, auto-approved claim (<EUR 250)."""
+    monkeypatch.setenv("LLM_PROVIDER", "fake")
+    env = _seed_recoup_env(tmp_path)
+    registry = _build_stub_registry()
+    monkeypatch.setattr(loop_mod, "REGISTRY", registry)
+    monkeypatch.setattr(loop_mod, "forge_missing_tool", _make_fake_forge(registry))
+
+    async def _execute(call: ToolCall) -> ToolResult:
+        tool = registry.get(call.name)
+        if not tool:
+            return ToolResult(call_id=call.id, ok=False, error=f"missing {call.name}")
+        out = tool.do(call.args, env)
+        return ToolResult(call_id=call.id, ok=True, output=out)
+
+    done = asyncio.run(run_agent_loop(ORION_GOAL, _execute, shadow_env=env))
+    done_names = [c.name for c in done]
+
+    assert "read_file" in done_names
+    assert "query_db" in done_names
+    assert "compute_supplier_claim" in done_names  # reused tool, not a redundant new one
+    assert done_names.count("upsert_row") == 2
+    assert "write_file" in done_names
+    assert "send_email" in done_names
+
+    claim_call = next(
+        c for c in done if c.name == "upsert_row" and c.args.get("table") == "claims"
+    )
+    assert claim_call.args["row"]["id"] == "CLM-D-2010"
+    assert claim_call.args["row"]["amount"] == pytest.approx(14.70)
+
+    with contextlib.closing(sqlite3.connect(env.db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT amount, status FROM claims WHERE id = 'CLM-D-2010'").fetchone()
+    assert row is not None
+    assert row["amount"] == pytest.approx(14.70)
+    assert row["status"] == "drafted"
+
+
+def test_run_agent_loop_end_to_end_atlas_forges_new_tiered_discount_tool(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """D-3005 (Atlas): no existing tool fits, so a brand-new tool gets forged and used."""
+    monkeypatch.setenv("LLM_PROVIDER", "fake")
+    env = _seed_recoup_env(tmp_path)
+    registry = _build_stub_registry()
+    monkeypatch.setattr(loop_mod, "REGISTRY", registry)
+    monkeypatch.setattr(loop_mod, "forge_missing_tool", _make_fake_forge(registry))
+
+    async def _execute(call: ToolCall) -> ToolResult:
+        tool = registry.get(call.name)
+        if not tool:
+            return ToolResult(call_id=call.id, ok=False, error=f"missing {call.name}")
+        out = tool.do(call.args, env)
+        return ToolResult(call_id=call.id, ok=True, output=out)
+
+    done = asyncio.run(run_agent_loop(ATLAS_GOAL, _execute, shadow_env=env))
+    done_names = [c.name for c in done]
+
+    assert "read_file" in done_names
+    assert "query_db" in done_names
+    assert "compute_tiered_discount_claim" in done_names  # the new, dedicated forged tool
+    assert "compute_supplier_claim" not in done_names
+    assert done_names.count("upsert_row") == 2
+    assert "write_file" in done_names
+    assert "send_email" in done_names
+
+    claim_call = next(
+        c for c in done if c.name == "upsert_row" and c.args.get("table") == "claims"
+    )
+    assert claim_call.args["row"]["id"] == "CLM-D-3005"
+    assert claim_call.args["row"]["amount"] == pytest.approx(500.00)
+
+    with contextlib.closing(sqlite3.connect(env.db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT amount, status FROM claims WHERE id = 'CLM-D-3005'").fetchone()
+    assert row is not None
+    assert row["amount"] == pytest.approx(500.00)
+    assert row["status"] == "drafted"
 
 
 def test_three_way_reconciliation_catches_amount_mismatch(tmp_path: Path) -> None:

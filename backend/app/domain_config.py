@@ -20,9 +20,28 @@ BRAND: dict[str, str] = {
 PERSONA = "Finance & Workplace Operations Lead at a 350-person enterprise office"
 HERO_GOAL = "Audit shipment D-1042 against our Kappa Office Systems contract, hold the overbilled invoice, and send the credit claim"
 FOLLOW_UP_GOAL = "Recover unclaimed vendor credits across earlier Kappa Office Systems shipments D-1017 and D-1031"
+ORION_GOAL = (
+    "Audit shipment D-2010 against our Orion Breakroom Supplies contract for the SLA "
+    "late-delivery penalty and stage the credit claim on invoice INV-8801."
+)
+ATLAS_GOAL = (
+    "Audit shipment D-3005 against our Atlas Paper & Stationery volume-discount contract for the "
+    "correct tiered pricing and stage the credit claim on invoice INV-9901."
+)
 
 CLAIM_LETTER_PATH = "claims/CLM-D-1042.md"
 FOLLOW_UP_PATH = "claims/CLM-KAPPA-FOLLOWUP.md"
+ORION_CLAIM_LETTER_PATH = "claims/CLM-D-2010.md"
+ATLAS_CLAIM_LETTER_PATH = "claims/CLM-D-3005.md"
+
+# Goal-text markers used to dispatch the offline FakeProvider script to the right seeded
+# scenario. Checked in order; the first match wins. Anything that matches none of these
+# (including the hero/follow-up goals) falls back to the original hero `demo` dict below -
+# this is what keeps every existing hero/follow-up test byte-for-byte unaffected.
+GOAL_SCENARIO_MARKERS: dict[str, tuple[str, ...]] = {
+    "orion": ("d-2010", "orion"),
+    "atlas": ("d-3005", "atlas"),
+}
 
 _FORGE_CODE = '''def compute_supplier_claim(args: dict) -> dict:
     billed = int(args.get("qty_billed", 0))
@@ -75,6 +94,71 @@ _FOLLOW_UP = """# Follow-up Vendor Audit: Kappa Office Systems S.A.
 | **Total** | | | **EUR 175.00** |
 """
 
+_ORION_CLAIM_LETTER = """# Vendor Credit Claim CLM-D-2010: Orion Breakroom Supplies Ltd.
+
+**Shipment:** D-2010 (Premium Coffee Beans 1kg Bag, SKU COF-BEAN)
+**Invoice:** INV-8801 (billed EUR 980.00)
+
+| Line item | Basis | Amount |
+|---|---|---|
+| SLA late-delivery penalty | 3 days x 0.5% of EUR 980.00 accepted goods | EUR 14.70 |
+| **Total credit note requested** | | **EUR 14.70** |
+
+Per clause 2 of our Master Supply Agreement, please issue a credit note for EUR 14.70
+against INV-8801 within 7 business days. Facilities receiving log attached.
+"""
+
+# No overcharge/shortage/damage; every line item in compute_supplier_claim collapses to zero
+# except the late penalty, so D-2010 reuses the same sandbox-verified tool rather than forging
+# a second one that would just be `compute_supplier_claim` with half its arguments at zero.
+_ORION_FORGE_CALL_ARGS = {
+    "qty_billed": 100, "qty_received": 100, "qty_damaged": 0,
+    "billed_unit_price": 9.80, "contract_unit_price": 9.80, "days_late": 3,
+    "late_penalty_pct_per_day": 0.5, "max_penalty_pct": 5.0,
+}
+
+_ATLAS_FORGE_CODE = '''def compute_tiered_discount_claim(args: dict) -> dict:
+    qty = int(args.get("qty", 0))
+    billed_unit_price = float(args.get("billed_unit_price", 0))
+    list_unit_price = float(args.get("list_unit_price", 0))
+    tier_1_min_qty = int(args.get("tier_1_min_qty", 0))
+    tier_1_discount_pct = float(args.get("tier_1_discount_pct", 0))
+    tier_2_min_qty = int(args.get("tier_2_min_qty", 0))
+    tier_2_discount_pct = float(args.get("tier_2_discount_pct", 0))
+
+    if qty >= tier_2_min_qty and tier_2_min_qty > 0:
+        correct_discount_pct = tier_2_discount_pct
+    elif qty >= tier_1_min_qty and tier_1_min_qty > 0:
+        correct_discount_pct = tier_1_discount_pct
+    else:
+        correct_discount_pct = 0.0
+
+    correct_unit_price = list_unit_price * (1 - correct_discount_pct / 100)
+    overcharge_per_unit = max(0.0, billed_unit_price - correct_unit_price)
+    total = round(overcharge_per_unit * qty, 2)
+    return {
+        "correct_discount_pct": correct_discount_pct,
+        "correct_unit_price": round(correct_unit_price, 2),
+        "overcharge_per_unit": round(overcharge_per_unit, 2),
+        "total": total,
+    }
+'''
+
+_ATLAS_CLAIM_LETTER = """# Vendor Credit Claim CLM-D-3005: Atlas Paper & Stationery Co.
+
+**Shipment:** D-3005 (Premium A4 Copy Paper, SKU PPR-A4)
+**Invoice:** INV-9901 (billed EUR 9,500.00)
+
+| Line item | Basis | Amount |
+|---|---|---|
+| Wrong volume-discount tier | 1,000 cases x (EUR 9.50 billed - EUR 9.00 correct 10%-tier price) | EUR 500.00 |
+| **Total credit note requested** | | **EUR 500.00** |
+
+Per clause 2 of our Master Supply Agreement, a 1,000-case order qualifies for the 10% volume
+tier (EUR 9.00/case), not the 5% tier (EUR 9.50/case) applied on this invoice. Please issue a
+credit note for EUR 500.00 against INV-9901 within 14 days. Facilities receiving log attached.
+"""
+
 DOMAIN: dict[str, Any] = {
     "label": "Enterprise Vendor Ops",
     **BRAND,
@@ -101,14 +185,21 @@ DOMAIN: dict[str, Any] = {
         {
             "title": "Audit Late Coffee Delivery & Auto-Stage Small SLA Credit",
             "badge": "AUTO-RESOLVE",
-            "goal": (
-                "Audit shipment D-2010 against our Orion Breakroom Supplies contract for the SLA "
-                "late-delivery penalty and stage the credit claim on invoice INV-8801."
-            ),
+            "goal": ORION_GOAL,
             "desc": (
                 "Shows the risk gate's threshold in action: a EUR 14.70 late-delivery credit is small "
                 "enough to auto-commit to the ERP, while dispatching the vendor email still pauses for "
                 "a human tap."
+            ),
+        },
+        {
+            "title": "Forge a Tiered-Discount Calculator & Catch the Wrong Pricing Tier",
+            "badge": "NEW TOOL",
+            "goal": ATLAS_GOAL,
+            "desc": (
+                "No existing calculator fits: the agent forges a brand-new tiered volume-discount "
+                "reconciliation tool from scratch, sandbox-verifies it, and uses it to catch a "
+                "EUR 500.00 pricing-tier shortfall on a 1,000-case paper order."
             ),
         },
     ],
@@ -142,6 +233,21 @@ DOMAIN: dict[str, Any] = {
             "1. COF-BEAN contracted unit price: EUR 9.80 per unit for FY2026.\n"
             "2. Late SLA delivery penalty: 0.5% of accepted goods value per day late, capped at 5%.\n"
             "3. Credit claims must be submitted within 14 days of delivery.\n"
+        ),
+        "inbox/D-3005_receiving_note.md": (
+            "# Facilities Receiving Log: Shipment D-3005\n\n"
+            "- Vendor: Atlas Paper & Stationery Co.\n"
+            "- SLA promised date: 2026-11-08, delivered: 2026-11-08 (on time).\n"
+            "- PO quantity: 1000 cases of PPR-A4; Facilities stockroom counted 1000 cases delivered, "
+            "all accepted in good condition, no damage.\n"
+            "- Logged by: Workplace Facilities, HQ Ground Floor\n"
+        ),
+        "contracts/atlas_paper_terms.md": (
+            "# Master Supply Agreement: Atlas Paper & Stationery Co.\n\n"
+            "1. PPR-A4 list price: EUR 10.00 per case (10 reams) for FY2026.\n"
+            "2. Volume discount tiers apply to the per-case price based on total cases ordered on a "
+            "single PO: 500-999 cases -> 5% off (EUR 9.50/case); 1000+ cases -> 10% off (EUR 9.00/case).\n"
+            "3. Credit claims for pricing/tier discrepancies must be submitted within 14 days of delivery.\n"
         ),
         "policies/claims_policy.md": (
             "# Enterprise Agent Safety & Governance Policy\n\n"
@@ -212,11 +318,13 @@ DOMAIN: dict[str, Any] = {
             ("SUP-KAPPA", "Kappa Office Systems S.A.", "accounts@kappaoffice.example", "+30 210 000 0001"),
             ("SUP-NOVA", "Nova Workplace Cloud", "billing@novacloud.example", "+30 210 000 0002"),
             ("SUP-ORION", "Orion Breakroom Supplies Ltd.", "accounts@orionbreakroom.example", "+30 210 000 0003"),
+            ("SUP-ATLAS", "Atlas Paper & Stationery Co.", "accounts@atlaspaper.example", "+30 210 000 0004"),
         ],
         "contract_prices": [
             (1, "SUP-KAPPA", "HUB-USBC", "USB-C Enterprise Workstation Hub", 17.50, 1.0, 10.0),
             (2, "SUP-NOVA", "KEY-MECH", "Wireless Office Keyboard", 14.20, 0.5, 5.0),
             (3, "SUP-ORION", "COF-BEAN", "Premium Coffee Beans 1kg Bag", 9.80, 0.5, 5.0),
+            (4, "SUP-ATLAS", "PPR-A4", "Premium A4 Copy Paper (Case of 10 Reams)", 10.00, 0.0, 0.0),
         ],
         "deliveries": [
             ("D-1017", "SUP-KAPPA", "HUB-USBC", 80, 74, 0, "2026-11-02", "2026-11-02", "received"),
@@ -224,6 +332,7 @@ DOMAIN: dict[str, Any] = {
             ("D-1042", "SUP-KAPPA", "HUB-USBC", 120, 104, 6, "2026-11-10", "2026-11-12", "received"),
             ("D-1050", "SUP-NOVA", "KEY-MECH", 40, 40, 0, "2026-11-11", "2026-11-11", "received"),
             ("D-2010", "SUP-ORION", "COF-BEAN", 100, 100, 0, "2026-11-12", "2026-11-15", "received"),
+            ("D-3005", "SUP-ATLAS", "PPR-A4", 1000, 1000, 0, "2026-11-08", "2026-11-08", "received"),
         ],
         "invoices": [
             ("INV-7702", "SUP-KAPPA", "D-1017", 80, 17.50, 1400.00, "paid"),
@@ -231,6 +340,7 @@ DOMAIN: dict[str, Any] = {
             ("INV-7781", "SUP-KAPPA", "D-1042", 120, 18.90, 2268.00, "unpaid"),
             ("INV-7790", "SUP-NOVA", "D-1050", 40, 14.20, 568.00, "unpaid"),
             ("INV-8801", "SUP-ORION", "D-2010", 100, 9.80, 980.00, "unpaid"),
+            ("INV-9901", "SUP-ATLAS", "D-3005", 1000, 9.50, 9500.00, "unpaid"),
         ],
         "claims": [],
     },
@@ -249,6 +359,7 @@ DOMAIN: dict[str, Any] = {
         "opening_counter_pct": 70,
     },
     "demo": {
+        "delivery_id": "D-1042",
         "evidence": {
             "intent": "Read IT receiving log for shipment D-1042",
             "path": "inbox/D-1042_receiving_note.md",
@@ -365,6 +476,224 @@ DOMAIN: dict[str, Any] = {
         },
     },
 }
+
+# Orion (D-2010): a deliberately small, SLA-penalty-only claim under the EUR 250 auto-approval
+# threshold. Reuses the already sandbox-verified `compute_supplier_claim` tool (see comment on
+# `_ORION_FORGE_CALL_ARGS` above) instead of forging a redundant second calculator.
+_ORION_DEMO: dict[str, Any] = {
+    "delivery_id": "D-2010",
+    "evidence": {
+        "intent": "Read Facilities receiving log for shipment D-2010",
+        "path": "inbox/D-2010_receiving_note.md",
+        "thought": "Checking Facilities receiving log against the Orion purchase order.",
+    },
+    "lookup": {
+        "intent": "Cross-check shipment, AP invoice and master contract rates",
+        "sql": (
+            "SELECT d.id, d.qty_ordered, d.qty_received, d.qty_damaged, d.promised_date, "
+            "d.delivered_date, i.id AS invoice_id, i.qty_billed, i.unit_price AS billed_unit_price, "
+            "i.amount, c.unit_price AS contract_unit_price, c.late_penalty_pct_per_day, "
+            "c.max_penalty_pct FROM deliveries d JOIN invoices i ON i.delivery_id = d.id "
+            "JOIN contract_prices c ON c.supplier_id = d.supplier_id AND c.sku = d.sku "
+            "WHERE d.id = 'D-2010'"
+        ),
+    },
+    "forge": {
+        "name": "compute_supplier_claim",
+        "trigger_keywords": ["recover", "claim", "owes", "credit", "audit"],
+        "step_title": "Synthesize & verify SLA contract claim calculator",
+        "purpose": (
+            "Compute unit overcharge, short-shipped, DOA damaged and capped SLA late-delivery credits "
+            "for an office vendor shipment and return each line item plus total rounded to cents"
+        ),
+        "signature": "def compute_supplier_claim(args: dict) -> dict",
+        "code": _FORGE_CODE,
+        "examples": DOMAIN["demo"]["forge"]["examples"],
+        "call_args": _ORION_FORGE_CALL_ARGS,
+    },
+    "mutations": [
+        {
+            "intent": "Stage vendor credit claim CLM-D-2010 for EUR 14.70",
+            "table": "claims",
+            "pk_col": "id",
+            "row": {
+                "id": "CLM-D-2010", "supplier_id": "SUP-ORION", "delivery_id": "D-2010",
+                "invoice_id": "INV-8801", "amount": 14.70,
+                "reason": "late 14.70",
+                "status": "drafted",
+            },
+            "thought": "Staging EUR 14.70 vendor credit claim against shipment D-2010.",
+        },
+        {
+            "intent": "Place AP payment hold (`disputed`) on invoice INV-8801",
+            "table": "invoices",
+            "pk_col": "id",
+            "row": {"id": "INV-8801", "status": "disputed"},
+            "thought": "Holding INV-8801 in AP so finance does not auto-pay before the credit lands.",
+        },
+    ],
+    "report": {
+        "intent": "Draft formal vendor credit claim memo",
+        "path": ORION_CLAIM_LETTER_PATH,
+        "content": _ORION_CLAIM_LETTER,
+    },
+    "notify": {
+        "intent": "Dispatch credit claim notice to Orion Breakroom Supplies AR desk",
+        "criterion": "claim email queued for Orion Breakroom Supplies",
+        "to": "accounts@orionbreakroom.example",
+        "subject": "Credit Claim CLM-D-2010 on Invoice INV-8801: EUR 14.70",
+        "body": (
+            "Hello Orion Breakroom Supplies AR team,\n\nShipment D-2010 arrived 3 days past SLA. "
+            "Please issue a credit note of EUR 14.70 against INV-8801. Full audit attached.\n\n"
+            "Regards,\nFinance & Workplace Ops"
+        ),
+    },
+}
+
+# Atlas (D-3005): no existing tool fits a tiered volume-discount reconciliation, so this scenario
+# forges a brand-new `compute_tiered_discount_claim` tool from scratch and sandbox-verifies it.
+_ATLAS_DEMO: dict[str, Any] = {
+    "delivery_id": "D-3005",
+    "evidence": {
+        "intent": "Read Facilities receiving log for shipment D-3005",
+        "path": "inbox/D-3005_receiving_note.md",
+        "thought": "Checking Facilities receiving log against the Atlas purchase order.",
+    },
+    "lookup": {
+        "intent": "Cross-check shipment, AP invoice and master contract volume-discount tiers",
+        "sql": (
+            "SELECT d.id, d.qty_ordered, d.qty_received, i.id AS invoice_id, i.qty_billed, "
+            "i.unit_price AS billed_unit_price, i.amount, c.unit_price AS list_unit_price "
+            "FROM deliveries d JOIN invoices i ON i.delivery_id = d.id "
+            "JOIN contract_prices c ON c.supplier_id = d.supplier_id AND c.sku = d.sku "
+            "WHERE d.id = 'D-3005'"
+        ),
+    },
+    "forge": {
+        "name": "compute_tiered_discount_claim",
+        "trigger_keywords": ["recover", "claim", "owes", "credit", "audit", "tier", "pricing", "discount"],
+        "step_title": "Synthesize & verify tiered volume-discount reconciliation calculator",
+        "purpose": (
+            "Determine the correct volume-discount tier for a bulk order, compare it against the "
+            "billed unit price, and return the per-unit overcharge and total credit owed"
+        ),
+        "signature": "def compute_tiered_discount_claim(args: dict) -> dict",
+        "code": _ATLAS_FORGE_CODE,
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "qty": {"type": "integer"},
+                "billed_unit_price": {"type": "number"},
+                "list_unit_price": {"type": "number"},
+                "tier_1_min_qty": {"type": "integer"},
+                "tier_1_discount_pct": {"type": "number"},
+                "tier_2_min_qty": {"type": "integer"},
+                "tier_2_discount_pct": {"type": "number"},
+            },
+            "required": [
+                "qty", "billed_unit_price", "list_unit_price",
+                "tier_1_min_qty", "tier_1_discount_pct", "tier_2_min_qty", "tier_2_discount_pct",
+            ],
+        },
+        "examples": [
+            {
+                "in": {
+                    "qty": 1000, "billed_unit_price": 9.50, "list_unit_price": 10.00,
+                    "tier_1_min_qty": 500, "tier_1_discount_pct": 5.0,
+                    "tier_2_min_qty": 1000, "tier_2_discount_pct": 10.0,
+                },
+                "out": {
+                    "correct_discount_pct": 10.0, "correct_unit_price": 9.0,
+                    "overcharge_per_unit": 0.5, "total": 500.0,
+                },
+            },
+            {
+                "in": {
+                    "qty": 600, "billed_unit_price": 10.00, "list_unit_price": 10.00,
+                    "tier_1_min_qty": 500, "tier_1_discount_pct": 5.0,
+                    "tier_2_min_qty": 1000, "tier_2_discount_pct": 10.0,
+                },
+                "out": {
+                    "correct_discount_pct": 5.0, "correct_unit_price": 9.5,
+                    "overcharge_per_unit": 0.5, "total": 300.0,
+                },
+            },
+            {
+                "in": {
+                    "qty": 200, "billed_unit_price": 10.00, "list_unit_price": 10.00,
+                    "tier_1_min_qty": 500, "tier_1_discount_pct": 5.0,
+                    "tier_2_min_qty": 1000, "tier_2_discount_pct": 10.0,
+                },
+                "out": {
+                    "correct_discount_pct": 0.0, "correct_unit_price": 10.0,
+                    "overcharge_per_unit": 0.0, "total": 0.0,
+                },
+            },
+        ],
+        "call_args": {
+            "qty": 1000, "billed_unit_price": 9.50, "list_unit_price": 10.00,
+            "tier_1_min_qty": 500, "tier_1_discount_pct": 5.0,
+            "tier_2_min_qty": 1000, "tier_2_discount_pct": 10.0,
+        },
+    },
+    "mutations": [
+        {
+            "intent": "Stage vendor credit claim CLM-D-3005 for EUR 500.00",
+            "table": "claims",
+            "pk_col": "id",
+            "row": {
+                "id": "CLM-D-3005", "supplier_id": "SUP-ATLAS", "delivery_id": "D-3005",
+                "invoice_id": "INV-9901", "amount": 500.00,
+                "reason": "wrong volume-discount tier applied: billed 5% tier instead of 10% tier",
+                "status": "drafted",
+            },
+            "thought": "Staging EUR 500.00 vendor credit claim against shipment D-3005.",
+        },
+        {
+            "intent": "Place AP payment hold (`disputed`) on invoice INV-9901",
+            "table": "invoices",
+            "pk_col": "id",
+            "row": {"id": "INV-9901", "status": "disputed"},
+            "thought": "Holding INV-9901 in AP so finance does not auto-pay the mispriced invoice.",
+        },
+    ],
+    "report": {
+        "intent": "Draft formal vendor credit claim memo",
+        "path": ATLAS_CLAIM_LETTER_PATH,
+        "content": _ATLAS_CLAIM_LETTER,
+    },
+    "notify": {
+        "intent": "Dispatch credit claim notice to Atlas Paper & Stationery AR desk",
+        "criterion": "claim email queued for Atlas Paper & Stationery",
+        "to": "accounts@atlaspaper.example",
+        "subject": "Credit Claim CLM-D-3005 on Invoice INV-9901: EUR 500.00",
+        "body": (
+            "Hello Atlas Paper & Stationery AR team,\n\nShipment D-3005 (1,000 cases) was billed at "
+            "the 5% volume-discount tier (EUR 9.50/case) instead of the 10% tier (EUR 9.00/case) our "
+            "order volume qualifies for. Please issue a credit note of EUR 500.00 against INV-9901. "
+            "Full audit attached.\n\nRegards,\nFinance & Workplace Ops"
+        ),
+    },
+}
+
+# Scenario registry + goal dispatch for the offline FakeProvider script. `DOMAIN["demo"]` is left
+# completely untouched above so every existing hero/follow-up test keeps reading exactly what it
+# always has; this is purely additive.
+DOMAIN["demo_scenarios"] = {
+    "hero": DOMAIN["demo"],
+    "orion": _ORION_DEMO,
+    "atlas": _ATLAS_DEMO,
+}
+
+
+def resolve_demo_for_goal(goal: str) -> dict[str, Any]:
+    """Pick the seeded `demo` script matching a submitted goal's text; defaults to the hero D-1042
+    scenario for the hero goal itself, the D-1017/D-1031 follow-up goal, and anything unrecognized."""
+    low = (goal or "").lower()
+    for scenario_id, markers in GOAL_SCENARIO_MARKERS.items():
+        if any(marker in low for marker in markers):
+            return DOMAIN["demo_scenarios"][scenario_id]
+    return DOMAIN["demo"]
 
 
 def get_domain() -> dict[str, Any]:

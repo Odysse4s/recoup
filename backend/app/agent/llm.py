@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ..contracts import ToolCall
-from ..domain_config import get_domain
+from ..domain_config import get_domain, resolve_demo_for_goal
 
 CACHE_DIR = Path(os.getenv("LLM_CACHE_DIR", ".llm_cache"))
 
@@ -62,10 +62,10 @@ class FakeProvider:
     def __init__(self) -> None:
         self.turn = 0
         self.known_tables: set[str] = set()
+        self._demo_cache: dict[str, Any] | None = None
 
-    @staticmethod
-    def _demo() -> dict[str, Any]:
-        return get_domain()["demo"]
+    def _demo(self) -> dict[str, Any]:
+        return self._demo_cache if self._demo_cache is not None else get_domain()["demo"]
 
     def _mutations(self) -> list[dict[str, Any]]:
         demo = self._demo()
@@ -84,6 +84,19 @@ class FakeProvider:
         sys_low = system.lower()
         user_first = str(messages[0].get("content", "")) if messages else ""
         user_last = str(messages[-1].get("content", "")) if messages else ""
+        if self._demo_cache is None:
+            # The planner call is always the first `complete()` invocation of a run (see
+            # `run_agent_loop`'s phase ordering) and its single message embeds "Goal: <goal>"
+            # (the anticipate prompt uses "Completed goal: <goal>"); resolve and cache the
+            # scenario here so every later call in this run (forge spec/codegen, ReAct turns,
+            # critic) sees the SAME scenario, regardless of that later call's own message shape.
+            # Match only up to the end of that one line (`.` doesn't cross `\n` without
+            # re.DOTALL) so a goal line followed by a full workspace-evidence dump - which may
+            # itself mention other scenarios' supplier/delivery names - never gets scanned.
+            goal_source = user_last if re.search(r"[Gg]oal:", user_last) else user_first
+            m = re.search(r"[Gg]oal:\s*(.*)", goal_source)
+            goal_text = m.group(1).strip() if m else goal_source.strip()
+            self._demo_cache = resolve_demo_for_goal(goal_text)
         demo = self._demo()
         forge_cfg: dict[str, Any] | None = demo.get("forge")
         forge_name = str((forge_cfg or {}).get("name") or "compute_supplier_claim")
@@ -305,7 +318,10 @@ class FakeProvider:
                         id="c_forge",
                         name=forge_name,
                         args=call_args,
-                        thought=f"[Forge Engineer] Running sandbox-verified `{forge_name}` on delivery D-1042.",
+                        thought=(
+                            f"[Forge Engineer] Running sandbox-verified `{forge_name}` on delivery "
+                            f"{demo.get('delivery_id', 'the shipment')}."
+                        ),
                     )
                 )
             if "upsert_row" in tool_names:
