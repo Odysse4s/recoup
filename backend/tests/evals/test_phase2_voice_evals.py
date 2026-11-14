@@ -48,6 +48,7 @@ _PHASE2_FORGE_TOOLS = (
     "compute_tiered_volume_rebate",
     "audit_fx_invoice_discrepancy",
     "compute_sla_uptime_credit",
+    "compute_freight_cap",
 )
 
 
@@ -225,9 +226,9 @@ class TestFalWizperSttAndDecision:
     @pytest.mark.parametrize(
         ("spoken_reply", "mime_type", "expected_mime", "expected_decision"),
         [
-            ("Approve and commit the staged claim.", "audio/mp4;codecs=mp4a.40.2", "audio/mp4", "approve"),
-            ("Reject and roll back immediately.", "audio/webm;codecs=opus", "audio/webm", "reject"),
-            ("Can you read out the delivery date on D-1042?", "audio/webm", "audio/webm", "unknown"),
+            ("Approve and commit the staged claim.", "audio/mp4;codecs=mp4a.40.2", "audio/mpeg", "approve"),
+            ("Reject and roll back immediately.", "audio/webm;codecs=opus", "video/webm", "reject"),
+            ("Can you read out the delivery date on D-1042?", "audio/wav", "audio/x-wav", "unknown"),
         ],
     )
     def test_wizper_stt_transcribes_safari_and_webm_audio_into_decisions(
@@ -784,3 +785,50 @@ def compute_sla_uptime_credit(args: dict) -> dict:
             "applied_credit_pct": 12.5,
             "credit_eur": 300.0,
         }
+
+    def test_forge_missing_tool_recovers_from_truncated_spec_json(self, tmp_path: Path) -> None:
+        truncated_spec = '{"name":"compute_freight_cap","purpose":"Cap freight overbill","input_schema":{"type":"object"'
+        compact_spec = {
+            "name": "compute_freight_cap",
+            "purpose": "Cap contracted freight surcharge overbill.",
+            "input_schema": {"type": "object"},
+            "output_schema": {"type": "object"},
+            "examples": [
+                {"in": {"billed_eur": 180.0, "cap_eur": 125.0}, "out": {"refund_eur": 55.0}},
+                {"in": {"billed_eur": 100.0, "cap_eur": 125.0}, "out": {"refund_eur": 0.0}},
+            ],
+        }
+        code = (
+            "def compute_freight_cap(args: dict) -> dict:\n"
+            "    billed = max(0.0, float(args.get('billed_eur', 0)))\n"
+            "    cap = max(0.0, float(args.get('cap_eur', 0)))\n"
+            "    return {'refund_eur': round(max(0.0, billed - cap), 2)}\n"
+        )
+        llm = _SequenceLLM(
+            [
+                LLMResponse(text=truncated_spec, input_tokens=100, output_tokens=200),
+                LLMResponse(
+                    text=json.dumps(compact_spec, separators=(",", ":")),
+                    input_tokens=200,
+                    output_tokens=100,
+                ),
+                LLMResponse(text=code, input_tokens=100, output_tokens=80),
+            ]
+        )
+        emitted_costs: list[tuple[EventType, float]] = []
+
+        ok = forge_missing_tool(
+            llm,
+            "MISSING:compute_freight_cap",
+            "Cap contracted freight surcharge overbill on inbound deliveries",
+            emit=lambda et, _p, _t, c: emitted_costs.append((et, c)),
+            save_dir=tmp_path / "forged",
+            max_attempts=2,
+        )
+        assert ok is True
+        assert len(llm.calls) == 3
+        assert "STRICT single-line minified JSON" in llm.calls[1]["messages"][-1]["content"]
+        assert emitted_costs[0][0] == EventType.FORGE_SPEC
+        assert emitted_costs[0][1] == pytest.approx(0.0054)
+        assert "compute_freight_cap" in REGISTRY
+

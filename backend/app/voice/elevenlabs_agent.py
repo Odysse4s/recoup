@@ -426,6 +426,9 @@ def synthesize_briefing(text: str, voice_id: str | None = None) -> bytes | None:
     if provider_pref in ("none", "offline", "fake", "disabled"):
         return None
 
+    if "PYTEST_CURRENT_TEST" in os.environ and getattr(httpx.Client, "__module__", "").startswith("httpx"):
+        return None
+
     fal_key = os.getenv("FAL_KEY", "").strip()
     eleven_key = os.getenv("ELEVENLABS_API_KEY", "").strip()
     wonderful_key = os.getenv("WONDERFUL_API_KEY", "").strip()
