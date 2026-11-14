@@ -306,7 +306,7 @@ async def speculate_next_offer(completed_goal: str, real: Env, run_id: str) -> P
         except ImportError:
             return None
 
-    pred = predict_fn(completed_goal, real, feedback_path=Path("feedback.json"))
+    pred = await asyncio.to_thread(predict_fn, completed_goal, real, feedback_path=Path("feedback.json"))
     if not pred:
         return None
     commit_plan, report, fp, previews = await rehearse(pred.goal_prompt, real, run_id, emit_events=False)

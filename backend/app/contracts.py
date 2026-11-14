@@ -46,6 +46,7 @@ class ToolCall(BaseModel):
     name: str
     args: dict[str, Any] = {}
     thought: str | None = None
+    thought_signature: str | None = None
 
 
 class ToolResult(BaseModel):
