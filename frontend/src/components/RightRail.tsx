@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   ChevronDown,
   Database,
+  Euro,
   FileDiff,
   FileText,
   History,
@@ -19,14 +20,14 @@ import {
   XCircle,
   type LucideIcon,
 } from "lucide-react";
-import { useId, useState, type KeyboardEvent } from "react";
-import type { AnticipateOfferPayload, ApprovalNeededPayload, ChangeReport } from "../contracts";
+import { useId, useMemo, useState, type KeyboardEvent } from "react";
+import type { AnticipateOfferPayload, ApprovalNeededPayload, ChangeReport, ServerEvent } from "../contracts";
 import { anchorRef } from "../lib/anchors";
 import { highlightLine } from "../lib/highlight";
 import { reportCounts } from "../lib/narrate";
 import { soundFx } from "../lib/sound";
 import type { WorkspaceState } from "../lib/types";
-import { btn, Chip, cx, Panel, type Tone } from "./ui";
+import { btn, Chip, cx, Dot, Panel, type Tone } from "./ui";
 
 const withClick = (fn: () => void) => () => {
   soundFx.playUiClick();
@@ -633,5 +634,81 @@ export function StatsStrip({
       <Stat label="Synthesized" value={String(forged)} tone="text-forge" />
       <Stat label="Risk gate" value={pending ? "1 held" : "0"} tone={pending ? "text-danger" : "text-ink"} />
     </div>
+  );
+}
+
+const VOICE_EVENT_TYPES = new Set(["call_start", "call_turn", "call_end"]);
+
+function fmtEur(v: number): string {
+  return v < 0.1 ? `€${v.toFixed(4)}` : `€${v.toFixed(2)}`;
+}
+
+export function CostMonitor({ events, totalCost }: { events: ServerEvent[]; totalCost: number }) {
+  const { reasoningCost, voiceCost, billedCount } = useMemo(() => {
+    let reasoning = 0;
+    let voice = 0;
+    let billed = 0;
+    for (const e of events) {
+      if (!e.cost_eur) continue;
+      billed += 1;
+      if (VOICE_EVENT_TYPES.has(e.type)) voice += e.cost_eur;
+      else reasoning += e.cost_eur;
+    }
+    return { reasoningCost: reasoning, voiceCost: voice, billedCount: billed };
+  }, [events]);
+
+  const breakdownTotal = reasoningCost + voiceCost;
+  const reasoningPct = breakdownTotal > 0 ? (reasoningCost / breakdownTotal) * 100 : 0;
+  const voicePct = breakdownTotal > 0 ? 100 - reasoningPct : 0;
+
+  return (
+    <Panel
+      title="Live Cost Monitor"
+      icon={<Euro />}
+      meta={<Dot tone={totalCost > 0 ? "ok" : "neutral"} live={totalCost > 0} />}
+      className="shrink-0"
+    >
+      <div className="space-y-3 p-3.5">
+        <div className="flex items-baseline justify-between">
+          <motion.span
+            key={totalCost.toFixed(6)}
+            initial={{ y: -4, opacity: 0.3 }}
+            animate={{ y: 0, opacity: 1 }}
+            className="font-mono text-2xl font-semibold tabular text-ok"
+          >
+            {fmtEur(totalCost)}
+          </motion.span>
+          <span className="text-[11px] text-ink-3">
+            {billedCount} billed event{billedCount === 1 ? "" : "s"}
+          </span>
+        </div>
+        <div className="flex h-1.5 overflow-hidden rounded-full bg-sunken">
+          <motion.div
+            className="h-full bg-accent"
+            initial={false}
+            animate={{ width: `${reasoningPct}%` }}
+            transition={{ duration: 0.5, ease: [0.2, 0.8, 0.2, 1] }}
+          />
+          <motion.div
+            className="h-full bg-signal"
+            initial={false}
+            animate={{ width: `${voicePct}%` }}
+            transition={{ duration: 0.5, ease: [0.2, 0.8, 0.2, 1] }}
+          />
+        </div>
+        <div className="flex items-center justify-between text-[11.5px]">
+          <span className="flex items-center gap-1.5 text-ink-2">
+            <span className="h-2 w-2 shrink-0 rounded-full bg-accent" /> Reasoning (LLM)
+          </span>
+          <span className="font-mono tabular text-ink">{fmtEur(reasoningCost)}</span>
+        </div>
+        <div className="flex items-center justify-between text-[11.5px]">
+          <span className="flex items-center gap-1.5 text-ink-2">
+            <span className="h-2 w-2 shrink-0 rounded-full bg-signal" /> Voice &amp; Calls
+          </span>
+          <span className="font-mono tabular text-ink">{fmtEur(voiceCost)}</span>
+        </div>
+      </div>
+    </Panel>
   );
 }
