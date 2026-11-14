@@ -204,12 +204,13 @@ def test_compliance_critic_precheck_blocks_unsafe_mutations(tmp_path: Path) -> N
     )
     assert err_email is not None and "unverified recipient" in err_email
 
-    # 4. Allow legitimate claim email to Kappa Foods
+    # 4. Allow legitimate claim email to configured vendor
+    valid_vendor_email = get_domain()["demo"]["notify"]["to"]
     ok_email = critic_precheck_call(
         ToolCall(
             id="4",
             name="send_email",
-            args={"to": "accounts@kappafoods.example", "subject": "Claim", "body": "EUR 587.30"},
+            args={"to": valid_vendor_email, "subject": "Claim", "body": "EUR 587.30"},
         ),
         env,
     )

@@ -98,12 +98,19 @@ def audit_workspace_evidence(env: Env) -> list[EvidencePayload]:
             continue
         rel = p.relative_to(env.root_dir).as_posix()
         suffix = p.suffix.lower()
-        if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+        if suffix in {".png", ".jpg", ".jpeg", ".webp", ".pdf"}:
+            try:
+                from .vision import inspect_evidence_file
+
+                vis = inspect_evidence_file(p)
+                photo_findings = vis.findings
+            except Exception:  # noqa: BLE001
+                photo_findings = ["Visual pallet inspection attachment indexed for claim verification."]
             payloads.append(
                 EvidencePayload(
                     source=rel,
                     kind="photo",
-                    findings=["Visual pallet inspection attachment indexed for claim verification."],
+                    findings=photo_findings,
                 )
             )
             continue
