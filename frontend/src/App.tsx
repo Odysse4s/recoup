@@ -6,7 +6,7 @@ import { LiveWindowLayer } from "./components/LiveWindows";
 import { MobileGate } from "./components/MobileGate";
 import { PipelineRibbon } from "./components/PipelineRibbon";
 import { RewindOverlay } from "./components/RewindOverlay";
-import { AnticipateCard, DiffStack, RiskGateCard, StatsStrip } from "./components/RightRail";
+import { AnticipateCard, CostMonitor, DiffStack, RiskGateCard, StatsStrip } from "./components/RightRail";
 import { Telemetry } from "./components/Telemetry";
 import { TopBar } from "./components/TopBar";
 import { OperatorConsultPanel } from "./components/OperatorConsultPanel";
@@ -181,6 +181,7 @@ export default function App() {
             onOpenOutbox={r.openOutbox}
           />
           <AnticipateCard offer={r.offer} onAccept={r.acceptOffer} onDismiss={r.dismissOffer} brandName={brand_name} />
+          <CostMonitor events={r.events} totalCost={r.totalCost} />
         </div>
       </main>
 
