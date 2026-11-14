@@ -81,6 +81,7 @@ REAL = Env(root_dir=WS, db_path=WS / "app.db")
 LOG = UndoLog(Path("undo_log.json"))
 ANTICIPATE_TASK: asyncio.Task[Any] | None = None
 STAGE_DEMO_TASK: asyncio.Task[Any] | None = None
+GOAL_RUN_TASK: asyncio.Task[Any] | None = None
 ACTIVE_CALL: dict[str, Any] | None = None
 SHUTDOWN_EVENT: asyncio.Event | None = None
 _EXTRA_VOICE_COST_EUR: float = 0.0
@@ -406,15 +407,17 @@ async def _run(goal: str, run_id: str, anticipate_after: bool = True):
 
 @app.post("/api/goal")
 async def goal(req: GoalRequest):
-    global STAGE_DEMO_TASK, ACTIVE_CALL
+    global STAGE_DEMO_TASK, ACTIVE_CALL, GOAL_RUN_TASK
     if STAGE_DEMO_TASK and not STAGE_DEMO_TASK.done():
         STAGE_DEMO_TASK.cancel()
     STAGE_DEMO_TASK = None
     ACTIVE_CALL = None
     if ANTICIPATE_TASK and not ANTICIPATE_TASK.done():
         ANTICIPATE_TASK.cancel()
+    if GOAL_RUN_TASK and not GOAL_RUN_TASK.done():
+        GOAL_RUN_TASK.cancel()
     run_id = uuid.uuid4().hex[:8]
-    asyncio.create_task(_run(req.goal, run_id, req.anticipate_after))
+    GOAL_RUN_TASK = asyncio.create_task(_run(req.goal, run_id, req.anticipate_after))
     return {"run_id": run_id}
 
 
@@ -931,7 +934,7 @@ async def _run_stage_demo(
 
 @app.post("/api/demo/run")
 async def demo_run(req: DemoRunRequest | None = None):
-    global STAGE_DEMO_TASK, ACTIVE_CALL, ANTICIPATE_TASK
+    global STAGE_DEMO_TASK, ACTIVE_CALL, ANTICIPATE_TASK, GOAL_RUN_TASK
     effective_req = req or DemoRunRequest()
     pace_ms = max(0, min(2500, effective_req.pace_ms))
     anticipate_after = effective_req.anticipate_after
@@ -942,6 +945,9 @@ async def demo_run(req: DemoRunRequest | None = None):
     if ANTICIPATE_TASK and not ANTICIPATE_TASK.done():
         ANTICIPATE_TASK.cancel()
     ANTICIPATE_TASK = None
+    if GOAL_RUN_TASK and not GOAL_RUN_TASK.done():
+        GOAL_RUN_TASK.cancel()
+    GOAL_RUN_TASK = None
     for fut in list(PENDING.values()):
         if not fut.done():
             fut.cancel()
@@ -1047,13 +1053,16 @@ async def undo(req: UndoRequest | None = None):
 @app.post("/api/reset")
 async def reset():
     """Restore workspace to deterministic Recoup baseline seed."""
-    global _EXTRA_VOICE_COST_EUR, STAGE_DEMO_TASK, ACTIVE_CALL
+    global _EXTRA_VOICE_COST_EUR, STAGE_DEMO_TASK, ACTIVE_CALL, GOAL_RUN_TASK
     if STAGE_DEMO_TASK and not STAGE_DEMO_TASK.done():
         STAGE_DEMO_TASK.cancel()
     STAGE_DEMO_TASK = None
     ACTIVE_CALL = None
     if ANTICIPATE_TASK and not ANTICIPATE_TASK.done():
         ANTICIPATE_TASK.cancel()
+    if GOAL_RUN_TASK and not GOAL_RUN_TASK.done():
+        GOAL_RUN_TASK.cancel()
+    GOAL_RUN_TASK = None
     for fut in list(PENDING.values()):
         if not fut.done():
             fut.cancel()

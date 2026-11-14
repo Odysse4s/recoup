@@ -385,3 +385,18 @@ def test_gemini_and_openai_providers_translate_and_cache(
     groq_prov = get_provider()
     assert isinstance(groq_prov, OpenAICompatProvider)
     assert groq_prov.api_key_env == "GROQ_API_KEY"
+
+
+def test_cache_read_ignores_corrupted_or_incomplete_cache_file(tmp_path: Path) -> None:
+    """A truncated/corrupt disk cache entry must be treated as a cache miss, not crash the run."""
+    truncated = tmp_path / "truncated.json"
+    truncated.write_text('{"text": "partial', encoding="utf-8")
+    assert llm_mod._cache_read(truncated) is None
+
+    missing_keys = tmp_path / "missing_keys.json"
+    missing_keys.write_text(json.dumps({"text": "hi"}), encoding="utf-8")
+    assert llm_mod._cache_read(missing_keys) is None
+
+    not_an_object = tmp_path / "not_an_object.json"
+    not_an_object.write_text("[1, 2, 3]", encoding="utf-8")
+    assert llm_mod._cache_read(not_an_object) is None

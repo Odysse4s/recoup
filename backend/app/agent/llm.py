@@ -361,13 +361,16 @@ class FakeProvider:
 def _cache_read(cache_file: Path) -> LLMResponse | None:
     if not cache_file.exists():
         return None
-    data = json.loads(cache_file.read_text(encoding="utf-8"))
-    return LLMResponse(
-        text=data["text"],
-        tool_calls=[ToolCall(**c) for c in data["tool_calls"]],
-        input_tokens=data["input_tokens"],
-        output_tokens=data["output_tokens"],
-    )
+    try:
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+        return LLMResponse(
+            text=data["text"],
+            tool_calls=[ToolCall(**c) for c in data["tool_calls"]],
+            input_tokens=data["input_tokens"],
+            output_tokens=data["output_tokens"],
+        )
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _cache_write(cache_file: Path, resp: LLMResponse) -> None:

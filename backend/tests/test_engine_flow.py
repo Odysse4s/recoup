@@ -4,6 +4,7 @@ import sqlite3
 import pytest
 from fastapi.testclient import TestClient
 
+from app import server
 from app.contracts import (
     AnticipatePrediction,
     ChangeReport,
@@ -449,3 +450,109 @@ def test_server_endpoints_and_dropped_pack_routes(monkeypatch, tmp_path):
 
         assert client.get("/api/domain-packs").status_code == 404
         assert client.post("/api/pack/finance").status_code == 404
+
+
+@pytest.fixture
+def isolated_goal_server(tmp_path, monkeypatch):
+    """Isolate workspace, SQLite DB, and undo log for /api/goal concurrency tests."""
+    ws = tmp_path / "ws"
+    populate_default_seed(ws)
+    real = Env(root_dir=ws, db_path=ws / "app.db")
+    log = UndoLog(tmp_path / "undo_log.json")
+
+    monkeypatch.setattr(server, "WS", ws)
+    monkeypatch.setattr(server, "REAL", real)
+    monkeypatch.setattr(server, "LOG", log)
+    monkeypatch.setenv("VOICE_PROVIDER", "offline")
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    BUS.history.clear()
+    orchestrator.PENDING.clear()
+    server.GOAL_RUN_TASK = None
+    with TestClient(server.app) as client:
+        yield client, ws, real, log
+    if server.GOAL_RUN_TASK and not server.GOAL_RUN_TASK.done():
+        server.GOAL_RUN_TASK.cancel()
+    server.GOAL_RUN_TASK = None
+    orchestrator.PENDING.clear()
+
+
+async def _poll(predicate, *, attempts: int = 100, delay: float = 0.2):
+    """Poll `predicate()` until truthy, sleeping `delay`s between tries. Returns the last value."""
+    value = predicate()
+    for _ in range(attempts):
+        if value:
+            return value
+        await asyncio.sleep(delay)
+        value = predicate()
+    return value
+
+
+async def _fast_single_gate_loop(goal, execute, emit=None, shadow_env=None, forged_dir=None):
+    """Minimal `run_agent_loop` stand-in: stage one >=EUR250 claim (single ASK gate), no forging."""
+    plan = PlanPayload(
+        goal=goal,
+        steps=[PlanStep(id=1, intent="Stage vendor credit claim", tool="upsert_row")],
+        success_criteria=["claim staged"],
+    )
+    if emit:
+        emit(EventType.PLAN_CREATED, plan.model_dump(), "Created 1-step plan.", 0.0)
+    call = ToolCall(
+        id="c1",
+        name="upsert_row",
+        args={
+            "table": "claims",
+            "pk_col": "id",
+            "row": {
+                "id": "CLM-D-1042",
+                "supplier_id": "SUP-KAPPA",
+                "delivery_id": "D-1042",
+                "invoice_id": "INV-7781",
+                "amount": 587.30,
+                "reason": "overcharge+shortage+damaged+late",
+                "status": "drafted",
+            },
+        },
+    )
+    r = await execute(call)
+    assert r.ok
+    return [call]
+
+
+async def test_goal_endpoint_double_submit_cancels_prior_run(isolated_goal_server, monkeypatch):
+    """A second /api/goal call must cancel the still-running prior run, not race it on REAL/LOG."""
+    client, _ws, real, _log = isolated_goal_server
+    monkeypatch.setattr(orchestrator, "run_agent_loop", _fast_single_gate_loop)
+    domain = get_domain()
+    goal = domain["default_goal"]
+
+    r1 = client.post("/api/goal", json={"goal": goal, "anticipate_after": False})
+    assert r1.status_code == 200
+    run_id_1 = r1.json()["run_id"]
+    task_1 = server.GOAL_RUN_TASK
+    assert task_1 is not None
+
+    r2 = client.post("/api/goal", json={"goal": goal, "anticipate_after": False})
+    assert r2.status_code == 200
+    run_id_2 = r2.json()["run_id"]
+    task_2 = server.GOAL_RUN_TASK
+
+    assert run_id_1 != run_id_2
+    assert task_2 is not task_1
+
+    cancelled = await _poll(lambda: task_1.cancelled())
+    assert cancelled, "prior /api/goal run must be cancelled, not left racing REAL/LOG"
+
+    pa = await _poll(lambda: client.get("/api/state").json()["pending_approval"])
+    assert pa is not None, "surviving run never reached its approval gate"
+    assert len(orchestrator.PENDING) == 1, "only the surviving run should hold a pending approval"
+
+    client.post(f"/api/approve/{pa['req_id']}", json={"approved": True})
+
+    def _claim_rows():
+        with sqlite3.connect(real.db_path) as conn:
+            return conn.execute("SELECT amount, status FROM claims WHERE id = 'CLM-D-1042'").fetchall()
+
+    rows = await _poll(_claim_rows)
+    assert rows == [(587.30, "drafted")], "the cancelled run must not have written a duplicate/partial claim"
