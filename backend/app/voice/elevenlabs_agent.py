@@ -68,7 +68,7 @@ def _spoken_eur(amount: float) -> str:
 
 
 def _clean_vendor_name(raw_vendor: str) -> str:
-    """Shorten corporate/desk suffixes so spoken briefings stay crisp and under 35 words."""
+    """Shorten corporate/desk suffixes so spoken briefings stay crisp and under 18 words."""
     cleaned = raw_vendor.strip()
     cleaned = re.sub(r"\s+(?:S\.A\.|SA|Inc\.?|Ltd\.?|GmbH|LLC)\b.*$", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+(?:AR|AP|billing)\s+(?:desk|team|department)\b.*$", "", cleaned, flags=re.IGNORECASE)
@@ -107,7 +107,7 @@ def _extract_vendor_from_text_or_outbox(texts: list[str], outbox: list[dict[str,
 
 
 def build_briefing_script(summary: dict[str, Any]) -> str:
-    """Convert a `ChangeReport` or `ApprovalNeededPayload` into a <35-word Risk Gate script."""
+    """Convert a `ChangeReport` or `ApprovalNeededPayload` into a <18-word Risk Gate script (~3.5s spoken)."""
     if isinstance(summary, (ChangeReport, ApprovalNeededPayload)):
         data: dict[str, Any] = summary.model_dump()
     elif isinstance(summary, dict):
@@ -277,10 +277,10 @@ def build_briefing_script(summary: dict[str, Any]) -> str:
                 parts.append(f"{file_changes} file {f_unit}")
             lead = f"{brand_name} rehearsed {' and '.join(parts)} in an isolated copy."
         else:
-            lead = f"{brand_name} rehearsed staged workspace changes at the Risk Gate."
+            lead = f"{brand_name} rehearsed staged workspace changes."
 
-    # Enforce strict <35-word executive budget (`cta` is 9 words -> `lead` max 25 words)
-    max_lead_words = 34 - len(cta.split())
+    # Enforce strict <18-word executive budget (~3.5s spoken; `cta` is 9 words -> `lead` max 9 words)
+    max_lead_words = 17 - len(cta.split())
     lead_words = lead.split()
     if len(lead_words) > max_lead_words:
         trimmed = " ".join(lead_words[:max_lead_words]).rstrip(",;:")

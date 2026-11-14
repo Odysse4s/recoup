@@ -32,7 +32,7 @@ def assess_risk(call: ToolCall, tool: Tool, report: ChangeReport) -> tuple[RiskD
     if call.name in external_tools or not tool.reversible:
         return RiskDecision.ASK, f"external or irreversible action (`{call.name}`)"
 
-    if tool.source == "forged" and tool.uses == 0:
+    if tool.source == "forged" and tool.uses == 0 and tool.mutating:
         return RiskDecision.ASK, "first run of a synthesized tool"
 
     max_deleted = int(rules.get("max_auto_deleted_rows", rules.get("max_deleted_rows", 0)))
