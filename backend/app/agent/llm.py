@@ -22,16 +22,41 @@ from ..domain_config import get_domain
 CACHE_DIR = Path(os.getenv("LLM_CACHE_DIR", ".llm_cache"))
 
 
+# EUR per 1,000,000 tokens as (input_rate, output_rate), matched by substring against whichever
+# model string the provider was configured with. Ordered most-specific-first since the first match
+# wins. Anything unrecognized (future models, custom groq/grok deployments, etc.) falls back to
+# `_DEFAULT_PRICING`, a conservative Claude-Sonnet-equivalent rate — the same flat rate this file
+# used to apply unconditionally to every provider/model before per-model pricing existed.
+_MODEL_PRICING_PER_MILLION: list[tuple[str, tuple[float, float]]] = [
+    ("fake", (0.0, 0.0)),
+    ("haiku", (0.80, 4.00)),  # claude-haiku-4-5 family
+    ("gpt-4o-mini", (0.15, 0.60)),
+    ("gemini", (0.30, 2.50)),  # gemini-*-flash family (2.5/3.x flash)
+    ("claude", (3.0, 15.0)),  # claude sonnet/opus family
+]
+_DEFAULT_PRICING: tuple[float, float] = (3.0, 15.0)
+
+
+def _price_for_model(model: str) -> tuple[float, float]:
+    low = (model or "").lower()
+    for needle, rates in _MODEL_PRICING_PER_MILLION:
+        if needle in low:
+            return rates
+    return _DEFAULT_PRICING
+
+
 @dataclass
 class LLMResponse:
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
+    model: str = "unknown"
 
     @property
     def cost_eur(self) -> float:
-        return round((self.input_tokens * 3.0 + self.output_tokens * 15.0) / 1_000_000, 5)
+        in_rate, out_rate = _price_for_model(self.model)
+        return round((self.input_tokens * in_rate + self.output_tokens * out_rate) / 1_000_000, 5)
 
 
 class LLMProvider(Protocol):
@@ -79,6 +104,15 @@ class FakeProvider:
         return [m for m in raw_list if m.get("table") in self.known_tables]
 
     def complete(
+        self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
+    ) -> LLMResponse:
+        """Public entry point: delegates to `_complete_impl` and tags the result as free (`model="fake"`)
+        regardless of which branch produced it, so every FakeProvider response costs exactly EUR 0."""
+        resp = self._complete_impl(system, messages, tools)
+        resp.model = "fake"
+        return resp
+
+    def _complete_impl(
         self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
     ) -> LLMResponse:
         sys_low = system.lower()
@@ -368,6 +402,7 @@ def _cache_read(cache_file: Path) -> LLMResponse | None:
             tool_calls=[ToolCall(**c) for c in data["tool_calls"]],
             input_tokens=data["input_tokens"],
             output_tokens=data["output_tokens"],
+            model=data.get("model", "unknown"),  # old cache entries predate per-model pricing
         )
     except Exception:  # noqa: BLE001
         return None
@@ -385,6 +420,7 @@ def _cache_write(cache_file: Path, resp: LLMResponse) -> None:
                 ],
                 "input_tokens": resp.input_tokens,
                 "output_tokens": resp.output_tokens,
+                "model": resp.model,
             },
             indent=2,
         ),
@@ -398,10 +434,23 @@ def _post_with_retry(
     payload: dict[str, Any],
     max_attempts: int = 5,
 ) -> dict[str, Any]:
+    """POST with bounded per-attempt timeouts so an unreachable/slow provider fails fast and falls
+    back to `FakeProvider` instead of hanging the calling thread (and, transitively, the shared
+    anyio worker-thread pool that also serves sync FastAPI routes like `/api/health`/`/api/state`)
+    for minutes. Connect is capped tight since a dead network should fail almost immediately; read
+    gets a bit more room for a genuinely slow-but-working model response.
+    """
     import httpx
 
+    timeout = httpx.Timeout(connect=3.0, read=15.0, write=10.0, pool=3.0)
     for attempt in range(max_attempts):
-        r = httpx.post(url, headers=headers, json=payload, timeout=45.0)
+        try:
+            r = httpx.post(url, headers=headers, json=payload, timeout=timeout)
+        except httpx.TimeoutException as e:
+            if attempt < max_attempts - 1:
+                time.sleep(min(4.0, 0.5 * (2**attempt)))
+                continue
+            raise RuntimeError(f"LLM provider unreachable after {max_attempts} attempts: {e}") from e
         if r.status_code in {429, 500, 502, 503, 504} and attempt < max_attempts - 1:
             raw_ra = r.headers.get("retry-after", "")
             try:
@@ -461,7 +510,7 @@ class AnthropicProvider:
             for b in r.content
             if b.type == "tool_use"
         ]
-        resp = LLMResponse(text, calls, r.usage.input_tokens, r.usage.output_tokens)
+        resp = LLMResponse(text, calls, r.usage.input_tokens, r.usage.output_tokens, model=self.model)
         if self.use_cache:
             _cache_write(cache_file, resp)
         return resp
@@ -622,6 +671,7 @@ class GeminiProvider:
             tool_calls=calls,
             input_tokens=int(usage.get("promptTokenCount", 0)),
             output_tokens=int(usage.get("candidatesTokenCount", 0)),
+            model=self.model,
         )
         if self.use_cache and finish_reason != "MAX_TOKENS" and (resp.text or resp.tool_calls):
             _cache_write(cache_file, resp)
@@ -756,6 +806,7 @@ class OpenAICompatProvider:
             tool_calls=calls,
             input_tokens=int(usage.get("prompt_tokens", 0)),
             output_tokens=int(usage.get("completion_tokens", 0)),
+            model=self.model,
         )
         if self.use_cache:
             _cache_write(cache_file, resp)

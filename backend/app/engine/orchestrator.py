@@ -138,6 +138,7 @@ async def rehearse(goal: str, real: Env, run_id: str, emit_events: bool = True):
                 {"call": call.model_dump()},
                 step=step_counter,
                 thought=call.thought or f"Executing `{call.name}` inside isolated rehearsal environment.",
+                cost_eur=call.cost_eur,
             )
         try:
             previews[call.id] = tool.preview(call.args, staged)

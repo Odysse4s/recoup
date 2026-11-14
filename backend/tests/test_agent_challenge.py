@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import json
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -400,3 +401,106 @@ def test_cache_read_ignores_corrupted_or_incomplete_cache_file(tmp_path: Path) -
     not_an_object = tmp_path / "not_an_object.json"
     not_an_object.write_text("[1, 2, 3]", encoding="utf-8")
     assert llm_mod._cache_read(not_an_object) is None
+
+
+def test_llm_response_cost_eur_is_per_model_not_flat_sonnet_rate() -> None:
+    """Different models must price differently; FakeProvider must always cost exactly EUR 0."""
+    gemini_resp = LLMResponse(input_tokens=1_000_000, output_tokens=1_000_000, model="gemini-2.5-flash")
+    haiku_resp = LLMResponse(input_tokens=1_000_000, output_tokens=1_000_000, model="claude-haiku-4-5")
+    gpt_mini_resp = LLMResponse(input_tokens=1_000_000, output_tokens=1_000_000, model="gpt-4o-mini")
+    sonnet_resp = LLMResponse(input_tokens=1_000_000, output_tokens=1_000_000, model="claude-sonnet-4-5")
+    unknown_resp = LLMResponse(input_tokens=1_000_000, output_tokens=1_000_000, model="some-future-model")
+    fake_resp = FakeProvider().complete("system", [{"role": "user", "content": "hi"}])
+
+    assert gemini_resp.cost_eur == pytest.approx(0.30 + 2.50)
+    assert haiku_resp.cost_eur == pytest.approx(0.80 + 4.00)
+    assert gpt_mini_resp.cost_eur == pytest.approx(0.15 + 0.60)
+    # unrecognized/future models fall back to the same conservative rate Sonnet uses
+    assert unknown_resp.cost_eur == pytest.approx(sonnet_resp.cost_eur)
+    # the four priced models are meaningfully different from each other, i.e. not one flat rate
+    assert len({gemini_resp.cost_eur, haiku_resp.cost_eur, gpt_mini_resp.cost_eur, sonnet_resp.cost_eur}) == 4
+    assert fake_resp.model == "fake"
+    assert fake_resp.cost_eur == 0.0
+
+
+def test_react_loop_turn_cost_is_not_silently_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Previously only `make_plan()`'s one-off cost reached the caller; every ReAct turn's real
+    LLM cost must now be attributed to the tool call(s) that turn produced, not discarded."""
+
+    class _StubLLM:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        def complete(
+            self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
+        ) -> LLMResponse:
+            if "return strict json matching planpayload" in system.lower():
+                plan = {
+                    "goal": "Write a note",
+                    "steps": [{"id": 1, "intent": "write a note", "tool": "write_file"}],
+                    "success_criteria": ["note written"],
+                }
+                return LLMResponse(
+                    text=json.dumps(plan), input_tokens=100, output_tokens=50, model="gemini-2.5-flash"
+                )
+            self.turn += 1
+            if self.turn == 1:
+                return LLMResponse(
+                    text="writing the note",
+                    tool_calls=[ToolCall(id="c1", name="write_file", args={"path": "note.md", "content": "hi"})],
+                    input_tokens=200,
+                    output_tokens=80,
+                    model="gemini-2.5-flash",
+                )
+            return LLMResponse(text="Done.", input_tokens=20, output_tokens=5, model="gemini-2.5-flash")
+
+    monkeypatch.setattr(loop_mod, "get_provider", lambda: _StubLLM())
+    env = _seed_recoup_env(tmp_path)
+    registry = _build_stub_registry()
+    monkeypatch.setattr(loop_mod, "REGISTRY", registry)
+
+    async def _execute(call: ToolCall) -> ToolResult:
+        tool = registry[call.name]
+        out = tool.do(call.args, env)
+        return ToolResult(call_id=call.id, ok=True, output=out)
+
+    done = asyncio.run(run_agent_loop("Write a note", _execute, shadow_env=env))
+
+    assert len(done) == 1
+    react_turn_cost = done[0].cost_eur
+    plan_cost = round((100 * 0.30 + 50 * 2.50) / 1_000_000, 5)
+    expected_turn_cost = round((200 * 0.30 + 80 * 2.50) / 1_000_000, 5)
+
+    assert react_turn_cost > 0
+    assert react_turn_cost == pytest.approx(expected_turn_cost)
+    # proves this is the ReAct turn's own cost, not a leaked/duplicated copy of the plan's cost
+    assert react_turn_cost != pytest.approx(plan_cost)
+
+
+def test_gemini_network_timeout_falls_back_to_fake_within_bounded_time(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unreachable/hanging provider must fail fast via bounded per-attempt timeouts and fall
+    back to FakeProvider, instead of blocking the calling thread indefinitely (the live bug that
+    froze the whole demo server, including unrelated health checks, for 3+ minutes)."""
+    monkeypatch.setattr(llm_mod, "CACHE_DIR", tmp_path)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_FALLBACK_FAKE", "1")
+
+    def _hanging_post(*_a: object, **_kw: object) -> None:
+        raise httpx.TimeoutException("simulated unreachable network")
+
+    monkeypatch.setattr(httpx, "post", _hanging_post)
+
+    gem = GeminiProvider("gemini-3.8-flash")
+    start = time.monotonic()
+    resp = gem.complete("System", [{"role": "user", "content": HERO_GOAL}])
+    elapsed = time.monotonic() - start
+
+    # Bounded by _post_with_retry's 5 attempts x short capped backoff (~7.5s worst case) - a world
+    # away from the 3+ minute indefinite hang this regression-tests against.
+    assert elapsed < 15.0, f"a dead network must fail fast and fall back, not hang (took {elapsed:.1f}s)"
+    assert resp.model == "fake"
+    assert resp.cost_eur == 0.0

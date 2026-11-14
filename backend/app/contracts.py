@@ -47,6 +47,7 @@ class ToolCall(BaseModel):
     args: dict[str, Any] = {}
     thought: str | None = None
     thought_signature: str | None = None
+    cost_eur: float = 0.0
 
 
 class ToolResult(BaseModel):
