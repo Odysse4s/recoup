@@ -411,6 +411,10 @@ def synthesize_briefing(text: str, voice_id: str | None = None) -> bytes | None:
     if not cleaned:
         return None
 
+    provider_pref = os.getenv("VOICE_PROVIDER", "").strip().lower()
+    if provider_pref in ("none", "offline", "fake", "disabled"):
+        return None
+
     explicit_voice = (voice_id or "").strip() or None
     resolved_voice = explicit_voice or os.getenv("ELEVENLABS_VOICE_ID", "").strip() or DEFAULT_VOICE_ID
     cache_key = hashlib.sha256(f"{resolved_voice}:{cleaned}".encode()).hexdigest()
@@ -421,10 +425,6 @@ def synthesize_briefing(text: str, voice_id: str | None = None) -> bytes | None:
         cached_bytes = cache_path.read_bytes()
         if cached_bytes:
             return cached_bytes
-
-    provider_pref = os.getenv("VOICE_PROVIDER", "").strip().lower()
-    if provider_pref in ("none", "offline", "fake", "disabled"):
-        return None
 
     fal_key = os.getenv("FAL_KEY", "").strip()
     eleven_key = os.getenv("ELEVENLABS_API_KEY", "").strip()

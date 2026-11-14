@@ -147,7 +147,7 @@ def test_call_negotiate_settles_claim_reversibly(isolated_server):
     data = resp.json()
     assert data["ok"] is True
     assert data["outcome"] == "accepted"
-    assert data["agreed_amount"] == pytest.approx(499.21)
+    assert data["agreed_amount"] == pytest.approx(528.57)
     assert data["claim_status"] == "settled"
     assert len(data["turns"]) >= 4
     assert all(t["audio_url"] == "/api/voice/turn-audio" for t in data["turns"])

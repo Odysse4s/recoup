@@ -660,7 +660,7 @@ async def upload_evidence(request: Request):
 
     if evidence is None:
         evidence = _offline_inspect_evidence(rel_source, raw_bytes)
-    elif not evidence.source:
+    elif not evidence.source or "/" not in evidence.source:
         evidence = evidence.model_copy(update={"source": rel_source})
 
     run_id = f"evd_{uuid.uuid4().hex[:6]}"
@@ -773,11 +773,11 @@ async def negotiate_vendor_call(req: NegotiateCallRequest | None = None):
     )
 
     negotiated: tuple[list[dict[str, Any]], dict[str, Any]] | None = None
-    if body.opening_pct is None and body.floor_pct is None:
+    if body.opening_pct is None:
         with contextlib.suppress(Exception):
             from .agent.negotiator import run_vendor_negotiation  # type: ignore[import-not-found]
 
-            maybe_neg = run_vendor_negotiation(claim_id, REAL)
+            maybe_neg = run_vendor_negotiation(claim_id, REAL, accept_floor_pct=body.floor_pct)
             raw_neg = await maybe_neg if inspect.isawaitable(maybe_neg) else maybe_neg
             negotiated = _normalize_negotiation_output(raw_neg, claim_id, claim_amount, floor_pct)
 

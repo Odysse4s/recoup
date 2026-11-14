@@ -7,6 +7,7 @@ prompt injection and extracting structured discrepancy findings.
 from __future__ import annotations
 
 import base64
+import contextlib
 import csv
 import hashlib
 import io
@@ -210,14 +211,12 @@ def _inspect_photo_with_gemini(file_path: Path, llm: LLMProvider | None = None) 
     cache_file = llm_mod.CACHE_DIR / f"{cache_key}.json"
 
     if use_cache and cache_file.exists():
-        try:
+        with contextlib.suppress(Exception):
             cached_data = json.loads(cache_file.read_text(encoding="utf-8"))
             if isinstance(cached_data.get("findings"), list) and cached_data["findings"]:
                 return [str(x) for x in cached_data["findings"]]
             if isinstance(cached_data.get("text"), str) and cached_data["text"].strip():
                 return _parse_vision_response_text(cached_data["text"])
-        except Exception:  # noqa: BLE001
-            pass
 
     base_url = os.getenv("GEMINI_BASE_URL", "").strip().rstrip("/") or GeminiProvider.AI_STUDIO_URL
     url = f"{base_url}/{model}:generateContent"

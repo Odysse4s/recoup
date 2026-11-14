@@ -421,8 +421,11 @@ async def test_replay_rejection_preserves_prior_committed_run(tmp_path):
     assert len(log.entries) == 1
 
 
-def test_server_endpoints_and_dropped_pack_routes(monkeypatch):
+def test_server_endpoints_and_dropped_pack_routes(monkeypatch, tmp_path):
     monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    monkeypatch.delenv("FAL_KEY", raising=False)
+    monkeypatch.delenv("WONDERFUL_API_KEY", raising=False)
+    monkeypatch.setenv("VOICE_CACHE_DIR", str(tmp_path / "voice_cache"))
     with TestClient(app) as client:
         h = client.get("/api/health")
         assert h.status_code == 200

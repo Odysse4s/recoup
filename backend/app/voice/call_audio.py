@@ -147,6 +147,10 @@ def synthesize_call_turn(
     if not cleaned:
         return None
 
+    provider_pref = os.getenv("VOICE_PROVIDER", "").strip().lower()
+    if provider_pref in ("none", "offline", "fake", "disabled"):
+        return None
+
     role: Literal["agent", "counterparty"] = "counterparty" if speaker == "counterparty" else "agent"
     voice = _resolve_speaker_voice(role)
     cache_key = hashlib.sha256(f"{role}:{voice}:{cleaned}".encode()).hexdigest()
@@ -157,10 +161,6 @@ def synthesize_call_turn(
         cached_bytes = cache_path.read_bytes()
         if cached_bytes:
             return cached_bytes
-
-    provider_pref = os.getenv("VOICE_PROVIDER", "").strip().lower()
-    if provider_pref in ("none", "offline", "fake", "disabled"):
-        return None
 
     fal_key = os.getenv("FAL_KEY", "").strip()
     wonderful_key = os.getenv("WONDERFUL_API_KEY", "").strip()

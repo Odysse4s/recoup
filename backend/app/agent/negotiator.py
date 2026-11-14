@@ -44,14 +44,12 @@ def _parse_oumi_action(raw_text: str) -> DecisionAction | None:
     fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
     if fence:
         text = fence.group(1).strip()
-    try:
+    with contextlib.suppress(Exception):
         data = json.loads(text)
         if isinstance(data, dict):
             act = str(data.get("action") or data.get("decision") or "").strip().lower()
             if act in ("accept", "counter", "escalate"):
                 return act  # type: ignore[return-value]
-    except Exception:  # noqa: BLE001
-        pass
 
     low = text.lower()
     for token in ("escalate", "counter", "accept"):
