@@ -111,15 +111,13 @@ class WriteFile(Tool):
     def undo(self, receipt: dict[str, Any], env: Env) -> None:
         p, _ = _resolve_safe_path(env, receipt["path"])
         root = env.root_dir.resolve()
-        if receipt["old_content"] is None:
+        if receipt.get("old_content") is None or not receipt.get("existed", True):
             p.unlink(missing_ok=True)
-            parent = p.parent
-            while parent != root and parent.exists():
-                try:
+            parent = p.parent.resolve()
+            while parent != root and parent.is_relative_to(root):
+                with contextlib.suppress(OSError):
                     parent.rmdir()
-                except OSError:
-                    break
-                parent = parent.parent
+                parent = parent.parent.resolve()
         else:
             p.write_text(receipt["old_content"], encoding="utf-8")
 

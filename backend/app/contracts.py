@@ -123,6 +123,7 @@ class ApprovalNeededPayload(BaseModel):
     diff_preview: str
     risk_reason: str
     spoken_summary: str = ""
+    channel: Literal["notification", "voice_call"] = "notification"
     report: ChangeReport | None = None
 
 
@@ -151,6 +152,7 @@ class CallStartPayload(BaseModel):
     claim_amount: float = 587.30
     opening_pct: float | None = None
     floor_pct: float | None = None
+    channel: Literal["notification", "voice_call"] = "notification"
 
 
 class CallTurnPayload(BaseModel):

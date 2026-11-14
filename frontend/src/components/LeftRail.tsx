@@ -28,7 +28,7 @@ export function PlanPanel({
 }) {
   return (
     <Panel
-      title={plan ? "Plan & Verify" : "Audit presets"}
+      title={plan ? "Agent Plan" : "Audit Presets"}
       icon={<Layers />}
       meta={plan ? <Chip>{plan.steps.length} steps</Chip> : null}
       bodyClassName="scroll-thin overflow-y-auto p-3"
@@ -70,8 +70,8 @@ export function PlanPanel({
                   <div className="min-w-0 flex-1">
                     <div className="text-[12.5px] font-medium leading-snug text-ink">{s.intent}</div>
                     <div className="mt-1 flex items-center gap-1.5">
-                      <span className="font-mono text-[10px] text-ink-3">STEP {String(s.id).padStart(2, "0")}</span>
-                      <Chip tone={missing ? "forge" : "neutral"}>{missing ? `forge · ${s.tool.slice(8)}` : s.tool}</Chip>
+                      <span className="font-mono text-[10.5px] font-semibold text-ink-3">STEP {String(s.id).padStart(2, "0")}</span>
+                      <Chip tone={missing ? "forge" : "neutral"}>{missing ? `build · ${s.tool.slice(8)}` : s.tool}</Chip>
                     </div>
                   </div>
                 </motion.li>
@@ -87,7 +87,7 @@ export function PlanPanel({
                 className="overflow-hidden"
               >
                 <div className="mb-1.5 mt-1 flex items-center justify-between px-0.5">
-                  <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-3">Verification</span>
+                  <span className="text-[12px] font-semibold uppercase tracking-wider text-ink-3">Verification</span>
                   <Chip tone={verify.passed ? "ok" : "danger"}>{verify.passed ? "Verified" : "Failed"}</Chip>
                 </div>
                 <div className="space-y-1">
@@ -101,7 +101,7 @@ export function PlanPanel({
                       className="flex items-center gap-2 rounded-md px-1 py-0.5 text-[12px]"
                     >
                       {c.passed ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-ok" /> : <XCircle className="h-3.5 w-3.5 shrink-0 text-danger" />}
-                      <span className="line-clamp-1 flex-1 text-ink-2">{c.criterion}</span>
+                      <span className="line-clamp-1 flex-1 font-medium text-ink-2">{c.criterion}</span>
                     </motion.div>
                   ))}
                 </div>
@@ -122,7 +122,7 @@ export function PlanPanel({
                 <ArrowUpRight className="h-3.5 w-3.5 text-ink-3 transition-colors group-hover:text-accent" />
               </div>
               <div className="text-[13px] font-semibold leading-snug tracking-tight text-ink">{p.title}</div>
-              {p.desc && <div className="mt-0.5 line-clamp-1 text-[11.5px] text-ink-3">{p.desc}</div>}
+              {p.desc && <div className="mt-0.5 line-clamp-1 text-[12px] text-ink-3">{p.desc}</div>}
             </button>
           ))}
         </div>
@@ -151,7 +151,7 @@ export function ForgeVault({
   const synthesizing = forgeSpec && !tools.some((t) => t.name === forgeSpec.name);
   return (
     <Panel
-      title="Synthesized Tools"
+      title="Sandboxed Python Tools"
       icon={<Braces />}
       meta={<Chip tone="forge">7-Layer Sandbox</Chip>}
       anchor={anchorRef("vault")}
@@ -167,7 +167,7 @@ export function ForgeVault({
           className="rounded-lg border border-forge/35 bg-forge/[0.06] p-2.5"
         >
           <div className="mb-1.5 flex items-center justify-between gap-2">
-            <span className="inline-flex items-center gap-1.5 font-mono text-[10.5px] font-bold uppercase tracking-wider text-forge">
+            <span className="inline-flex items-center gap-1.5 font-mono text-[11px] font-bold uppercase tracking-wider text-forge">
               <ShieldCheck className="h-3.5 w-3.5 text-ok" />
               7-Layer Security Seal
             </span>
@@ -179,7 +179,7 @@ export function ForgeVault({
             {SEVEN_LAYER_SEAL.map((guarantee) => (
               <span
                 key={guarantee}
-                className="inline-flex items-center rounded border border-forge/30 bg-surface/90 px-1.5 py-0.5 font-mono text-[10px] font-medium text-ink"
+                className="inline-flex items-center rounded border border-forge/30 bg-surface/90 px-1.5 py-0.5 font-mono text-[10.5px] font-medium text-ink"
               >
                 {guarantee}
               </span>
@@ -199,11 +199,11 @@ export function ForgeVault({
               <div className="flex items-center gap-2 font-mono text-[12px] text-forge">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 def {forgeSpec.name}(args)
-                <span className="ml-auto text-[10px] text-ink-3">
+                <span className="ml-auto text-[10.5px] text-ink-3">
                   {forgeTest ? `attempt ${forgeTest.attempt}` : `${forgeSpec.examples.length} tests`}
                 </span>
               </div>
-              <div className="mt-1 line-clamp-1 text-[11.5px] text-ink-3">{forgeSpec.purpose}</div>
+              <div className="mt-1 line-clamp-1 text-[12px] text-ink-3">{forgeSpec.purpose}</div>
             </motion.div>
           )}
         </AnimatePresence>
@@ -219,7 +219,7 @@ export function ForgeVault({
             className="group block w-full rounded-lg border border-line bg-surface p-2.5 text-left transition-colors enabled:hover:border-forge/40 disabled:cursor-default"
           >
             <div className="flex items-center gap-2">
-              <span className="font-mono text-[12px] text-ink">
+              <span className="font-mono text-[12.5px] font-medium text-ink">
                 <span className="text-forge">def</span> {t.name}
                 <span className="text-ink-3">(args) → dict</span>
               </span>
@@ -227,12 +227,12 @@ export function ForgeVault({
                 pass · {t.uses} use{t.uses === 1 ? "" : "s"}
               </Chip>
             </div>
-            <div className="mt-1 line-clamp-1 text-[11.5px] text-ink-3">{t.description}</div>
+            <div className="mt-1 line-clamp-1 text-[12px] text-ink-3">{t.description}</div>
           </motion.button>
         ))}
         {tools.length === 0 && !synthesizing && (
-          <p className="text-[11.5px] text-ink-3">
-            On <code className="font-mono text-forge">MISSING:&lt;tool&gt;</code>, {brandName} synthesizes &amp; TDD-verifies pure Python here.
+          <p className="text-[12px] text-ink-3">
+            On <code className="font-mono text-forge">MISSING:&lt;tool&gt;</code>, {brandName} builds &amp; verifies pure Python tools inside the 7-layer sandbox.
           </p>
         )}
       </div>

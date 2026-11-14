@@ -32,6 +32,22 @@ export interface WorkspaceState {
   undo_stack: { step: number; tool: string; summary?: string; args?: Record<string, unknown>; ts: number }[];
   forged_tools: { name: string; description: string; uses: number }[];
   pending_approvals: ApprovalNeededPayload[];
+  pending_approval?: ApprovalNeededPayload | null;
+  active_call?: {
+    active: boolean;
+    ringing: boolean;
+    mode: "user_consult";
+    channel?: "notification" | "voice_call";
+    call_id: string;
+    req_id: string | null;
+    claim_id: string;
+    claim_amount: number;
+    counterparty: string;
+    turns: { speaker: "agent" | "counterparty" | "user"; text: string; audio_url?: string | null; ts: number }[];
+    selected_choice?: OperatorChoice | null;
+    end?: { outcome: "accepted" | "escalated" | "rejected" | "no_answer"; agreed_amount?: number | null; summary: string } | null;
+  } | null;
+  latest_offer?: AnticipateOfferPayload | null;
   pending_offers: AnticipateOfferPayload[];
   metrics: {
     steps: number;
@@ -98,6 +114,7 @@ export interface OperatorConsultState {
   active: boolean;
   ringing: boolean;
   mode: "user_consult" | "vendor";
+  channel?: "notification" | "voice_call";
   callId: string;
   reqId: string | null;
   claimId: string;
@@ -115,12 +132,12 @@ export interface OperatorConsultState {
 
 export const STAGES = [
   { id: "plan", num: "01", label: "Plan" },
-  { id: "forge", num: "02", label: "Forge" },
-  { id: "rehearse", num: "03", label: "Rehearse" },
+  { id: "forge", num: "02", label: "Build Tool" },
+  { id: "rehearse", num: "03", label: "Dry-Run" },
   { id: "verify", num: "04", label: "Verify" },
-  { id: "gate", num: "05", label: "Risk Gate" },
-  { id: "commit", num: "06", label: "Commit" },
-  { id: "anticipate", num: "07", label: "Anticipate" },
+  { id: "gate", num: "05", label: "Approval" },
+  { id: "commit", num: "06", label: "Apply & Email" },
+  { id: "anticipate", num: "07", label: "Next Suggestion" },
 ] as const;
 
 export type StageId = (typeof STAGES)[number]["id"];

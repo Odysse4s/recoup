@@ -3,8 +3,25 @@ import { Check } from "lucide-react";
 import { Fragment, useEffect, useState } from "react";
 import { anchorRef } from "../lib/anchors";
 import { InlineCode } from "../lib/highlight";
-import { STAGES, type RunStatus, type StageId } from "../lib/types";
+import type { RunStatus, StageId } from "../lib/types";
 import { cx, Dot } from "./ui";
+
+interface RibbonStep {
+  id: string;
+  num: string;
+  label: string;
+  stages: StageId[];
+  anchorKeys: string[];
+}
+
+const STEPS: RibbonStep[] = [
+  { id: "plan", num: "1", label: "Plan", stages: ["plan"], anchorKeys: ["stage:plan"] },
+  { id: "forge", num: "2", label: "Build Safe Tool", stages: ["forge"], anchorKeys: ["stage:forge"] },
+  { id: "rehearse", num: "3", label: "Dry-Run in Clone", stages: ["rehearse", "verify"], anchorKeys: ["stage:rehearse", "stage:verify"] },
+  { id: "gate", num: "4", label: "Your Approval", stages: ["gate"], anchorKeys: ["stage:gate"] },
+  { id: "commit", num: "5", label: "Apply & Email Vendor", stages: ["commit"], anchorKeys: ["stage:commit"] },
+  { id: "anticipate", num: "6", label: "Next Suggestion", stages: ["anticipate"], anchorKeys: ["stage:anticipate"] },
+];
 
 function useElapsed(since: number | null, running: boolean) {
   const [now, setNow] = useState(Date.now());
@@ -35,24 +52,31 @@ export function PipelineRibbon({
   danger: boolean;
   rewinding: boolean;
 }) {
-  const activeIdx = stage ? STAGES.findIndex((s) => s.id === stage) : -1;
+  const activeIdx = stage ? STEPS.findIndex((s) => s.stages.includes(stage)) : -1;
   const running = runStatus === "running" || runStatus === "awaiting" || runStatus === "committing";
   const elapsed = useElapsed(runStartedAt, running);
   const liveTone = rewinding ? "warn" : danger ? "danger" : running ? "accent" : runStatus === "committed" ? "ok" : "neutral";
 
+  const attachAnchors = (keys: string[]) => (el: HTMLElement | null) => {
+    for (const k of keys) {
+      anchorRef(k)(el);
+    }
+  };
+
   return (
     <div className="relative z-20 shrink-0 border-b border-line bg-surface/60 px-5 pb-3 pt-3 backdrop-blur-xl">
       <div className="flex items-center">
-        {STAGES.map((st, idx) => {
+        {STEPS.map((st, idx) => {
           const isCurrent = idx === activeIdx && !(stageDone && idx === activeIdx && st.id !== "anticipate");
-          const isPassed = idx < activeIdx || (stageDone && idx === activeIdx);
+          const isPassed = idx < activeIdx || (stageDone && idx === activeIdx && (st.id !== "rehearse" || stage === "verify") && st.id !== "anticipate");
           const isGate = st.id === "gate" && isCurrent && danger;
           return (
             <Fragment key={st.id}>
               <motion.div
-                ref={anchorRef(`stage:${st.id}`)}
+                ref={attachAnchors(st.anchorKeys)}
                 layout
                 transition={{ type: "spring", stiffness: 420, damping: 34 }}
+                aria-label={`${st.num}. ${st.label}`}
                 className={cx(
                   "relative flex shrink-0 items-center gap-2 rounded-full border transition-colors duration-300",
                   isCurrent ? "h-9 pl-1.5 pr-3.5" : "h-7 pl-1 pr-2.5",
@@ -88,9 +112,12 @@ export function PipelineRibbon({
                 >
                   {isPassed ? <Check className="h-3 w-3" strokeWidth={3} /> : st.num}
                 </span>
-                <span className={cx("whitespace-nowrap font-medium", isCurrent ? "text-[13px]" : "text-[12px]")}>{st.label}</span>
+                <span className={cx("whitespace-nowrap font-medium", isCurrent ? "text-[13px]" : "text-[12px]")}>
+                  <span className="sr-only">{st.num}. </span>
+                  {st.label}
+                </span>
               </motion.div>
-              {idx < STAGES.length - 1 && (
+              {idx < STEPS.length - 1 && (
                 <div className="relative mx-1.5 h-[2px] min-w-3 flex-1 overflow-hidden rounded-full bg-line">
                   {idx < activeIdx && <div className="beam absolute inset-0" />}
                   {idx === activeIdx && running && <div className="beam-live absolute inset-0 opacity-70" />}
@@ -121,7 +148,7 @@ export function PipelineRibbon({
           </AnimatePresence>
         </div>
         <span className="shrink-0 font-mono text-[11px] text-ink-3 tabular">
-          {activeIdx >= 0 ? `Stage ${activeIdx + 1}/7` : "Stage —/7"}
+          {activeIdx >= 0 ? `Step ${activeIdx + 1}/6` : "Step —/6"}
           {elapsed && <span className="ml-2 text-ink-2">{elapsed}</span>}
         </span>
       </div>

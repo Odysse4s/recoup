@@ -134,7 +134,7 @@ function TelemetryStrip({ win, progress, typing }: { win: LiveWin; progress: num
           {[...t.facts, latency].map((f, i) => (
             <span key={i}>
               {i > 0 && <span className="px-1.5 text-ink-3">·</span>}
-              {f}
+              {f.replace(/\bpk_col\b/g, "Record ID")}
             </span>
           ))}
         </span>
@@ -144,6 +144,7 @@ function TelemetryStrip({ win, progress, typing }: { win: LiveWin; progress: num
         {t.steps.map((step, i) => {
           const done = i < doneCount;
           const active = i === doneCount && typing;
+          const label = step.replace(/\bpk_col\b/g, "Record ID");
           return (
             <span
               key={step}
@@ -157,7 +158,7 @@ function TelemetryStrip({ win, progress, typing }: { win: LiveWin; progress: num
               ) : (
                 <span className={cx("h-1.5 w-1.5 rounded-full", active ? cx(tone.dot, "animate-pulse") : "bg-ink-3")} />
               )}
-              {step}
+              {label}
               {i < t.steps.length - 1 && <span className="pl-1 text-ink-3">→</span>}
             </span>
           );
@@ -467,6 +468,7 @@ function LiveWindow({
           >
             {lines.map((line, i) => {
               const active = i === lines.length - 1 && typing;
+              const displayLine = line.replace(/\bpk_col\b/g, "record_id");
               return (
                 <div key={i} className={cx("relative flex pr-4", active && tone.soft)}>
                   <span className={cx("absolute inset-y-0 left-0 w-[3px]", active ? tone.dot : "bg-transparent")} />
@@ -474,7 +476,7 @@ function LiveWindow({
                     {i + 1}
                   </span>
                   <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-ink">
-                    {renderAsXml ? highlightXmlLine(line) : highlightLine(line, win.lang)}
+                    {renderAsXml ? highlightXmlLine(displayLine) : highlightLine(displayLine, win.lang)}
                     {active && <span className={cx("ml-px inline-block h-[1.05em] w-[0.6em] translate-y-[2px] cursor-blink", tone.dot)} />}
                   </span>
                 </div>
@@ -513,7 +515,7 @@ function LiveWindow({
                 ) : (
                   <XCircle className="h-3 w-3" />
                 )}
-                {a.label}
+                {a.label.replace(/\bpk_col\b/g, "Record ID")}
                 <span className="font-semibold">{st === "pending" ? "PENDING" : st === "pass" ? "PASS" : "FAIL"}</span>
               </motion.span>
             );

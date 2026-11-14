@@ -92,6 +92,7 @@ export interface ApprovalNeededPayload {
   diff_preview: string;
   risk_reason: string;
   spoken_summary: string;
+  channel?: "notification" | "voice_call";
   report?: ChangeReport | null;
 }
 
@@ -109,6 +110,7 @@ export interface VerifyPayload {
 export interface CallStartPayload {
   call_id: string;
   mode?: "vendor" | "user_consult";
+  channel?: "notification" | "voice_call";
   counterparty?: string;
   req_id?: string | null;
   claim_id?: string;

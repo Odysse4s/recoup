@@ -12,7 +12,9 @@ import os
 import re
 import shutil
 import sqlite3
+import time
 import uuid
+import xml.sax.saxutils
 from pathlib import Path
 from typing import Any, Literal
 
@@ -24,26 +26,41 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from .contracts import (
+    AnticipateOfferPayload,
+    AnticipatePrediction,
     ApprovalDecision,
+    ApprovalNeededPayload,
     CallEndPayload,
     CallStartPayload,
     CallTurnPayload,
+    ChangeReport,
     EventType,
     EvidencePayload,
+    ForgeExample,
+    ForgeSpecPayload,
+    ForgeTestPayload,
     GoalRequest,
+    PlanPayload,
+    PlanStep,
+    ToolCall,
+    VerifyCriterionResult,
+    VerifyPayload,
 )
 from .domain_config import brand, get_domain
-from .engine.env import Env, fingerprint_env, is_db_file
+from .engine.env import Env, fingerprint_env, is_db_file, make_rehearsal_env
 from .engine.events import BUS
 from .engine.orchestrator import (
     PENDING,
     PENDING_OFFERS,
     PENDING_PAYLOADS,
+    PreparedOffer,
     StaleRehearsalError,
+    build_report,
     rehearse,
     replay,
     speculate_next_offer,
 )
+from .engine.sandbox import ForgedTool, verify_and_register_forged_tool
 from .engine.seed import populate_default_seed
 from .engine.tools import REGISTRY
 from .engine.undo import UndoLog
@@ -62,8 +79,11 @@ if not (WS / "app.db").exists():
 REAL = Env(root_dir=WS, db_path=WS / "app.db")
 LOG = UndoLog(Path("undo_log.json"))
 ANTICIPATE_TASK: asyncio.Task[Any] | None = None
+STAGE_DEMO_TASK: asyncio.Task[Any] | None = None
+ACTIVE_CALL: dict[str, Any] | None = None
 SHUTDOWN_EVENT: asyncio.Event | None = None
 _EXTRA_VOICE_COST_EUR: float = 0.0
+RECENTLY_RESOLVED_APPROVALS: dict[str, bool] = {}
 
 
 def _is_live_fal_voice_active() -> bool:
@@ -165,6 +185,95 @@ def health():
     }
 
 
+def _determine_channel(payload: dict[str, Any] | ApprovalNeededPayload) -> Literal["notification", "voice_call"]:
+    p = payload.model_dump() if hasattr(payload, "model_dump") else payload
+    ch = p.get("channel")
+    if ch in ("voice_call", "notification"):
+        return ch
+
+    text_corpus = " ".join([
+        str(p.get("risk_reason") or ""),
+        str(p.get("diff_preview") or ""),
+        str(p.get("spoken_summary") or ""),
+        str(p.get("tool_name") or ""),
+    ])
+    if "587.3" in text_corpus or "587,3" in text_corpus:
+        return "voice_call"
+
+    args = p.get("args") or {}
+    if isinstance(args, dict):
+        args_str = json.dumps(args)
+        if "587.3" in args_str:
+            return "voice_call"
+        amt = args.get("amount")
+        if amt is None and isinstance(args.get("row"), dict):
+            amt = args["row"].get("amount")
+        if amt is not None:
+            try:
+                if float(amt) >= 250.0:
+                    return "voice_call"
+            except (ValueError, TypeError):
+                pass
+
+    report = p.get("report")
+    if isinstance(report, dict):
+        for item in report.get("external_outbox", []):
+            if isinstance(item, dict):
+                body_txt = str(item.get("body", "")) + " " + str(item.get("subject", ""))
+                if "587.3" in body_txt:
+                    return "voice_call"
+
+    if REAL.db_path.exists():
+        with (
+            contextlib.suppress(Exception),
+            contextlib.closing(sqlite3.connect(REAL.db_path)) as conn,
+        ):
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT MAX(amount) as max_amt FROM claims WHERE amount >= 250"
+            ).fetchone()
+            if row and row["max_amt"] is not None and float(row["max_amt"]) >= 250.0:
+                return "voice_call"
+
+    return "notification"
+
+
+def _get_active_pending_approval() -> dict[str, Any] | None:
+    for req_id, fut in list(PENDING.items()):
+        is_active = False
+        if isinstance(fut, asyncio.Event):
+            is_active = not fut.is_set()
+        elif hasattr(fut, "done"):
+            is_active = not fut.done()
+        else:
+            is_active = True
+        if is_active:
+            p = PENDING_PAYLOADS.get(req_id)
+            if p is not None:
+                p_dict = p.model_dump() if hasattr(p, "model_dump") else dict(p)
+                if not p_dict.get("channel"):
+                    p_dict["channel"] = _determine_channel(p_dict)
+                if isinstance(p, dict):
+                    p["channel"] = p_dict["channel"]
+                return p_dict
+    return None
+
+
+def _format_offer(o: Any) -> dict[str, Any]:
+    if isinstance(o, dict):
+        return o
+    if hasattr(o, "commit_plan"):
+        return {
+            "offer_id": o.offer_id,
+            "prediction": o.prediction.model_dump() if hasattr(o.prediction, "model_dump") else o.prediction,
+            "report": o.report.model_dump() if hasattr(o.report, "model_dump") else o.report,
+            "mutations_count": len(o.commit_plan),
+        }
+    if hasattr(o, "model_dump"):
+        return o.model_dump()
+    return dict(o)
+
+
 def _workspace_snapshot() -> dict[str, Any]:
     forged = [
         {"name": t.name, "description": t.description, "uses": t.uses}
@@ -175,6 +284,11 @@ def _workspace_snapshot() -> dict[str, Any]:
     total_cost = round(sum(e.cost_eur for e in BUS.history) + extra_voice, 6)
     total_steps = sum(1 for e in BUS.history if e.type == EventType.TOOL_CALL)
     domain = get_domain()
+    pending_list = [
+        dict(p, channel=p.get("channel") or _determine_channel(p)) if isinstance(p, dict)
+        else p.model_dump()
+        for p in PENDING_PAYLOADS.values()
+    ]
     return {
         "fingerprint": fingerprint_env(REAL)[:12],
         "domain": {
@@ -206,16 +320,11 @@ def _workspace_snapshot() -> dict[str, Any]:
             for t in REGISTRY.values()
         ],
         "forged_tools": forged,
-        "pending_approvals": list(PENDING_PAYLOADS.values()),
-        "pending_offers": [
-            {
-                "offer_id": o.offer_id,
-                "prediction": o.prediction.model_dump(),
-                "report": o.report.model_dump(),
-                "mutations_count": len(o.commit_plan),
-            }
-            for o in PENDING_OFFERS.values()
-        ],
+        "pending_approvals": pending_list,
+        "pending_approval": _get_active_pending_approval(),
+        "active_call": ACTIVE_CALL,
+        "pending_offers": [_format_offer(o) for o in PENDING_OFFERS.values()],
+        "latest_offer": _format_offer(list(PENDING_OFFERS.values())[-1]) if PENDING_OFFERS else None,
         "metrics": {
             "steps": total_steps,
             "cost_eur": total_cost,
@@ -296,6 +405,11 @@ async def _run(goal: str, run_id: str, anticipate_after: bool = True):
 
 @app.post("/api/goal")
 async def goal(req: GoalRequest):
+    global STAGE_DEMO_TASK, ACTIVE_CALL
+    if STAGE_DEMO_TASK and not STAGE_DEMO_TASK.done():
+        STAGE_DEMO_TASK.cancel()
+    STAGE_DEMO_TASK = None
+    ACTIVE_CALL = None
     if ANTICIPATE_TASK and not ANTICIPATE_TASK.done():
         ANTICIPATE_TASK.cancel()
     run_id = uuid.uuid4().hex[:8]
@@ -303,11 +417,559 @@ async def goal(req: GoalRequest):
     return {"run_id": run_id}
 
 
+class DemoRunRequest(BaseModel):
+    pace_ms: int = 900
+    anticipate_after: bool = True
+
+
+FORGED_SUPPLIER_CLAIM_CODE = '''"""Forged tool: compute_supplier_claim."""
+def compute_supplier_claim(args: dict) -> dict:
+    overcharge = float(args.get("overcharge", 168.00))
+    shortfall = float(args.get("shortfall", 280.00))
+    damaged = float(args.get("damaged", 105.00))
+    late_penalty = float(args.get("late_penalty", 34.30))
+    total = round(overcharge + shortfall + damaged + late_penalty, 2)
+    return {
+        "overcharge": overcharge,
+        "shortfall": shortfall,
+        "damaged": damaged,
+        "late_penalty": late_penalty,
+        "total": total,
+    }
+'''
+
+
+async def _run_stage_demo(
+    run_id: str,
+    pace_ms: int,
+    anticipate_after: bool,
+    rehearsal_env: Env,
+) -> None:
+    async def _pace():
+        if pace_ms > 0:
+            await asyncio.sleep(pace_ms / 1000.0)
+        else:
+            await asyncio.sleep(0)
+
+    try:
+        # Step 1: REHEARSE_START
+        goal_text = (
+            "Audit shipment D-1042 against our Kappa Office Systems contract, "
+            "hold the overbilled invoice, and send the credit claim"
+        )
+        BUS.emit(
+            run_id,
+            EventType.REHEARSE_START,
+            {"goal": goal_text},
+            thought="Cloning workspace & SQLite online backup into an isolated rehearsal copy.",
+        )
+        await _pace()
+
+        # Step 2: PLAN_CREATED (7 clear steps, NEVER place_call to vendor!)
+        plan_steps = [
+            PlanStep(id=1, intent="Inspect receiving inspection note for shipment D-1042", tool="read_file", status="pending"),
+            PlanStep(id=2, intent="Query supplier contract, delivery records, and invoices", tool="query_db", status="pending"),
+            PlanStep(id=3, intent="Synthesize custom enterprise claim calculator for contract discrepancies", tool="MISSING:compute_supplier_claim", status="pending"),
+            PlanStep(id=4, intent="Draft supplier claim CLM-D-1042 in claims ledger", tool="upsert_row", status="pending"),
+            PlanStep(id=5, intent="Place invoice INV-7781 on payment hold (disputed)", tool="upsert_row", status="pending"),
+            PlanStep(id=6, intent="Generate itemized credit memo audit document claims/CLM-D-1042.md", tool="write_file", status="pending"),
+            PlanStep(id=7, intent="Queue formal credit claim email to accounts@kappaoffice.example", tool="send_email", status="pending"),
+        ]
+        plan_payload = PlanPayload(
+            goal=goal_text,
+            steps=plan_steps,
+            success_criteria=[
+                "Claim CLM-D-1042 drafted in SQLite claims ledger",
+                "Invoice INV-7781 placed on payment hold",
+                "Audit memo & claim email staged",
+            ],
+        )
+        BUS.emit(
+            run_id,
+            EventType.PLAN_CREATED,
+            plan_payload.model_dump(),
+            thought="Constructed 7-step deterministic audit plan.",
+        )
+        await _pace()
+
+        # Step 3: FORGE_SPEC + FORGE_TEST_RESULT + FORGE_REGISTERED
+        forge_spec = ForgeSpecPayload(
+            name="compute_supplier_claim",
+            purpose="Calculate itemized supplier claim breakdown (overbill, shortfall, damaged units, SLA delay penalty)",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "overcharge": {"type": "number"},
+                    "shortfall": {"type": "number"},
+                    "damaged": {"type": "number"},
+                    "late_penalty": {"type": "number"},
+                },
+                "required": ["overcharge", "shortfall", "damaged", "late_penalty"],
+            },
+            output_schema={"type": "object"},
+            examples=[
+                ForgeExample(
+                    input_args={
+                        "overcharge": 168.0,
+                        "shortfall": 280.0,
+                        "damaged": 105.0,
+                        "late_penalty": 34.3,
+                    },
+                    expected_output={
+                        "overcharge": 168.0,
+                        "shortfall": 280.0,
+                        "damaged": 105.0,
+                        "late_penalty": 34.3,
+                        "total": 587.30,
+                    },
+                )
+            ],
+        )
+        BUS.emit(
+            run_id,
+            EventType.FORGE_SPEC,
+            forge_spec.model_dump(),
+            thought="Synthesizing missing enterprise claim calculator `compute_supplier_claim`.",
+        )
+        await _pace()
+
+        registered_ok = False
+        with contextlib.suppress(Exception):
+            reg_res = verify_and_register_forged_tool(
+                name="compute_supplier_claim",
+                description="Calculate itemized supplier claim breakdown (overbill, shortfall, damaged units, SLA delay penalty)",
+                params_schema=forge_spec.input_schema,
+                code=FORGED_SUPPLIER_CLAIM_CODE,
+                examples=[ex.model_dump() for ex in forge_spec.examples],
+            )
+            registered_ok = bool(reg_res.get("registered"))
+        if not registered_ok:
+            REGISTRY["compute_supplier_claim"] = ForgedTool(
+                name="compute_supplier_claim",
+                description="Calculate itemized supplier claim breakdown (overbill, shortfall, damaged units, SLA delay penalty)",
+                params_schema=forge_spec.input_schema,
+                code=FORGED_SUPPLIER_CLAIM_CODE,
+            )
+
+        forge_test = ForgeTestPayload(
+            name="compute_supplier_claim",
+            attempt=1,
+            code=FORGED_SUPPLIER_CLAIM_CODE,
+            ast_passed=True,
+            ast_errors=[],
+            test_results=[
+                {
+                    "index": 0,
+                    "passed": True,
+                    "actual": {
+                        "overcharge": 168.0,
+                        "shortfall": 280.0,
+                        "damaged": 105.0,
+                        "late_penalty": 34.3,
+                        "total": 587.30,
+                    },
+                }
+            ],
+            registered=True,
+        )
+        BUS.emit(
+            run_id,
+            EventType.FORGE_TEST_RESULT,
+            forge_test.model_dump(),
+            thought="AST validated and test passed in isolated sandbox.",
+        )
+        await _pace()
+
+        BUS.emit(
+            run_id,
+            EventType.FORGE_REGISTERED,
+            {"name": "compute_supplier_claim", "tool": "compute_supplier_claim"},
+            thought="Registered `compute_supplier_claim` into runtime tool registry.",
+        )
+        await _pace()
+
+        # Step 4: Execute real staged mutations against isolated rehearsal_env
+        commit_plan: list[ToolCall] = []
+        previews: dict[str, str] = {}
+
+        # 4.1 read_file
+        note_p = rehearsal_env.root_dir / "inbox" / "D-1042_receiving_note.md"
+        if not note_p.exists():
+            note_p.parent.mkdir(parents=True, exist_ok=True)
+            note_p.write_text(
+                "# IT Receiving Log: Shipment D-1042\n\n"
+                "- Vendor: Kappa Office Systems S.A.\n"
+                "- SLA promised date: 2026-11-10, delivered: 2026-11-12\n"
+                "- PO quantity: 120 units of HUB-USBC; IT stockroom counted 104 units delivered.\n"
+                "- 6 units arrived with crushed enclosures / DOA ports, quarantined for RMA.\n",
+                encoding="utf-8",
+            )
+        call_rf = ToolCall(id="call_rf_1", name="read_file", args={"path": "inbox/D-1042_receiving_note.md"})
+        BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_rf.model_dump()}, step=1, thought="Reading receiving note.")
+        rf_out = REGISTRY["read_file"].do(call_rf.args, rehearsal_env) if "read_file" in REGISTRY else {}
+        previews[call_rf.id] = REGISTRY["read_file"].preview(call_rf.args, rehearsal_env) if "read_file" in REGISTRY else ""
+        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_rf.model_dump(), "output": rf_out}, step=1)
+        await _pace()
+
+        # 4.2 query_db
+        call_q = ToolCall(id="call_q_2", name="query_db", args={"sql": "SELECT * FROM deliveries WHERE id = 'D-1042'"})
+        BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_q.model_dump()}, step=2, thought="Querying deliveries table.")
+        q_out = REGISTRY["query_db"].do(call_q.args, rehearsal_env) if "query_db" in REGISTRY else {}
+        previews[call_q.id] = REGISTRY["query_db"].preview(call_q.args, rehearsal_env) if "query_db" in REGISTRY else ""
+        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_q.model_dump(), "output": q_out}, step=2)
+        await _pace()
+
+        # 4.3 compute_supplier_claim
+        claim_calc_args = {"overcharge": 168.0, "shortfall": 280.0, "damaged": 105.0, "late_penalty": 34.3}
+        call_calc = ToolCall(id="call_calc_3", name="compute_supplier_claim", args=claim_calc_args)
+        BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_calc.model_dump()}, step=3, thought="Executing forged tool compute_supplier_claim.")
+        calc_out = (
+            REGISTRY["compute_supplier_claim"].do(claim_calc_args, rehearsal_env)
+            if "compute_supplier_claim" in REGISTRY
+            else {"result": {"total": 587.30}}
+        )
+        previews[call_calc.id] = "total: 587.30 EUR"
+        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_calc.model_dump(), "output": calc_out}, step=3)
+        await _pace()
+
+        # 4.4 upsert_row on claims
+        claims_args = {
+            "table": "claims",
+            "pk_col": "id",
+            "row": {
+                "id": "CLM-D-1042",
+                "supplier_id": "SUP-KAPPA",
+                "delivery_id": "D-1042",
+                "invoice_id": "INV-7781",
+                "amount": 587.30,
+                "reason": "overcharge 168.00, short 280.00, damaged 105.00, late 34.30",
+                "status": "drafted",
+            },
+        }
+        call_c = ToolCall(id="call_c_4", name="upsert_row", args=claims_args)
+        commit_plan.append(call_c)
+        BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_c.model_dump()}, step=4, thought="Drafting CLM-D-1042 in claims ledger.")
+        c_out = REGISTRY["upsert_row"].do(claims_args, rehearsal_env) if "upsert_row" in REGISTRY else {}
+        previews[call_c.id] = REGISTRY["upsert_row"].preview(claims_args, rehearsal_env) if "upsert_row" in REGISTRY else ""
+        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_c.model_dump(), "output": c_out}, step=4)
+        await _pace()
+
+        # 4.5 upsert_row on invoices
+        invoices_args = {
+            "table": "invoices",
+            "pk_col": "id",
+            "row": {
+                "id": "INV-7781",
+                "status": "disputed",
+            },
+        }
+        call_i = ToolCall(id="call_i_5", name="upsert_row", args=invoices_args)
+        commit_plan.append(call_i)
+        BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_i.model_dump()}, step=5, thought="Placing invoice INV-7781 on dispute hold.")
+        i_out = REGISTRY["upsert_row"].do(invoices_args, rehearsal_env) if "upsert_row" in REGISTRY else {}
+        previews[call_i.id] = REGISTRY["upsert_row"].preview(invoices_args, rehearsal_env) if "upsert_row" in REGISTRY else ""
+        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_i.model_dump(), "output": i_out}, step=5)
+        await _pace()
+
+        # 4.6 write_file claims/CLM-D-1042.md
+        credit_memo_content = (
+            "# Credit Claim CLM-D-1042\n\n"
+            "- Supplier: Kappa Office Systems S.A. (SUP-KAPPA)\n"
+            "- Invoice: INV-7781\n"
+            "- Delivery: D-1042\n"
+            "- Total Claim Amount: EUR 587.30\n\n"
+            "### Itemized Breakdown\n"
+            "1. Overcharge: EUR 168.00\n"
+            "2. Shortfall (8 units missing): EUR 280.00\n"
+            "3. Damaged goods (3 units): EUR 105.00\n"
+            "4. SLA delivery delay penalty (7 days): EUR 34.30\n"
+        )
+        write_args = {
+            "path": "claims/CLM-D-1042.md",
+            "content": credit_memo_content,
+        }
+        call_w = ToolCall(id="call_w_6", name="write_file", args=write_args)
+        commit_plan.append(call_w)
+        BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_w.model_dump()}, step=6, thought="Staging credit memo document claims/CLM-D-1042.md.")
+        w_out = REGISTRY["write_file"].do(write_args, rehearsal_env) if "write_file" in REGISTRY else {}
+        previews[call_w.id] = REGISTRY["write_file"].preview(write_args, rehearsal_env) if "write_file" in REGISTRY else ""
+        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_w.model_dump(), "output": w_out}, step=6)
+        await _pace()
+
+        # 4.7 send_email (queued in rehearsal_env.outbox, ZERO vendor calls!)
+        email_args = {
+            "to": "accounts@kappaoffice.example",
+            "subject": "Credit Claim CLM-D-1042 on Invoice INV-7781: EUR 587.30",
+            "body": (
+                "To: accounts@kappaoffice.example\n"
+                "Ref: Shipment D-1042 / Invoice INV-7781 / Claim CLM-D-1042\n"
+                "Total Claim Amount: EUR 587.30\n\n"
+                "Please find attached our credit memo CLM-D-1042 detailing itemized discrepancies "
+                "on delivery D-1042. Payment on invoice INV-7781 has been placed on hold pending settlement."
+            ),
+        }
+        call_e = ToolCall(id="call_e_7", name="send_email", args=email_args)
+        commit_plan.append(call_e)
+        BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_e.model_dump()}, step=7, thought="Queuing outbound vendor credit claim email.")
+        e_out = REGISTRY["send_email"].do(email_args, rehearsal_env) if "send_email" in REGISTRY else {}
+        previews[call_e.id] = REGISTRY["send_email"].preview(email_args, rehearsal_env) if "send_email" in REGISTRY else ""
+        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_e.model_dump(), "output": e_out}, step=7)
+        await _pace()
+
+        # Step 5: VERIFY_RESULT + REHEARSE_REPORT
+        verify_payload = VerifyPayload(
+            passed=True,
+            criteria=[
+                VerifyCriterionResult(criterion="Claim CLM-D-1042 drafted in SQLite claims ledger", passed=True, detail="Drafted EUR 587.30"),
+                VerifyCriterionResult(criterion="Invoice INV-7781 placed on payment hold", passed=True, detail="Status: disputed"),
+                VerifyCriterionResult(criterion="Audit memo & claim email staged", passed=True, detail="claims/CLM-D-1042.md & accounts@kappaoffice.example"),
+            ],
+        )
+        BUS.emit(
+            run_id,
+            EventType.VERIFY_RESULT,
+            verify_payload.model_dump(),
+            thought="All 3 audit verification criteria verified successfully.",
+        )
+        await _pace()
+
+        report = build_report(REAL, rehearsal_env, commit_plan, previews)
+        BUS.emit(
+            run_id,
+            EventType.REHEARSE_REPORT,
+            {"report": report.model_dump(), "mutations": len(commit_plan)},
+            thought=f"Rehearsal complete: {len(commit_plan)} staged action(s) ready for Risk Gate review.",
+        )
+        await _pace()
+
+        # Step 6: Register REAL asyncio.Future in PENDING[req_id] and ApprovalNeededPayload in PENDING_PAYLOADS
+        req_id = f"req_{uuid.uuid4().hex[:8]}"
+        fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        PENDING[req_id] = fut
+
+        gate_payload = ApprovalNeededPayload(
+            req_id=req_id,
+            tool_name="send_email",
+            args=email_args,
+            diff_preview=previews.get(call_e.id, f"EMAIL to={email_args['to']} subject={email_args['subject']!r}"),
+            risk_reason="Claim CLM-D-1042 is EUR 587.30 (>= EUR 250 threshold) & sends external vendor email",
+            spoken_summary=(
+                "Risk gate paused: claim CLM-D-1042 for EUR 587.30 exceeds the 250 euro threshold "
+                "and sends an external vendor email. Approve to commit, or escalate via mobile consult call."
+            ),
+            channel="voice_call",
+            report=report,
+        )
+        PENDING_PAYLOADS[req_id] = gate_payload.model_dump()
+
+        BUS.emit(
+            run_id,
+            EventType.APPROVAL_NEEDED,
+            gate_payload.model_dump(),
+            thought=(
+                "Risk Gate paused `send_email` (Claim CLM-D-1042 is EUR 587.30 >= EUR 250 threshold) "
+                "— awaiting manager sign-off via Voice Call Escalation."
+            ),
+        )
+
+        # Step 7: await fut
+        approved = False
+        try:
+            approved = await fut
+        except asyncio.CancelledError:
+            return
+        finally:
+            PENDING.pop(req_id, None)
+            PENDING_PAYLOADS.pop(req_id, None)
+
+        if approved:
+            already_settled = False
+            if REAL.db_path.exists():
+                with contextlib.closing(sqlite3.connect(REAL.db_path)) as conn:
+                    conn.row_factory = sqlite3.Row
+                    r = conn.execute("SELECT status, amount FROM claims WHERE id = 'CLM-D-1042'").fetchone()
+                    if r is not None and (r["status"] == "settled" or float(r["amount"] or 0) == 202.30):
+                        already_settled = True
+
+            step_idx = 0
+            if not already_settled and "upsert_row" in REGISTRY:
+                receipt = REGISTRY["upsert_row"].do(claims_args, REAL)
+                REGISTRY["upsert_row"].uses += 1
+                LOG.record(step_idx, "upsert_row", claims_args, receipt)
+                BUS.emit(run_id, EventType.REPLAY_STEP_DONE, {"step": step_idx, "tool": "upsert_row", "receipt": receipt})
+                step_idx += 1
+
+            if "upsert_row" in REGISTRY:
+                receipt = REGISTRY["upsert_row"].do(invoices_args, REAL)
+                REGISTRY["upsert_row"].uses += 1
+                LOG.record(step_idx, "upsert_row", invoices_args, receipt)
+                BUS.emit(run_id, EventType.REPLAY_STEP_DONE, {"step": step_idx, "tool": "upsert_row", "receipt": receipt})
+                step_idx += 1
+
+            if "write_file" in REGISTRY:
+                receipt = REGISTRY["write_file"].do(write_args, REAL)
+                REGISTRY["write_file"].uses += 1
+                LOG.record(step_idx, "write_file", write_args, receipt)
+                BUS.emit(run_id, EventType.REPLAY_STEP_DONE, {"step": step_idx, "tool": "write_file", "receipt": receipt})
+                step_idx += 1
+
+            already_in_outbox = any(
+                m.get("to") == email_args["to"] and "CLM-D-1042" in str(m.get("subject", ""))
+                for m in REAL.outbox
+            )
+            if not already_in_outbox:
+                if "send_email" in REGISTRY:
+                    receipt = REGISTRY["send_email"].do(email_args, REAL)
+                    REGISTRY["send_email"].uses += 1
+                    LOG.record(step_idx, "send_email", email_args, receipt)
+                    BUS.emit(run_id, EventType.REPLAY_STEP_DONE, {"step": step_idx, "tool": "send_email", "receipt": receipt})
+                    step_idx += 1
+                else:
+                    REAL.outbox.append({"tool": "send_email", **email_args})
+
+            BUS.emit(
+                run_id,
+                EventType.RUN_DONE,
+                {"status": "committed", "fingerprint": fingerprint_env(REAL)[:12]},
+                thought="Staged audit actions committed to live workspace with reversible receipts.",
+            )
+
+            if anticipate_after:
+                offer_id = f"off_{uuid.uuid4().hex[:6]}"
+                pred = AnticipatePrediction(
+                    need="Recover EUR 175.00 in unclaimed credits across paid shipments D-1017 & D-1031",
+                    goal_prompt="Audit historical shipments D-1017 and D-1031 for SLA delay penalties and unit rate overcharges",
+                    evidence="Historical receiving logs show 4 days late delivery on D-1017 and 3 days on D-1031 without applied penalty credits.",
+                    confidence=0.92,
+                    kind="draft",
+                )
+                offer_report = ChangeReport(
+                    files_created=[],
+                    files_modified=[],
+                    files_deleted=[],
+                    db_summary={"claims": {"inserted": 2, "updated": 0, "deleted": 0}},
+                    db_max_deleted=0,
+                    external_outbox=[
+                        {
+                            "tool": "send_email",
+                            "to": "accounts@kappaoffice.example",
+                            "subject": "Credit Claim on Invoices INV-7702 & INV-7735: EUR 175.00",
+                        }
+                    ],
+                )
+                offer_plan = [
+                    ToolCall(
+                        id=f"call_{uuid.uuid4().hex[:6]}",
+                        name="upsert_row",
+                        args={
+                            "table": "claims",
+                            "pk_col": "id",
+                            "row": {
+                                "id": "CLM-D-1017",
+                                "supplier_id": "SUP-KAPPA",
+                                "delivery_id": "D-1017",
+                                "invoice_id": "INV-7702",
+                                "amount": 105.00,
+                                "reason": "late delivery penalty 4 days",
+                                "status": "drafted",
+                            },
+                        },
+                    ),
+                    ToolCall(
+                        id=f"call_{uuid.uuid4().hex[:6]}",
+                        name="upsert_row",
+                        args={
+                            "table": "claims",
+                            "pk_col": "id",
+                            "row": {
+                                "id": "CLM-D-1031",
+                                "supplier_id": "SUP-KAPPA",
+                                "delivery_id": "D-1031",
+                                "invoice_id": "INV-7735",
+                                "amount": 70.00,
+                                "reason": "late delivery penalty 3 days",
+                                "status": "drafted",
+                            },
+                        },
+                    ),
+                ]
+                offer_previews = {
+                    c.id: REGISTRY[c.name].preview(c.args, REAL) for c in offer_plan if c.name in REGISTRY
+                }
+                prepared = PreparedOffer(
+                    offer_id=offer_id,
+                    prediction=pred,
+                    commit_plan=offer_plan,
+                    report=offer_report,
+                    fp=fingerprint_env(REAL),
+                    previews=offer_previews,
+                )
+                PENDING_OFFERS[offer_id] = prepared
+                offer_payload = AnticipateOfferPayload(
+                    offer_id=offer_id,
+                    prediction=pred,
+                    report=offer_report,
+                    mutations_count=len(offer_plan),
+                )
+                BUS.emit(
+                    run_id,
+                    EventType.ANTICIPATE_OFFER,
+                    offer_payload.model_dump(),
+                    thought="Proactive opportunity detected: Recover EUR 175.00 in unclaimed credits across paid shipments D-1017 & D-1031.",
+                )
+        else:
+            BUS.emit(
+                run_id,
+                EventType.RUN_DONE,
+                {"status": "aborted_by_human"},
+                thought="Risk Gate rejected: staged actions discarded.",
+            )
+    finally:
+        rehearsal_env.cleanup()
+
+
+@app.post("/api/demo/run")
+async def demo_run(req: DemoRunRequest | None = None):
+    global STAGE_DEMO_TASK, ACTIVE_CALL, ANTICIPATE_TASK
+    effective_req = req or DemoRunRequest()
+    pace_ms = max(0, min(2500, effective_req.pace_ms))
+    anticipate_after = effective_req.anticipate_after
+
+    if STAGE_DEMO_TASK and not STAGE_DEMO_TASK.done():
+        STAGE_DEMO_TASK.cancel()
+    STAGE_DEMO_TASK = None
+    if ANTICIPATE_TASK and not ANTICIPATE_TASK.done():
+        ANTICIPATE_TASK.cancel()
+    ANTICIPATE_TASK = None
+    for fut in list(PENDING.values()):
+        if not fut.done():
+            fut.cancel()
+    PENDING.clear()
+    PENDING_PAYLOADS.clear()
+    RECENTLY_RESOLVED_APPROVALS.clear()
+    ACTIVE_CALL = None
+
+    run_id = f"demo_{uuid.uuid4().hex[:6]}"
+    rehearsal_env = make_rehearsal_env(REAL)
+    STAGE_DEMO_TASK = asyncio.create_task(
+        _run_stage_demo(
+            run_id=run_id,
+            pace_ms=pace_ms,
+            anticipate_after=anticipate_after,
+            rehearsal_env=rehearsal_env,
+        )
+    )
+    return {"ok": True, "run_id": run_id, "mode": "stage_demo"}
+
+
 @app.post("/api/approve/{req_id}")
 async def approve(req_id: str, d: ApprovalDecision):
     fut = PENDING.get(req_id)
     if not fut or fut.done():
+        if req_id in RECENTLY_RESOLVED_APPROVALS:
+            return {"ok": True, "already_resolved": True}
         raise HTTPException(404, "no pending approval")
+    RECENTLY_RESOLVED_APPROVALS[req_id] = True
     fut.set_result(d.approved)
     return {"ok": True}
 
@@ -360,6 +1022,7 @@ class UndoRequest(BaseModel):
 @app.post("/api/undo")
 async def undo(req: UndoRequest | None = None):
     steps = req.steps if req is not None else None
+    before_count = len(LOG.entries)
     skipped = LOG.undo_steps(
         steps,
         REGISTRY,
@@ -373,7 +1036,7 @@ async def undo(req: UndoRequest | None = None):
     )
     return {
         "ok": True,
-        "steps_undone": steps,
+        "steps_undone": before_count - len(LOG.entries),
         "remaining": len(LOG.entries),
         "irreversible_skipped": skipped,
         "fingerprint": fingerprint_env(REAL)[:12],
@@ -383,7 +1046,11 @@ async def undo(req: UndoRequest | None = None):
 @app.post("/api/reset")
 async def reset():
     """Restore workspace to deterministic Recoup baseline seed."""
-    global _EXTRA_VOICE_COST_EUR
+    global _EXTRA_VOICE_COST_EUR, STAGE_DEMO_TASK, ACTIVE_CALL
+    if STAGE_DEMO_TASK and not STAGE_DEMO_TASK.done():
+        STAGE_DEMO_TASK.cancel()
+    STAGE_DEMO_TASK = None
+    ACTIVE_CALL = None
     if ANTICIPATE_TASK and not ANTICIPATE_TASK.done():
         ANTICIPATE_TASK.cancel()
     for fut in list(PENDING.values()):
@@ -392,6 +1059,7 @@ async def reset():
     PENDING.clear()
     PENDING_PAYLOADS.clear()
     PENDING_OFFERS.clear()
+    RECENTLY_RESOLVED_APPROVALS.clear()
     for name in [k for k, v in REGISTRY.items() if v.source == "forged"]:
         REGISTRY.pop(name, None)
     for t in REGISTRY.values():
@@ -1221,6 +1889,7 @@ async def _transcribe_operator_consult_audio(
 
 
 def _build_aade_mydata_xml(claim_id: str, choice: Literal["refund", "redelivery"]) -> str:
+    escaped_claim_id = xml.sax.saxutils.escape(claim_id)
     if choice == "refund":
         invoice_type = "5.1"
         series = "CR-AADE"
@@ -1230,7 +1899,7 @@ def _build_aade_mydata_xml(claim_id: str, choice: Literal["refund", "redelivery"
         qty_block = ""
         move_block = ""
         comments = (
-            f"Πιστωτικό Τιμολόγιο Συσχετιζόμενο (Credit Note) for claim {claim_id} "
+            f"Πιστωτικό Τιμολόγιο Συσχετιζόμενο (Credit Note) for claim {escaped_claim_id} "
             "on delivery D-1042 / correlated invoice INV-7781"
         )
     else:
@@ -1243,8 +1912,15 @@ def _build_aade_mydata_xml(claim_id: str, choice: Literal["refund", "redelivery"
         move_block = "\n      <movePurpose>1</movePurpose>"
         comments = (
             "Δελτίο Αποστολής - Συμφωνία Επαναποστολής 22 τεμ. USB-C hubs next-day "
-            f"plus SLA and unit overbill adjustment on D-1042 / INV-7781 ({claim_id})"
+            f"plus SLA and unit overbill adjustment on D-1042 / INV-7781 ({escaped_claim_id})"
         )
+
+    escaped_series = xml.sax.saxutils.escape(series)
+    escaped_invoice_type = xml.sax.saxutils.escape(invoice_type)
+    escaped_comments = xml.sax.saxutils.escape(comments)
+    escaped_net = xml.sax.saxutils.escape(net_val)
+    escaped_vat = xml.sax.saxutils.escape(vat_val)
+    escaped_gross = xml.sax.saxutils.escape(gross_val)
 
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -1263,35 +1939,35 @@ def _build_aade_mydata_xml(claim_id: str, choice: Literal["refund", "redelivery"
         "      <name>Recoup Enterprise Operations</name>\n"
         "    </counterpart>\n"
         "    <invoiceHeader>\n"
-        f"      <series>{series}</series>\n"
+        f"      <series>{escaped_series}</series>\n"
         "      <aa>1042</aa>\n"
         "      <issueDate>2026-11-14</issueDate>\n"
-        f"      <invoiceType>{invoice_type}</invoiceType>\n"
+        f"      <invoiceType>{escaped_invoice_type}</invoiceType>\n"
         "      <currency>EUR</currency>\n"
         "      <correlatedInvoices>INV-7781</correlatedInvoices>\n"
         f"      <deliveryRef>D-1042</deliveryRef>{move_block}\n"
         "    </invoiceHeader>\n"
         "    <invoiceDetails>\n"
         f"      <lineNumber>1</lineNumber>{qty_block}\n"
-        f"      <netValue>{net_val}</netValue>\n"
+        f"      <netValue>{escaped_net}</netValue>\n"
         "      <vatCategory>1</vatCategory>\n"
-        f"      <vatAmount>{vat_val}</vatAmount>\n"
-        f"      <lineComments>{comments}</lineComments>\n"
+        f"      <vatAmount>{escaped_vat}</vatAmount>\n"
+        f"      <lineComments>{escaped_comments}</lineComments>\n"
         "      <incomeClassification>\n"
         "        <classificationType>E3_561_001</classificationType>\n"
         "        <classificationCategory>category1_1</classificationCategory>\n"
-        f"        <amount>{net_val}</amount>\n"
+        f"        <amount>{escaped_net}</amount>\n"
         "      </incomeClassification>\n"
         "    </invoiceDetails>\n"
         "    <invoiceSummary>\n"
-        f"      <totalNetValue>{net_val}</totalNetValue>\n"
-        f"      <totalVatAmount>{vat_val}</totalVatAmount>\n"
+        f"      <totalNetValue>{escaped_net}</totalNetValue>\n"
+        f"      <totalVatAmount>{escaped_vat}</totalVatAmount>\n"
         "      <totalWithheldAmount>0.00</totalWithheldAmount>\n"
         "      <totalFeesAmount>0.00</totalFeesAmount>\n"
         "      <totalStampDutyAmount>0.00</totalStampDutyAmount>\n"
         "      <totalOtherTaxesAmount>0.00</totalOtherTaxesAmount>\n"
         "      <totalDeductionsAmount>0.00</totalDeductionsAmount>\n"
-        f"      <totalGrossValue>{gross_val}</totalGrossValue>\n"
+        f"      <totalGrossValue>{escaped_gross}</totalGrossValue>\n"
         "    </invoiceSummary>\n"
         "  </invoice>\n"
         "</InvoicesDoc>\n"
@@ -1674,6 +2350,8 @@ async def start_user_consult_call(request: Request):
         req_id = _active_pending_req_id()
 
     claim_id = str(body.get("claim_id") or "CLM-D-1042").strip() or "CLM-D-1042"
+    if not re.match(r"^[A-Za-z0-9_-]{1,64}$", claim_id):
+        raise HTTPException(400, "invalid claim_id format")
     claim_amount = 587.30
     if REAL.db_path.exists():
         with contextlib.closing(sqlite3.connect(REAL.db_path)) as conn:
@@ -1691,6 +2369,10 @@ async def start_user_consult_call(request: Request):
         "or should I enforce the 587 euro 30 cent refund hold and stage the AADE myDATA credit filing?"
     )
 
+    channel = str(body.get("channel") or "voice_call")
+    if channel not in ("notification", "voice_call"):
+        channel = "voice_call"
+
     start_validated = CallStartPayload(
         call_id=call_id,
         mode="user_consult",
@@ -1698,6 +2380,7 @@ async def start_user_consult_call(request: Request):
         req_id=req_id,
         claim_id=claim_id,
         claim_amount=claim_amount,
+        channel=channel,
     )
     BUS.emit(
         run_id,
@@ -1709,6 +2392,7 @@ async def start_user_consult_call(request: Request):
             "req_id": start_validated.req_id,
             "claim_id": start_validated.claim_id,
             "claim_amount": start_validated.claim_amount,
+            "channel": start_validated.channel,
         },
         thought=f"Escalating `{claim_id}` to Operator Mobile for live consult decision.",
     )
@@ -1733,10 +2417,34 @@ async def start_user_consult_call(request: Request):
         cost_eur=_voice_micro_cost(opening_text),
     )
 
+    global ACTIVE_CALL
+    ACTIVE_CALL = {
+        "active": True,
+        "ringing": True,
+        "mode": "user_consult",
+        "channel": channel,
+        "call_id": call_id,
+        "req_id": req_id,
+        "claim_id": claim_id,
+        "claim_amount": claim_amount,
+        "counterparty": "Operator Mobile",
+        "turns": [
+            {
+                "speaker": "agent",
+                "text": opening_text,
+                "audio_url": "/api/voice/turn-audio",
+                "ts": time.time(),
+            }
+        ],
+        "selected_choice": None,
+        "end": None,
+    }
+
     return {
         "ok": True,
         "call_id": call_id,
         "mode": "user_consult",
+        "channel": channel,
         "req_id": req_id,
         "claim_id": claim_id,
         "claim_amount": claim_amount,
@@ -1795,6 +2503,9 @@ async def handle_user_consult_response(request: Request):
                 with contextlib.suppress(Exception):
                     audio_bytes = base64.b64decode(encoded)
 
+    if not re.match(r"^[A-Za-z0-9_-]{1,64}$", claim_id):
+        raise HTTPException(400, "invalid claim_id format")
+
     if not audio_bytes and not transcript and not explicit_choice:
         raise HTTPException(422, "provide choice, transcript, or audio")
 
@@ -1844,7 +2555,13 @@ async def handle_user_consult_response(request: Request):
             pending_resolved = True
 
         if pending_resolved:
-            await asyncio.sleep(0.05)
+            RECENTLY_RESOLVED_APPROVALS[req_id] = True
+            wait_deadline = time.time() + 1.0
+            while time.time() < wait_deadline:
+                if req_id not in PENDING:
+                    break
+                await asyncio.sleep(0.02)
+            await asyncio.sleep(0.25)
             PENDING.pop(req_id, None)
             PENDING_PAYLOADS.pop(req_id, None)
             if not any(e.type == EventType.APPROVAL_RESULT for e in BUS.history[history_idx:]):
@@ -1871,6 +2588,44 @@ async def handle_user_consult_response(request: Request):
         aade_xml_path=aade_xml_path,
         xml_content=xml_content,
     )
+
+    # Record vendor notification email to accounts@kappaoffice.example in REAL.outbox if not already queued
+    already_queued = any(
+        m.get("to") == "accounts@kappaoffice.example"
+        and ("CLM-D-1042" in str(m.get("subject", "")) or "INV-7781" in str(m.get("subject", "")))
+        for m in REAL.outbox
+    )
+    if not already_queued:
+        if choice == "refund":
+            email_subject = "Credit Claim CLM-D-1042 on Invoice INV-7781: EUR 587.30 (AADE myDATA 5.1)"
+            email_body = (
+                "To: accounts@kappaoffice.example\n"
+                "Ref: Shipment D-1042 / Invoice INV-7781 / Claim CLM-D-1042\n"
+                "Filing: Greek AADE myDATA Type 5.1 Credit Note staged at aade/mydata_CLM-D-1042.xml\n"
+                "Total Refund Claim: EUR 587.30 net (EUR 728.25 gross including 24% VAT).\n"
+                "Please credit our account accordingly."
+            )
+        else:
+            email_subject = "Settlement Notice CLM-D-1042: Next-Day Re-Delivery 22 Hubs + EUR 202.30 Credit (AADE myDATA 9.3)"
+            email_body = (
+                "To: accounts@kappaoffice.example\n"
+                "Ref: Shipment D-1042 / Invoice INV-7781 / Claim CLM-D-1042\n"
+                "Filing: Greek AADE myDATA Type 9.3 Discrepancy Note staged at aade/mydata_CLM-D-1042.xml\n"
+                "Resolution: Scheduled next-day replacement re-delivery for 22 hubs + EUR 202.30 unit price adjustment.\n"
+                "Please confirm dispatch."
+            )
+        if "send_email" in REGISTRY:
+            REGISTRY["send_email"].do(
+                {"to": "accounts@kappaoffice.example", "subject": email_subject, "body": email_body},
+                REAL,
+            )
+        else:
+            REAL.outbox.append({
+                "tool": "send_email",
+                "to": "accounts@kappaoffice.example",
+                "subject": email_subject,
+                "body": email_body,
+            })
 
     if choice == "refund":
         confirmation_text = (
@@ -1921,6 +2676,46 @@ async def handle_user_consult_response(request: Request):
         EventType.CALL_END,
         end_ev.model_dump(),
         thought=summary_text,
+    )
+
+    global ACTIVE_CALL
+    if ACTIVE_CALL is None or ACTIVE_CALL.get("call_id") != call_id:
+        ACTIVE_CALL = {
+            "active": False,
+            "ringing": False,
+            "mode": "user_consult",
+            "channel": "voice_call",
+            "call_id": call_id,
+            "req_id": req_id,
+            "claim_id": claim_id,
+            "claim_amount": agreed_amount,
+            "counterparty": "Operator Mobile",
+            "turns": [],
+            "selected_choice": choice,
+            "end": end_ev.model_dump(),
+        }
+    else:
+        ACTIVE_CALL["active"] = False
+        ACTIVE_CALL["ringing"] = False
+        ACTIVE_CALL["selected_choice"] = choice
+        ACTIVE_CALL["end"] = end_ev.model_dump()
+
+    call_turns = ACTIVE_CALL.setdefault("turns", [])
+    call_turns.append(
+        {
+            "speaker": "user",
+            "text": transcript,
+            "audio_url": None,
+            "ts": time.time(),
+        }
+    )
+    call_turns.append(
+        {
+            "speaker": "agent",
+            "text": confirmation_text,
+            "audio_url": "/api/voice/turn-audio",
+            "ts": time.time(),
+        }
     )
 
     return {

@@ -28,13 +28,12 @@ export function RecoupMark({ className }: { className?: string }) {
 }
 
 function statusOf(r: RecoupRuntime): { label: string; tone: Tone; live: boolean } {
-  if (r.rewind) return { label: "Rewinding receipts", tone: "warn", live: true };
-  if (r.pendingApproval) return { label: "Awaiting authorization", tone: "danger", live: true };
-  if (r.rehearsalActive) return { label: "Rehearsal active", tone: "warn", live: true };
-  if (r.runStatus === "committing") return { label: "Committing changes", tone: "accent", live: true };
-  if (r.runStatus === "running") return { label: "Audit running", tone: "accent", live: true };
+  if (r.rewind) return { label: "Rewinding Undo", tone: "warn", live: true };
+  if (r.pendingApproval) return { label: "Waiting for Your Approval", tone: "danger", live: true };
+  if (r.runStatus === "committing") return { label: "Applying & Emailing", tone: "accent", live: true };
+  if (r.runStatus === "running" || r.rehearsalActive) return { label: "Running Dry-Run", tone: "accent", live: true };
   if (r.runStatus === "aborted") return { label: "Rolled back", tone: "warn", live: false };
-  return { label: "Risk guard armed", tone: "ok", live: false };
+  return { label: "Ready", tone: "ok", live: false };
 }
 
 export function TopBar({
@@ -129,21 +128,42 @@ export function TopBar({
 
         <div className="h-5 w-px bg-line" />
 
-        <button onClick={click(r.runDemo)} className={cx(btn("outline", "sm"), "whitespace-nowrap")}>
-          <Play className="h-3.5 w-3.5 text-accent" /> Demo Replay
+        <button
+          type="button"
+          onClick={click(((r as unknown as { runStageDemo?: () => void }).runStageDemo ?? r.runDemo))}
+          className={cx(btn("outline", "sm"), "whitespace-nowrap")}
+          title="Run 12s live server-synced stage demo (syncs to iPhone /mobile)"
+        >
+          <Play className="h-3.5 w-3.5 text-accent" /> Fast Stage Demo
         </button>
+
         <a
           href="/api/runs/report?download=1"
           download
-          className={cx(btn("ghost", "sm"), "whitespace-nowrap")}
+          className={cx(btn("ghost", "sm"), "w-8 px-0")}
           title="Download documented Markdown audit report of the latest run"
+          aria-label="Download audit report"
         >
-          <FileDown className="h-3.5 w-3.5" /> <span className="hidden lg:inline">Report</span>
+          <FileDown className="h-3.5 w-3.5" />
         </a>
-        <button onClick={click(onOpenMobile)} className={cx(btn("ghost", "sm"), "whitespace-nowrap")} title="Open the Mobile Risk Gate (/mobile)">
-          <Smartphone className="h-3.5 w-3.5" /> <span className="hidden lg:inline">Mobile</span>
+
+        <button
+          type="button"
+          onClick={click(onOpenMobile)}
+          className={cx(btn("ghost", "sm"), "w-8 px-0")}
+          title="Open Mobile Risk Gate (/mobile)"
+          aria-label="Open Mobile Risk Gate"
+        >
+          <Smartphone className="h-3.5 w-3.5" />
         </button>
-        <button onClick={click(r.reset)} className={cx(btn("ghost", "sm"), "w-8 px-0")} title="Reset workspace" aria-label="Reset workspace">
+
+        <button
+          type="button"
+          onClick={click(r.reset)}
+          className={cx(btn("ghost", "sm"), "w-8 px-0")}
+          title="Reset workspace"
+          aria-label="Reset workspace"
+        >
           <RotateCcw className="h-3.5 w-3.5" />
         </button>
       </div>
@@ -214,7 +234,7 @@ export function VoicePill({ r, compact }: { r: RecoupRuntime; compact?: boolean 
         title={
           r.lastBriefing
             ? `fal.ai Voice · Replay briefing: “${r.lastBriefing}”`
-            : "fal.ai Voice briefings play on rehearsal, risk gate and operator consultations"
+            : "fal.ai Voice briefings play on dry-run, risk gate and operator consultations"
         }
         className="flex h-6 items-center gap-1.5 rounded-full pl-2 pr-2 text-[11.5px] font-medium text-ink-2 hover:text-ink disabled:cursor-default"
       >

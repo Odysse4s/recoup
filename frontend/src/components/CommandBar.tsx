@@ -110,7 +110,6 @@ export function CommandBar({
   onChange,
   onSubmit,
   busy,
-  brandName = "Recoup",
   pendingApproval = null,
   onApprove,
   speaking = false,
@@ -215,7 +214,7 @@ export function CommandBar({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (!value.trim()) return;
+          if (!value.trim() || busy) return;
           soundFx.playUiClick();
           onSubmit(value.trim());
         }}
@@ -246,7 +245,7 @@ export function CommandBar({
               ? "Drop receiving photo or delivery note to audit into workspace inbox…"
               : speech.listening
               ? "Listening…"
-              : `Assign a vendor audit or AP recovery goal to ${brandName}…`
+              : "Ask Recoup to audit a shipment, verify contract rates, or stage a vendor claim…"
           }
           aria-label="Goal"
           className="h-full min-w-0 flex-1 bg-transparent text-[14px] text-ink placeholder:text-ink-3 focus:outline-none"
@@ -272,8 +271,8 @@ export function CommandBar({
                 soundFx.playUiClick();
                 fileInputRef.current?.click();
               }}
-              aria-label="Attach receiving photo or document evidence"
-              title="Attach receiving photo or delivery log (or drag & drop onto bar)"
+              aria-label="Attach File"
+              title="Attach receiving photo, delivery note, or invoice (or drag & drop onto bar)"
               className={cx(
                 "flex h-8 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-[12px] font-medium transition-colors",
                 uploadingEvidence
@@ -286,7 +285,7 @@ export function CommandBar({
               ) : (
                 <Paperclip className="h-3.5 w-3.5" />
               )}
-              <span className="hidden md:inline">{uploadingEvidence ? "Auditing…" : "Attach Evidence"}</span>
+              <span className="hidden md:inline">{uploadingEvidence ? "Auditing…" : "Attach File"}</span>
             </button>
           </>
         )}
@@ -299,8 +298,8 @@ export function CommandBar({
           }}
           disabled={!speech.supported}
           aria-pressed={speech.listening}
-          aria-label={speech.listening ? "Stop voice input" : "Push to talk"}
-          title={speech.supported ? (speech.listening ? "Stop listening" : "Push to talk") : "Voice input isn't supported in this browser"}
+          aria-label={speech.listening ? "Stop voice input" : "Voice input"}
+          title={speech.supported ? (speech.listening ? "Stop listening" : "Voice input") : "Voice input isn't supported in this browser"}
           className={cx(
             "relative flex h-8 items-center gap-2 overflow-hidden rounded-lg border px-2.5 text-[12px] font-medium transition-colors",
             speech.listening
@@ -321,12 +320,25 @@ export function CommandBar({
               </motion.span>
             )}
           </AnimatePresence>
-          <span className="hidden sm:inline">{speech.listening ? "Listening" : "Talk"}</span>
+          <span className="hidden sm:inline">{speech.listening ? "Listening" : "Voice"}</span>
         </button>
 
-        <button type="submit" disabled={!value.trim()} className={cx(btn("primary", "md"), "h-8 pl-3 pr-2.5")}>
-          {busy ? "Rehearse Again" : "Rehearse & Run"}
-          <CornerDownLeft className="h-3.5 w-3.5 opacity-70" />
+        <button
+          type="submit"
+          disabled={!value.trim() || busy}
+          className={cx(btn("primary", "md"), "h-8 pl-3 pr-2.5 gap-1.5")}
+        >
+          {busy ? (
+            <>
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <span>Running…</span>
+            </>
+          ) : (
+            <>
+              <span>Run Agent ↵</span>
+              <CornerDownLeft className="h-3.5 w-3.5 opacity-70" />
+            </>
+          )}
         </button>
       </form>
 

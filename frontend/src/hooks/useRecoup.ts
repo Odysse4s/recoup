@@ -12,7 +12,6 @@ import type {
   ServerEvent,
   VerifyPayload,
 } from "../contracts";
-import type { VendorCallState } from "../components/VendorCallPanel";
 import { brandOf } from "../lib/brand";
 import { buildThoughtGraph } from "../lib/graph";
 import { IDLE_NARRATION, briefingFor, callOf, idleNarration, narrate } from "../lib/narrate";
@@ -43,7 +42,6 @@ import {
   mockEvents,
   mockUserConsultRespondEvents,
   mockUserConsultStartEvents,
-  mockVendorCallEvents,
 } from "../mockEvents";
 
 const EVENT_TYPES = [
@@ -111,7 +109,6 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   const [landing, setLanding] = useState<string[]>([]);
   const [evidenceItems, setEvidenceItems] = useState<EvidencePayload[]>([]);
   const [uploadingEvidence, setUploadingEvidence] = useState(false);
-  const [vendorCall, setVendorCall] = useState<VendorCallState | null>(null);
   const [operatorConsult, setOperatorConsult] = useState<OperatorConsultState | null>(null);
 
   const queueRef = useRef<ServerEvent[]>([]);
@@ -238,12 +235,70 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
 
         wsStateRef.current = data;
         setWsState(data);
-        if (data.pending_offers.length > 0) setOffer(data.pending_offers[data.pending_offers.length - 1]);
-        if (optsArg?.initial && data.pending_approvals.length > 0) {
-          setPendingApproval(data.pending_approvals[0]);
+
+        // Hydrate pending approval
+        const nextPending = data.pending_approval ?? (data.pending_approvals?.length ? data.pending_approvals[0] : null);
+        if (nextPending) {
+          if (queueRef.current.length > 0) {
+            while (queueRef.current.length > 0) {
+              const flushed = queueRef.current.shift();
+              if (flushed) applyRef.current(flushed);
+            }
+            setQueued(0);
+          }
+          setPendingApproval(nextPending);
           setStage("gate");
-          setRunStatus("awaiting");
+          setRunStatus((curr) => (curr === "running" || curr === "idle" ? "awaiting" : curr));
+        } else if (modeRef.current === "live") {
+          setPendingApproval(null);
         }
+
+        // Hydrate active call
+        if (data.active_call) {
+          const ac = data.active_call;
+          const mappedTurns = (ac.turns ?? []).map((t) => ({
+            speaker: t.speaker,
+            text: t.text,
+            audioUrl: t.audio_url ?? null,
+            ts: t.ts ?? Date.now() / 1000,
+          }));
+          setOperatorConsult((prev) => {
+            const prevCount = prev?.turns.length ?? 0;
+            if (!windowsEnabledRef.current && voiceRef.current && mappedTurns.length > prevCount) {
+              const newTurn = mappedTurns[mappedTurns.length - 1];
+              if (newTurn && newTurn.speaker === "agent" && newTurn.text) {
+                speakCallTurn("agent", newTurn.text, {
+                  onStart: () => setSpeaking(true),
+                  onEnd: () => setSpeaking(false),
+                });
+              }
+            }
+            return {
+              active: Boolean(ac.active),
+              ringing: Boolean(ac.ringing),
+              mode: "user_consult",
+              channel: ac.channel ?? "voice_call",
+              callId: ac.call_id,
+              reqId: ac.req_id ?? null,
+              claimId: ac.claim_id,
+              claimAmount: ac.claim_amount,
+              counterparty: ac.counterparty,
+              turns: mappedTurns,
+              activeSpeaker: ac.active ? (mappedTurns[mappedTurns.length - 1]?.speaker ?? null) : null,
+              selectedChoice: ac.selected_choice ?? null,
+              end: ac.end ?? null,
+            };
+          });
+        } else if (data.active_call === null && modeRef.current === "live") {
+          setOperatorConsult((prev) => (prev?.active ? null : prev));
+        }
+
+        // Hydrate latest offer
+        const nextOffer = data.latest_offer ?? (data.pending_offers?.length ? data.pending_offers[data.pending_offers.length - 1] : null);
+        if (nextOffer) {
+          setOffer(nextOffer);
+        }
+
         return data;
       } catch {
         return null;
@@ -251,6 +306,37 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     },
     [markTables]
   );
+
+  // 1500ms state poll sync for mobile and active runs
+  useEffect(() => {
+    const shouldPoll =
+      !opts.liveWindows ||
+      runStatus === "running" ||
+      runStatus === "awaiting" ||
+      runStatus === "committing";
+    if (!shouldPoll) return;
+    const interval = window.setInterval(() => {
+      void refreshState();
+    }, 1500);
+    return () => window.clearInterval(interval);
+  }, [opts.liveWindows, refreshState, runStatus]);
+
+  // iOS Safari Wake & Network Reconnect Refetch
+  useEffect(() => {
+    const onWakeOrFocus = () => {
+      if (document.visibilityState === "visible") {
+        void refreshState();
+      }
+    };
+    document.addEventListener("visibilitychange", onWakeOrFocus);
+    window.addEventListener("focus", onWakeOrFocus);
+    window.addEventListener("online", onWakeOrFocus);
+    return () => {
+      document.removeEventListener("visibilitychange", onWakeOrFocus);
+      window.removeEventListener("focus", onWakeOrFocus);
+      window.removeEventListener("online", onWakeOrFocus);
+    };
+  }, [refreshState]);
 
   const ensureDemoBaseline = useCallback(() => {
     const baseTables = prevTablesRef.current ?? wsStateRef.current?.tables ?? FALLBACK_TABLES;
@@ -416,9 +502,14 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         break;
       }
       case "call_start": {
+        if (windowsEnabledRef.current) {
+          stopSpeaking();
+          setSpeaking(false);
+        }
         const p = ev.payload as {
           call_id?: string;
           mode?: "vendor" | "user_consult";
+          channel?: "notification" | "voice_call";
           req_id?: string | null;
           claim_id?: string;
           counterparty?: string;
@@ -427,187 +518,118 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           floor_pct?: number;
         };
         const callId = String(p.call_id ?? "CONSULT-CLM-D-1042");
-        const isUserConsult = p.mode === "user_consult" || callId.startsWith("CONSULT-");
-        if (isUserConsult) {
-          setOperatorConsult({
-            active: true,
-            ringing: true,
-            mode: "user_consult",
-            callId,
-            reqId: p.req_id ?? null,
-            claimId: String(p.claim_id ?? "CLM-D-1042"),
-            claimAmount: Number(p.claim_amount ?? 587.3),
-            counterparty: String(p.counterparty ?? "Operator Mobile"),
-            turns: [],
-            activeSpeaker: null,
-            selectedChoice: null,
-            end: null,
-          });
-        } else {
-          setVendorCall({
-            active: true,
-            dialing: false,
-            callId,
-            claimId: String(p.claim_id ?? "CLM-D-1042"),
-            counterparty: String(p.counterparty ?? "Kappa Office Systems AR desk"),
-            claimAmount: Number(p.claim_amount ?? 587.3),
-            openingPct: Number(p.opening_pct ?? 70),
-            floorPct: Number(p.floor_pct ?? 85),
-            turns: [],
-            activeSpeaker: null,
-            end: null,
-          });
+        setOperatorConsult({
+          active: true,
+          ringing: true,
+          mode: "user_consult",
+          channel: p.channel ?? "voice_call",
+          callId,
+          reqId: p.req_id ?? null,
+          claimId: String(p.claim_id ?? "CLM-D-1042"),
+          claimAmount: Number(p.claim_amount ?? 587.3),
+          counterparty: String(p.counterparty ?? "Operator Mobile"),
+          turns: [],
+          activeSpeaker: null,
+          selectedChoice: null,
+          end: null,
+        });
+        if (!windowsEnabledRef.current) {
+          soundFx.playIncomingCall();
         }
         break;
       }
       case "call_turn": {
         const turn = ev.payload as unknown as CallTurnPayload;
         const callId = String(turn.call_id ?? "");
-        const isUserConsult = callId.startsWith("CONSULT-") || turn.speaker === "user";
-        if (isUserConsult) {
-          const inferredChoice: OperatorChoice | null =
-            turn.speaker === "user"
-              ? /redeliver|re-deliver|replace|22|hubs|tomorrow/i.test(turn.text)
-                ? "redelivery"
-                : "refund"
-              : null;
-          setOperatorConsult((prev) => {
-            const claimId = callId.replace(/^CONSULT-/, "") || prev?.claimId || "CLM-D-1042";
-            const base: OperatorConsultState = prev ?? {
-              active: true,
-              ringing: false,
-              mode: "user_consult",
-              callId: callId || `CONSULT-${claimId}`,
-              reqId: null,
-              claimId,
-              claimAmount: 587.3,
-              counterparty: "Operator Mobile",
-              turns: [],
-              activeSpeaker: null,
-              selectedChoice: null,
-              end: null,
-            };
-            return {
-              ...base,
-              active: true,
-              ringing: false,
-              selectedChoice: inferredChoice ?? base.selectedChoice,
-              turns: [
-                ...base.turns,
-                {
-                  speaker: turn.speaker,
-                  text: turn.text,
-                  audioUrl: turn.audio_url ?? null,
-                  ts: ev.ts || Date.now() / 1000,
-                },
-              ],
-            };
+        const inferredChoice: OperatorChoice | null =
+          turn.speaker === "user"
+            ? /redeliver|re-deliver|replace|22|hubs|tomorrow/i.test(turn.text)
+              ? "redelivery"
+              : "refund"
+            : null;
+        setOperatorConsult((prev) => {
+          const claimId = callId.replace(/^CONSULT-/, "").replace(/^CALL-/, "") || prev?.claimId || "CLM-D-1042";
+          const base: OperatorConsultState = prev ?? {
+            active: true,
+            ringing: false,
+            mode: "user_consult",
+            channel: "voice_call",
+            callId: callId || `CONSULT-${claimId}`,
+            reqId: null,
+            claimId,
+            claimAmount: 587.3,
+            counterparty: "Operator Mobile",
+            turns: [],
+            activeSpeaker: null,
+            selectedChoice: null,
+            end: null,
+          };
+          return {
+            ...base,
+            active: true,
+            ringing: false,
+            selectedChoice: inferredChoice ?? base.selectedChoice,
+            turns: [
+              ...base.turns,
+              {
+                speaker: turn.speaker,
+                text: turn.text,
+                audioUrl: turn.audio_url ?? null,
+                ts: ev.ts || Date.now() / 1000,
+              },
+            ],
+          };
+        });
+        const shouldAutoSpeakTurn =
+          voiceRef.current &&
+          turn.speaker === "agent" &&
+          Boolean(turn.text) &&
+          (!windowsEnabledRef.current || modeRef.current === "demo");
+
+        if (shouldAutoSpeakTurn && turn.text) {
+          speakCallTurn("agent", turn.text, {
+            onStart: () => {
+              setSpeaking(true);
+              setOperatorConsult((c) => (c ? { ...c, activeSpeaker: "agent" } : c));
+            },
+            onEnd: () => {
+              setSpeaking(false);
+              setOperatorConsult((c) => (c && c.activeSpeaker === "agent" ? { ...c, activeSpeaker: null } : c));
+            },
           });
-          if (voiceRef.current && turn.speaker === "agent" && turn.text) {
-            speakCallTurn("agent", turn.text, {
-              onStart: () => {
-                setSpeaking(true);
-                setOperatorConsult((c) => (c ? { ...c, activeSpeaker: "agent" } : c));
-              },
-              onEnd: () => {
-                setSpeaking(false);
-                setOperatorConsult((c) => (c && c.activeSpeaker === "agent" ? { ...c, activeSpeaker: null } : c));
-              },
-            });
-          }
-        } else {
-          setVendorCall((prev) => {
-            const base: VendorCallState = prev ?? {
-              active: true,
-              dialing: false,
-              callId: turn.call_id || "CALL-CLM-D-1042",
-              claimId: turn.call_id?.replace(/^CALL-/, "") || "CLM-D-1042",
-              counterparty: "Kappa Office Systems AR desk",
-              claimAmount: 587.3,
-              openingPct: 70,
-              floorPct: 85,
-              turns: [],
-              activeSpeaker: null,
-              end: null,
-            };
-            return { ...base, active: true, dialing: false, turns: [...base.turns, turn] };
-          });
-          if (voiceRef.current && turn.text) {
-            speakCallTurn(turn.speaker, turn.text, {
-              onStart: () => {
-                setSpeaking(true);
-                setVendorCall((c) => (c ? { ...c, activeSpeaker: turn.speaker } : c));
-              },
-              onEnd: () => {
-                setSpeaking(false);
-                setVendorCall((c) => (c && c.activeSpeaker === turn.speaker ? { ...c, activeSpeaker: null } : c));
-              },
-            });
-          }
         }
         break;
       }
       case "call_end": {
         const endPayload = ev.payload as unknown as CallEndPayload;
         const callId = String(endPayload.call_id ?? "");
-        const isUserConsult = callId.startsWith("CONSULT-");
-        if (isUserConsult) {
-          const consultClaimId = callId.replace(/^CONSULT-/, "") || "CLM-D-1042";
-          const aadePath = `aade/mydata_${consultClaimId}.xml`;
-          setOperatorConsult((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  active: false,
-                  ringing: false,
-                  activeSpeaker: null,
-                  selectedChoice:
-                    prev.selectedChoice ??
-                    (typeof endPayload.agreed_amount === "number" && endPayload.agreed_amount < 350
-                      ? "redelivery"
-                      : "refund"),
-                  end: endPayload,
-                }
-              : prev
-          );
-          if (endPayload.outcome === "accepted") {
-            soundFx.playCommitSuccess();
-            if (modeRef.current !== "demo") {
-              void refreshState().then((fresh) => {
-                const xmlContent = fresh?.files?.[aadePath];
-                if (xmlContent && windowsEnabledRef.current) {
-                  spawnWindow({ ...fileWindow(aadePath, xmlContent), manual: false, instant: false });
-                }
-              });
-            }
-          }
-        } else {
-          const settledClaimId = endPayload.call_id?.replace(/^CALL-/, "") || "CLM-D-1042";
-          setVendorCall((prev) => (prev ? { ...prev, active: false, dialing: false, end: endPayload } : prev));
-          if (endPayload.outcome === "accepted") {
-            soundFx.playCommitSuccess();
-            if (modeRef.current === "demo") {
-              applyDemoUpsert({
-                table: "claims",
-                pk_col: "id",
-                row: { id: settledClaimId, status: "settled" },
-              });
-              setWsState((ws) => {
-                if (!ws) return ws;
-                const nextStep = {
-                  step: ws.undo_stack.length + 1,
-                  tool: "upsert_row",
-                  summary: `Settled claim #${settledClaimId} (${(endPayload.agreed_amount ?? 499.21).toFixed(2)} EUR)`,
-                  args: { table: "claims", pk_col: "id", row: { id: settledClaimId, status: "settled" } },
-                  ts: Date.now(),
-                };
-                const updated: WorkspaceState = { ...ws, undo_stack: [...ws.undo_stack, nextStep] };
-                wsStateRef.current = updated;
-                return updated;
-              });
-            } else {
-              refreshState();
-            }
+        const consultClaimId = callId.replace(/^CONSULT-/, "").replace(/^CALL-/, "") || "CLM-D-1042";
+        const aadePath = `aade/mydata_${consultClaimId}.xml`;
+        setOperatorConsult((prev) =>
+          prev
+            ? {
+                ...prev,
+                active: false,
+                ringing: false,
+                activeSpeaker: null,
+                selectedChoice:
+                  prev.selectedChoice ??
+                  (typeof endPayload.agreed_amount === "number" && endPayload.agreed_amount < 350
+                    ? "redelivery"
+                    : "refund"),
+                end: endPayload,
+              }
+            : prev
+        );
+        if (endPayload.outcome === "accepted") {
+          soundFx.playCommitSuccess();
+          if (modeRef.current !== "demo") {
+            void refreshState().then((fresh) => {
+              const xmlContent = fresh?.files?.[aadePath];
+              if (xmlContent && windowsEnabledRef.current) {
+                spawnWindow({ ...fileWindow(aadePath, xmlContent), manual: false, instant: false });
+              }
+            });
           }
         }
         break;
@@ -746,6 +768,14 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     const timer = window.setInterval(() => {
       const next = queueRef.current[0];
       if (!next) return;
+      if (next.type === "approval_needed" || next.type === "call_start") {
+        while (queueRef.current.length > 0) {
+          const flushed = queueRef.current.shift();
+          if (flushed) applyRef.current(flushed);
+        }
+        setQueued(0);
+        return;
+      }
       const callName = next.type === "tool_call" ? callOf(next)?.name ?? "" : "";
       const spawns =
         next.type === "forge_test" ||
@@ -773,14 +803,30 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       es.addEventListener(t, (e) => {
         try {
           const parsed: ServerEvent = JSON.parse((e as MessageEvent).data);
+          // On mobile, dispatch ALL events immediately (<50ms) with zero queue delay
+          if (!windowsEnabledRef.current) {
+            applyRef.current(parsed);
+            return;
+          }
+          // On desktop:
           if (parsed.type === "approval_result") {
             queueRef.current = queueRef.current.filter((q) => q.type !== "approval_needed");
-            enqueue([parsed]);
+            applyRef.current(parsed);
+          } else if (parsed.type === "approval_needed" || parsed.type === "call_start") {
+            // Speed-drain any remaining queued rehearsal events so desktop catches up immediately,
+            // and apply approval_needed / call_start right away
+            while (queueRef.current.length > 0) {
+              const flushed = queueRef.current.shift();
+              if (flushed) applyRef.current(flushed);
+            }
+            setQueued(0);
+            applyRef.current(parsed);
           } else if (
             parsed.type === "undo_step" ||
-            parsed.type === "call_start" ||
             parsed.type === "call_turn" ||
-            parsed.type === "call_end"
+            parsed.type === "call_end" ||
+            parsed.type === "run_done" ||
+            parsed.type === "offer"
           ) {
             applyRef.current(parsed);
           } else {
@@ -811,7 +857,6 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     setVerify(null);
     setPendingApproval(null);
     setOffer(null);
-    setVendorCall(null);
     setOperatorConsult(null);
     setRehearsalActive(false);
     setStage(null);
@@ -842,15 +887,27 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     }
   };
 
-  const runDemo = () => {
+  const runStageDemo = async () => {
     clearRun();
-    setMode("demo");
     setRunStartedAt(Date.now());
     setRunStatus("running");
     const brandName = brandOf(wsStateRef.current?.domain).brand_name;
-    setNarration(`Replaying ${brandName} shipment D-1042 vendor audit trace…`);
-    enqueue(mockEvents());
+    setNarration(`Running fast live stage audit demo for ${brandName} shipment D-1042…`);
+    try {
+      const res = await fetch("/api/demo/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pace_ms: 900, anticipate_after: true }),
+      });
+      if (!res.ok) throw new Error(`Demo run failed with status ${res.status}`);
+      setMode("live");
+    } catch {
+      setMode("demo");
+      enqueue(mockEvents());
+    }
   };
+
+  const runDemo = runStageDemo;
 
   const decide = async (reqId: string, approved: boolean) => {
     setPendingApproval(null);
@@ -1092,63 +1149,6 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     setEvidenceItems((prev) => prev.filter((item) => item.source !== source));
   };
 
-  const negotiateVendorCall = async (claimIdArg?: string) => {
-    const claimsRows = wsStateRef.current?.tables?.claims ?? [];
-    const latestClaim = claimsRows[claimsRows.length - 1];
-    const claimId = claimIdArg || String(latestClaim?.id ?? "CLM-D-1042");
-    const claimAmount = Number(latestClaim?.amount ?? 587.3);
-
-    stopSpeaking();
-    setVendorCall({
-      active: true,
-      dialing: true,
-      callId: `CALL-${claimId}`,
-      claimId,
-      counterparty: "Kappa Office Systems AR desk",
-      claimAmount,
-      openingPct: 70,
-      floorPct: 85,
-      turns: [],
-      activeSpeaker: null,
-      end: null,
-    });
-    setNarration(`Dialing Kappa Office Systems AR Desk to negotiate \`${claimId}\`…`);
-
-    if (modeRef.current === "demo") {
-      enqueue(mockVendorCallEvents(claimId, claimAmount));
-      return;
-    }
-    try {
-      const res = await fetch("/api/call/negotiate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ claim_id: claimId }),
-      });
-      if (!res.ok) throw new Error("negotiate failed");
-      await refreshState();
-    } catch {
-      enqueue(mockVendorCallEvents(claimId, claimAmount));
-    }
-  };
-
-  const replayTurnAudio = (speaker: "agent" | "counterparty" | "user", text: string) => {
-    speakCallTurn(
-      speaker,
-      text,
-      {
-        onStart: () => {
-          setSpeaking(true);
-          setVendorCall((c) => (c ? { ...c, activeSpeaker: speaker } : c));
-        },
-        onEnd: () => {
-          setSpeaking(false);
-          setVendorCall((c) => (c && c.activeSpeaker === speaker ? { ...c, activeSpeaker: null } : c));
-        },
-      },
-      true
-    );
-  };
-
   const replayConsultTurn = (text: string) => {
     speakCallTurn(
       "agent",
@@ -1161,6 +1161,24 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         onEnd: () => {
           setSpeaking(false);
           setOperatorConsult((c) => (c && c.activeSpeaker === "agent" ? { ...c, activeSpeaker: null } : c));
+        },
+      },
+      true
+    );
+  };
+
+  const replayTurnAudio = (speaker: "agent" | "counterparty" | "user", text: string) => {
+    speakCallTurn(
+      speaker,
+      text,
+      {
+        onStart: () => {
+          setSpeaking(true);
+          setOperatorConsult((c) => (c ? { ...c, activeSpeaker: speaker } : c));
+        },
+        onEnd: () => {
+          setSpeaking(false);
+          setOperatorConsult((c) => (c && c.activeSpeaker === speaker ? { ...c, activeSpeaker: null } : c));
         },
       },
       true
@@ -1367,14 +1385,13 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     uploadingEvidence,
     uploadEvidence,
     dismissEvidence,
-    vendorCall,
-    negotiateVendorCall,
     replayTurnAudio,
     operatorConsult,
     escalateToPhone,
     respondOperatorConsult,
     replayConsultTurn,
     triggerGoal,
+    runStageDemo,
     runDemo,
     decide,
     acceptOffer,

@@ -71,13 +71,15 @@ class UndoLog:
         remaining = len(self.entries) if (count is None or count <= 0) else min(count, len(self.entries))
         while self.entries and remaining > 0:
             remaining -= 1
-            e = self.entries.pop()
+            e = self.entries[-1]
             tool = registry.get(e["tool"])
             if tool and tool.reversible:
                 tool.undo(e["receipt"], env)
+                self.entries.pop()
                 if on_step:
                     on_step(e)
             else:
+                self.entries.pop()
                 skipped.append(e["tool"])
             self._flush()
         return skipped

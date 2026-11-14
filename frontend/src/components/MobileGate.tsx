@@ -235,6 +235,7 @@ function OperatorEscalationCall({
   const [details, setDetails] = useState(false);
   const [recording, setRecording] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [submitSource, setSubmitSource] = useState<"mic" | "tap" | null>(null);
   const [localSpeaking, setLocalSpeaking] = useState(false);
   const [voiceHint, setVoiceHint] = useState<string | null>(null);
   const [localTurns, setLocalTurns] = useState<OperatorConsultTurn[]>([]);
@@ -327,6 +328,20 @@ function OperatorEscalationCall({
       streamRef.current?.getTracks().forEach((tr) => tr.stop());
     };
   }, [callKey]);
+
+  // Web Audio ringtone loop every 2.2s while ringing until answered
+  useEffect(() => {
+    if (answered || resolvedEnd) return;
+    const isRinging = Boolean(consult?.ringing || (!consult?.end && consult?.turns.length === 0));
+    if (!isRinging) return;
+    soundFx.playIncomingCall();
+    buzz([220, 120, 220, 400]);
+    const interval = window.setInterval(() => {
+      soundFx.playIncomingCall();
+      buzz([220, 120, 220, 400]);
+    }, 2200);
+    return () => window.clearInterval(interval);
+  }, [answered, consult?.end, consult?.ringing, consult?.turns.length, resolvedEnd]);
 
   // Auto-play Recoup's fal.ai Voice opening question when call arrives or is answered
   useEffect(() => {
@@ -435,14 +450,16 @@ function OperatorEscalationCall({
       stopSpeaking();
       setAnswered(true);
       setSubmitting(true);
+      setSubmitSource("tap");
       const userLabel =
         choice === "refund"
           ? "Enforce €587.30 refund and stage Greek AADE myDATA 5.1 credit note."
           : "Accept next-day 22-unit re-delivery with €202.30 SLA and price credit.";
-      setVoiceHint("Staging resolution…");
+      setVoiceHint("Applying Decision & Emailing Vendor…");
 
       if (r.mode === "demo" && (!reqId || reqId.startsWith("req_demo"))) {
         setSubmitting(false);
+        setSubmitSource(null);
         finalizeOfflineOrDemo(choice, userLabel);
         return;
       }
@@ -467,6 +484,7 @@ function OperatorEscalationCall({
         finalizeOfflineOrDemo(choice, userLabel);
       } finally {
         setSubmitting(false);
+        setSubmitSource(null);
       }
     },
     [claimId, finalizeOfflineOrDemo, handleApiDecisionResponse, r.mode, reqId]
@@ -477,6 +495,7 @@ function OperatorEscalationCall({
       const clean = transcript.trim();
       if (!clean) return;
       setSubmitting(true);
+      setSubmitSource("mic");
       setVoiceHint(`Heard “${clean}” — resolving…`);
       const parsed = parseChoiceFromText(clean);
 
@@ -503,6 +522,7 @@ function OperatorEscalationCall({
         // Offline / demo fallback below
       } finally {
         setSubmitting(false);
+        setSubmitSource(null);
       }
 
       if (parsed) {
@@ -587,7 +607,8 @@ function OperatorEscalationCall({
         }
 
         setSubmitting(true);
-        setVoiceHint("Transcribing with fal.ai Wizper STT…");
+        setSubmitSource("mic");
+        setVoiceHint("Transcribing via fal.ai Wizper…");
         try {
           const form = new FormData();
           form.append("audio", blob, `operator-decision.${ext}`);
@@ -625,6 +646,7 @@ function OperatorEscalationCall({
           }
         } finally {
           setSubmitting(false);
+          setSubmitSource(null);
         }
       };
 
@@ -818,7 +840,7 @@ function OperatorEscalationCall({
                         <DiffBlock diff={approval.diff_preview} max={140} />
                       ) : (
                         <pre className="bg-code p-2 font-mono text-[11px] text-ink-2">
-                          {JSON.stringify(approval.args, null, 2)}
+                          {JSON.stringify(approval.args, null, 2).replace(/"pk_col":/g, '"record_id":')}
                         </pre>
                       )}
                     </div>
@@ -841,12 +863,12 @@ function OperatorEscalationCall({
                 <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-ok" />
                 <div className="min-w-0 flex-1">
                   <div className="text-[14.5px] font-semibold leading-snug text-ink">
-                    AADE myDATA Staged · Reversible Undo Ready
+                    Applied &amp; Vendor Emailed · Undo Ready
                   </div>
                   <div className="mt-0.5 font-mono text-[11px] font-semibold text-ok">
                     {resolvedEnd.choice === "redelivery"
-                      ? "22-Unit Replacement + AADE 9.3 (€202.30 Credit)"
-                      : "AP Hold INV-7781 + AADE 5.1 (€587.30 Net / €728.25 Gross)"}
+                      ? "22-Unit Replacement + AADE 9.3 (€202.30 Credit + Email Vendor)"
+                      : "AP Hold INV-7781 + AADE 5.1 (€587.30 Net / €728.25 Gross + Email Vendor)"}
                   </div>
                   <p className="mt-1.5 text-[12.5px] leading-relaxed text-ink-2">
                     {resolvedEnd.summary}
@@ -880,6 +902,41 @@ function OperatorEscalationCall({
                   Done
                 </button>
               </div>
+
+              {/* Next Prompt Suggestion when present */}
+              {r.offer && (
+                <div className="mt-2 rounded-2xl border border-signal/40 bg-surface/90 p-3 shadow-sm">
+                  <div className="flex items-center gap-2 text-[11.5px] font-semibold text-signal">
+                    <Sparkles className="h-3.5 w-3.5" /> Next Audit Suggestion
+                  </div>
+                  <div className="mt-1 text-[13px] font-semibold text-ink">
+                    Recoup found €175.00 more on paid shipments D-1017 &amp; D-1031 — Run this next?
+                  </div>
+                  <div className="mt-2.5 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        soundFx.playUiClick();
+                        r.acceptOffer(r.offer!.offer_id);
+                        onDismissCompleted();
+                      }}
+                      className={cx(btn("signal", "sm"), "h-9 flex-1 rounded-xl font-semibold")}
+                    >
+                      Approve &amp; Run
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        soundFx.playUiClick();
+                        r.dismissOffer(r.offer!.offer_id);
+                      }}
+                      className={cx(btn("outline", "sm"), "h-9 rounded-xl")}
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              )}
             </motion.div>
           ) : (
             <div className="space-y-2.5">
@@ -897,10 +954,17 @@ function OperatorEscalationCall({
                 )}
               >
                 {submitting ? (
-                  <>
-                    <Loader2 className="h-5 w-5 animate-spin" />
-                    Processing Wizper STT Decision…
-                  </>
+                  submitSource === "tap" ? (
+                    <>
+                      <Loader2 className="h-5 w-5 animate-spin" />
+                      Applying Decision &amp; Emailing Vendor…
+                    </>
+                  ) : (
+                    <>
+                      <Loader2 className="h-5 w-5 animate-spin" />
+                      Transcribing via fal.ai Wizper…
+                    </>
+                  )
                 ) : recording ? (
                   <>
                     <Square className="h-5 w-5 fill-current" />
@@ -928,13 +992,19 @@ function OperatorEscalationCall({
                   className="flex w-full items-center justify-between gap-2 rounded-2xl border border-ok/45 bg-ok/12 px-4 py-3 text-left transition-colors hover:bg-ok/18 active:scale-[0.99] disabled:opacity-50"
                 >
                   <span className="flex min-w-0 items-center gap-2.5">
-                    <FileCheck2 className="h-4 w-4 shrink-0 text-ok" />
+                    {submitting && submitSource === "tap" ? (
+                      <Loader2 className="h-4 w-4 shrink-0 animate-spin text-ok" />
+                    ) : (
+                      <FileCheck2 className="h-4 w-4 shrink-0 text-ok" />
+                    )}
                     <span className="truncate text-[13.5px] font-semibold text-ink">
-                      Enforce €587.30 Refund + AADE 5.1
+                      {submitting && submitSource === "tap"
+                        ? "Applying Decision & Emailing Vendor…"
+                        : "Enforce €587.30 Refund + Email Vendor"}
                     </span>
                   </span>
-                  <Chip tone="ok" solid className="shrink-0">
-                    Recommended
+                  <Chip tone="ok" solid className="shrink-0 text-[11px]">
+                    AADE 5.1 + Hold INV-7781
                   </Chip>
                 </button>
 
@@ -945,13 +1015,19 @@ function OperatorEscalationCall({
                   className="flex w-full items-center justify-between gap-2 rounded-2xl border border-line bg-surface/90 px-4 py-3 text-left transition-colors hover:border-signal/50 hover:bg-surface active:scale-[0.99] disabled:opacity-50"
                 >
                   <span className="flex min-w-0 items-center gap-2.5">
-                    <PackageCheck className="h-4 w-4 shrink-0 text-signal" />
+                    {submitting && submitSource === "tap" ? (
+                      <Loader2 className="h-4 w-4 shrink-0 animate-spin text-signal" />
+                    ) : (
+                      <PackageCheck className="h-4 w-4 shrink-0 text-signal" />
+                    )}
                     <span className="truncate text-[13.5px] font-semibold text-ink">
-                      Accept 22-Unit Re-Delivery (€202.30 Credit)
+                      {submitting && submitSource === "tap"
+                        ? "Applying Decision & Emailing Vendor…"
+                        : "Accept 22-Unit Re-Delivery + Email Vendor"}
                     </span>
                   </span>
-                  <Chip tone="signal" className="shrink-0">
-                    AADE 9.3
+                  <Chip tone="signal" className="shrink-0 text-[11px]">
+                    €202.30 Credit + AADE 9.3
                   </Chip>
                 </button>
               </div>
@@ -982,14 +1058,36 @@ function OperatorEscalationCall({
   );
 }
 
+function AudioUnlockBanner({ onUnlock }: { onUnlock: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onUnlock}
+      className="flex w-full items-center justify-between gap-2 border-b border-signal/40 bg-signal/15 px-5 py-2.5 text-[12px] font-semibold text-signal transition-colors hover:bg-signal/20 active:scale-[0.99]"
+    >
+      <span className="flex items-center gap-2">
+        <Volume2 className="h-4 w-4 animate-pulse" />
+        Tap once to arm iPhone sound &amp; mic
+      </span>
+      <span className="rounded-full bg-signal px-2 py-0.5 text-[10.5px] font-bold text-white shadow-sm">
+        Arm Audio
+      </span>
+    </button>
+  );
+}
+
 function GateHome({
   r,
   theme,
+  audioUnlocked,
+  onUnlockAudio,
   onToggleTheme,
   onExit,
 }: {
   r: RecoupRuntime;
   theme: Theme;
+  audioUnlocked: boolean;
+  onUnlockAudio: () => void;
   onToggleTheme: () => void;
   onExit: () => void;
 }) {
@@ -1001,11 +1099,12 @@ function GateHome({
   return (
     <div className="flex h-full flex-col">
       <StatusBar />
+      {!audioUnlocked && <AudioUnlockBanner onUnlock={onUnlockAudio} />}
       <div className="flex items-center justify-between px-5 pb-3 pt-2">
         <div className="flex items-center gap-2.5">
           <RecoupMark className="h-8 w-8" />
           <div className="leading-tight">
-            <div className="text-[17px] font-semibold tracking-tight text-ink">Mobile Risk Gate</div>
+            <div className="text-[17px] font-semibold tracking-tight text-ink">Mobile Companion</div>
             <div className="max-w-[220px] truncate text-[12px] text-ink-3">
               <span className="font-medium text-ink-2">{r.brand.brand_name}</span> · fal.ai Voice · Wizper STT
             </div>
@@ -1030,6 +1129,77 @@ function GateHome({
       </div>
 
       <div className="scroll-thin flex-1 space-y-3 overflow-y-auto px-5 pb-4">
+        {/* State 2 — Tier 1 Push Notification Card: Pre-call Voice Escalation Waiting */}
+        {r.pendingApproval && r.pendingApproval.channel === "voice_call" && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="rounded-3xl border border-signal/50 bg-signal/10 p-4 shadow-card"
+          >
+            <div className="flex items-center justify-between">
+              <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-signal">
+                Incoming Call Waiting · D-1042
+              </span>
+              <Chip tone="signal">€587.30 Discrepancy</Chip>
+            </div>
+            <div className="mt-2 text-[15px] font-semibold leading-snug text-ink">
+              Shipment D-1042 Decision — Live ERP &amp; Vendor Email Held
+            </div>
+            <p className="mt-1 text-[12.5px] leading-relaxed text-ink-2">
+              {r.pendingApproval.spoken_summary}
+            </p>
+            <div className="mt-3">
+              <button
+                type="button"
+                onClick={click(() => r.escalateToPhone(r.pendingApproval!.req_id))}
+                className={cx(btn("signal", "lg"), "h-12 w-full rounded-2xl text-[14px] font-semibold shadow-md")}
+              >
+                <PhoneCall className="h-4 w-4" />
+                Answer / Take Voice Call Now
+              </button>
+            </div>
+          </motion.div>
+        )}
+
+        {/* State 2 — Tier 1 Push Notification Card: Lightweight Notification Approval */}
+        {r.pendingApproval && r.pendingApproval.channel === "notification" && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="rounded-3xl border border-danger/40 bg-danger/[0.06] p-4 shadow-card"
+          >
+            <div className="flex items-center justify-between">
+              <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-danger">
+                Push Notification · Approval Needed
+              </span>
+              <Chip tone="danger">Vendor Email</Chip>
+            </div>
+            <div className="mt-2 text-[15px] font-semibold leading-snug text-ink">
+              Approve Outbound Vendor Email to accounts@kappaoffice.example
+            </div>
+            <p className="mt-1 text-[12.5px] leading-relaxed text-ink-2">
+              {r.pendingApproval.spoken_summary || r.pendingApproval.risk_reason}
+            </p>
+            <div className="mt-3 flex gap-2">
+              <button
+                type="button"
+                onClick={click(() => r.decide(r.pendingApproval!.req_id, true))}
+                className={cx(btn("ok", "lg"), "h-11 flex-1 rounded-xl text-[13.5px] font-semibold")}
+              >
+                Approve &amp; Send Email
+              </button>
+              <button
+                type="button"
+                onClick={click(() => r.decide(r.pendingApproval!.req_id, false))}
+                className={cx(btn("outline", "lg"), "h-11 rounded-xl text-[13.5px]")}
+              >
+                Hold &amp; Cancel
+              </button>
+            </div>
+          </motion.div>
+        )}
+
+        {/* State 3 — Standby Connected Card */}
         <div className="relative overflow-hidden rounded-3xl border border-line bg-surface p-5 shadow-card">
           <div className="flex items-center gap-4">
             <div className="relative flex h-16 w-16 items-center justify-center">
@@ -1043,17 +1213,30 @@ function GateHome({
               </span>
             </div>
             <div>
-              <div className="text-[20px] font-semibold tracking-tight text-ink">Operator line armed</div>
-              <div className="mt-0.5 flex items-center gap-1.5 text-[13px] text-ink-3">
+              <div className="text-[19px] font-semibold tracking-tight text-ink">
+                Connected to Desktop · Ready for Approvals &amp; Calls
+              </div>
+              <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-ink-3">
                 <Dot tone={r.connected ? "ok" : "neutral"} live={r.connected} />
-                {r.connected ? "Live SSE link · fal.ai Voice ready" : "Standby · demo ready"}
+                {r.connected ? "Live SSE & 1.5s Poll Sync · fal.ai Voice ready" : "Standby · demo ready"}
               </div>
             </div>
           </div>
           <p className="mt-4 text-[13.5px] leading-relaxed text-ink-2">
-            When you step away from the desktop HUD during a high-value vendor discrepancy (€250+),{" "}
+            When you step away from the desktop HUD during high-value vendor audits (€250+),{" "}
             {r.brand.brand_name} rings this phone with a spoken briefing and stages your AADE myDATA resolution live.
           </p>
+
+          <div className="mt-4 flex gap-2">
+            <button
+              type="button"
+              onClick={click(() => r.runStageDemo())}
+              className={cx(btn("ok", "lg"), "h-11 flex-1 rounded-xl text-[13.5px] font-semibold shadow-sm")}
+            >
+              Start 12s Stage Demo
+            </button>
+          </div>
+
           <div className="mt-4 grid grid-cols-3 gap-2 border-t border-line pt-3">
             <div>
               <div className="text-[11px] uppercase tracking-wider text-ink-3">Hash</div>
@@ -1076,6 +1259,7 @@ function GateHome({
           <VoicePill r={r} compact />
         </div>
 
+        {/* State 2 — Tier 1 Push Notification Card: Next Prompt Suggestion */}
         <AnimatePresence>
           {r.offer && (
             <motion.div
@@ -1088,17 +1272,19 @@ function GateHome({
                 <Sparkles className="h-4 w-4" /> Anticipated · {Math.round(r.offer.prediction.confidence * 100)}%
               </div>
               <div className="mt-1.5 text-[15px] font-semibold leading-snug text-ink">{r.offer.prediction.need}</div>
-              <div className="mt-1 text-[13px] text-ink-3">{r.offer.prediction.evidence}</div>
+              <div className="mt-1 text-[13px] text-ink-3">
+                Recoup found €175.00 more on paid shipments D-1017 &amp; D-1031 — Run this next?
+              </div>
               <div className="mt-3 flex gap-2">
                 <button
                   onClick={click(() => r.acceptOffer(r.offer!.offer_id))}
-                  className={cx(btn("signal", "lg"), "h-11 flex-1 rounded-xl")}
+                  className={cx(btn("signal", "lg"), "h-11 flex-1 rounded-xl text-[13.5px] font-semibold")}
                 >
-                  Apply ({r.offer.mutations_count})
+                  Approve &amp; Run ({r.offer.mutations_count})
                 </button>
                 <button
                   onClick={click(() => r.dismissOffer(r.offer!.offer_id))}
-                  className={cx(btn("outline", "lg"), "h-11 rounded-xl")}
+                  className={cx(btn("outline", "lg"), "h-11 rounded-xl text-[13.5px]")}
                 >
                   Dismiss
                 </button>
@@ -1152,6 +1338,33 @@ export function MobileGate({
   const [scale, setScale] = useState(1);
   const [dismissedCallKey, setDismissedCallKey] = useState<string | null>(null);
   const [localCompletion, setLocalCompletion] = useState<LocalCompletion | null>(null);
+  const [audioUnlocked, setAudioUnlocked] = useState(() => {
+    try {
+      return sessionStorage.getItem("recoup.audioUnlocked") === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  const unlockAudio = useCallback(() => {
+    soundFx.playUiClick();
+    soundFx.playStageTick(0);
+    try {
+      if (typeof window !== "undefined" && window.speechSynthesis) {
+        const u = new SpeechSynthesisUtterance(" ");
+        u.volume = 0.01;
+        window.speechSynthesis.speak(u);
+      }
+    } catch {
+      // ignore
+    }
+    setAudioUnlocked(true);
+    try {
+      sessionStorage.setItem("recoup.audioUnlocked", "1");
+    } catch {
+      // ignore
+    }
+  }, []);
 
   useEffect(() => {
     const fit = () => {
@@ -1186,15 +1399,22 @@ export function MobileGate({
   const currentSessionKey =
     consult?.callId ?? r.pendingApproval?.req_id ?? localCompletion?.sessionKey ?? "session-d-1042";
   const showEscalationScreen = Boolean(
-    r.pendingApproval ||
-      consult?.active ||
+    consult?.active ||
+      consult?.ringing ||
       localCompletion ||
       (consult?.end && dismissedCallKey !== currentSessionKey)
   );
 
   const screen = (
     <div className="relative h-full w-full overflow-hidden bg-canvas">
-      <GateHome r={r} theme={theme} onToggleTheme={onToggleTheme} onExit={onExit} />
+      <GateHome
+        r={r}
+        theme={theme}
+        audioUnlocked={audioUnlocked}
+        onUnlockAudio={unlockAudio}
+        onToggleTheme={onToggleTheme}
+        onExit={onExit}
+      />
       <AnimatePresence>
         {showEscalationScreen && (
           <OperatorEscalationCall

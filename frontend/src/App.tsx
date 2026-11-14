@@ -88,6 +88,12 @@ export default function App() {
   const latestClaim = claimsRows[claimsRows.length - 1];
   const committedClaimId =
     r.runStatus === "committed" || claimsRows.length > 0 ? String(latestClaim?.id ?? "CLM-D-1042") : null;
+  const isHighStakesConsult = Boolean(
+    r.pendingApproval &&
+      (r.pendingApproval.channel === "voice_call" ||
+        Number((r.pendingApproval.args?.row as Record<string, unknown> | undefined)?.amount ?? r.pendingApproval.args?.claim_amount ?? 587.3) >= 250 ||
+        /1042|d-1042|kappa/i.test(r.pendingApproval.risk_reason || r.pendingApproval.diff_preview || r.pendingApproval.spoken_summary || ""))
+  );
 
   return (
     <div className="recoup-canvas flex min-h-screen flex-col text-ink lg:h-screen lg:overflow-hidden">
@@ -139,7 +145,9 @@ export default function App() {
 
         <div className="scroll-thin flex min-h-0 flex-col gap-4 lg:col-span-5 lg:overflow-y-auto">
           <AnimatePresence initial={false}>
-            {r.pendingApproval && <RiskGateCard key={r.pendingApproval.req_id} approval={r.pendingApproval} onDecide={r.decide} />}
+            {r.pendingApproval && !isHighStakesConsult && (
+              <RiskGateCard key={r.pendingApproval.req_id} approval={r.pendingApproval} onDecide={r.decide} />
+            )}
           </AnimatePresence>
           <WorkspaceDeck r={r} />
           <Telemetry events={r.events} queued={r.queued} connected={r.connected} mode={r.mode} />
@@ -155,6 +163,7 @@ export default function App() {
             speaking={r.speaking}
             onEscalateToPhone={r.escalateToPhone}
             onSelectResolution={r.respondOperatorConsult}
+            onReject={(reqId) => r.decide(reqId, false)}
             onReplayTurn={r.replayConsultTurn}
           />
           <DiffStack

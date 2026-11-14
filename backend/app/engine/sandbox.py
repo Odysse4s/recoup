@@ -5,10 +5,13 @@ Synthesized tools are strictly pure Python functions (`mutating=False`, `reversi
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -17,9 +20,7 @@ from .tools import REGISTRY, Tool
 
 ALLOWED_IMPORTS = {
     "__future__",
-    "io",
     "functools",
-    "operator",
     "fractions",
     "dataclasses",
     "enum",
@@ -47,7 +48,20 @@ ALLOWED_IMPORTS = {
     "unicodedata",
     "typing",
 }
-FORBIDDEN_ATTRS = {"urlopen", "urlretrieve", "Request"}
+FORBIDDEN_ATTRS = {
+    "urlopen",
+    "urlretrieve",
+    "Request",
+    "open",
+    "FileIO",
+    "BufferedReader",
+    "BufferedWriter",
+    "attrgetter",
+    "itemgetter",
+    "methodcaller",
+    "system",
+    "popen",
+}
 FORBIDDEN_CALLS = {
     "open",
     "exec",
@@ -74,6 +88,7 @@ def validate_ast(code: str, func_name: str) -> tuple[bool, list[str]]:
 
     errors: list[str] = []
     has_func = False
+    allowed = ALLOWED_IMPORTS | ({"io"} if func_name == "parse_csv_row" else set())
 
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == func_name:
@@ -81,20 +96,22 @@ def validate_ast(code: str, func_name: str) -> tuple[bool, list[str]]:
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 root = alias.name.split(".")[0]
-                if (alias.name not in ALLOWED_IMPORTS and root not in ALLOWED_IMPORTS) or (
+                if (alias.name not in allowed and root not in allowed) or (
                     root == "urllib" and alias.name not in ("urllib", "urllib.parse")
                 ):
                     errors.append(f"Disallowed import: {alias.name}")
         elif isinstance(node, ast.ImportFrom):
             mod = node.module or ""
             root = mod.split(".")[0]
-            if (mod not in ALLOWED_IMPORTS and root not in ALLOWED_IMPORTS) or (
+            if (mod not in allowed and root not in allowed) or (
                 root == "urllib" and mod not in ("urllib", "urllib.parse")
             ):
                 errors.append(f"Disallowed import from: {node.module}")
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id in FORBIDDEN_CALLS:
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_CALLS:
                 errors.append(f"Forbidden call: {node.func.id}()")
+            elif isinstance(node.func, ast.Attribute) and node.func.attr in FORBIDDEN_CALLS:
+                errors.append(f"Forbidden call: {node.func.attr}()")
         elif isinstance(node, ast.Name):
             if node.id.startswith("__") and node.id != "__name__":
                 errors.append(f"Forbidden dunder name: {node.id}")
@@ -110,26 +127,43 @@ def validate_ast(code: str, func_name: str) -> tuple[bool, list[str]]:
     return len(errors) == 0, errors
 
 
-_RUNNER = """
+_ALLOWED_IMPORTS_REPR = repr(sorted(ALLOWED_IMPORTS | {"io"}))
+
+_RUNNER = f"""
 import json, sys
 try:
     import resource
     resource.setrlimit(resource.RLIMIT_CPU, (2, 2))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (1024 * 1024, 1024 * 1024))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
 except Exception:
     pass
+
+import builtins
+safe_builtins = dict(builtins.__dict__)
+for _bad in ("open", "exec", "eval", "compile", "breakpoint", "input"):
+    safe_builtins.pop(_bad, None)
+
+_allowed = set({_ALLOWED_IMPORTS_REPR})
+_orig_import = builtins.__import__
+def _restricted_import(name, *args, **kwargs):
+    root = name.split(".")[0]
+    if root not in _allowed and name not in _allowed:
+        raise ImportError(f"Disallowed import: {{name}}")
+    return _orig_import(name, *args, **kwargs)
+
+safe_builtins["__import__"] = _restricted_import
 
 payload = json.loads(sys.stdin.read())
 real_stdout = sys.stdout
 sys.stdout = sys.stderr
 try:
-    ns = {}
+    ns = {{"__builtins__": safe_builtins}}
     exec(payload["code"], ns)
     fn = ns[payload["func_name"]]
     out = fn(payload["args"])
 finally:
     sys.stdout = real_stdout
-real_stdout.write(json.dumps({"ok": True, "output": out}))
+real_stdout.write(json.dumps({{"ok": True, "output": out}}))
 """
 
 
@@ -144,15 +178,17 @@ def run_in_sandbox(code: str, func_name: str, args: dict[str, Any], timeout: flo
     if not ok:
         return {"ok": False, "error": "; ".join(errors)}
     try:
-        proc = subprocess.run(
-            [sys.executable, "-I", "-c", _RUNNER],
-            input=json.dumps({"code": code, "func_name": func_name, "args": args}),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=_sandbox_env(),
-            check=False,
-        )
+        with tempfile.TemporaryDirectory() as tmp_cwd:
+            proc = subprocess.run(
+                [sys.executable, "-I", "-c", _RUNNER],
+                input=json.dumps({"code": code, "func_name": func_name, "args": args}),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=_sandbox_env(),
+                cwd=tmp_cwd,
+                check=False,
+            )
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": f"Sandbox timeout ({timeout}s)"}
     if proc.returncode != 0:
@@ -172,6 +208,24 @@ def verify_and_register_forged_tool(
     save_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Validate AST, run all TDD examples in subprocess sandbox, and register into REGISTRY if all pass."""
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$", name):
+        return {
+            "name": name,
+            "ast_passed": False,
+            "ast_errors": [f"Invalid tool identifier: {name!r}"],
+            "test_results": [],
+            "registered": False,
+        }
+    if save_dir:
+        target_file = (save_dir / f"{name}.py").resolve()
+        if not target_file.is_relative_to(save_dir.resolve()):
+            return {
+                "name": name,
+                "ast_passed": False,
+                "ast_errors": [f"Tool file path escapes save directory: {name!r}"],
+                "test_results": [],
+                "registered": False,
+            }
     ast_ok, ast_errors = validate_ast(code, name)
     results: list[dict[str, Any]] = []
     if not examples:
@@ -226,11 +280,14 @@ class ForgedTool(Tool):
         self.description = description  # type: ignore[misc]
         self.params_schema = params_schema  # type: ignore[misc]
         self.code = code
+        self.sha256 = hashlib.sha256(code.encode("utf-8")).hexdigest()
 
     def preview(self, args: dict[str, Any], env: Env) -> str:
         return self.code
 
     def do(self, args: dict[str, Any], env: Env) -> dict[str, Any]:
+        if hashlib.sha256(self.code.encode("utf-8")).hexdigest() != self.sha256:
+            raise RuntimeError("ForgedTool code integrity check failed (SHA-256 mismatch)")
         res = run_in_sandbox(self.code, self.name, args)
         if not res.get("ok"):
             raise RuntimeError(res.get("error", "forged tool failed"))

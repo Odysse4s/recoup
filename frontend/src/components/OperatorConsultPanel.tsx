@@ -31,6 +31,7 @@ export interface OperatorConsultPanelProps {
   speaking: boolean;
   onEscalateToPhone: (reqId?: string | null, claimId?: string) => void;
   onSelectResolution: (choice: OperatorChoice, reqId?: string | null, claimId?: string) => void;
+  onReject?: (reqId: string) => void;
   onReplayTurn?: (text: string) => void;
 }
 
@@ -62,6 +63,7 @@ export function OperatorConsultPanel({
   speaking,
   onEscalateToPhone,
   onSelectResolution,
+  onReject,
   onReplayTurn,
 }: OperatorConsultPanelProps) {
   const transcriptRef = useRef<HTMLDivElement>(null);
@@ -79,10 +81,16 @@ export function OperatorConsultPanel({
   }, [committedClaimId, consult?.claimId, pendingApproval]);
 
   const activeReqId = pendingApproval?.req_id ?? consult?.reqId ?? null;
+  const isHighStakesApproval = Boolean(
+    pendingApproval &&
+      (pendingApproval.channel === "voice_call" ||
+        Number((pendingApproval.args?.row as Record<string, unknown> | undefined)?.amount ?? pendingApproval.args?.claim_amount ?? 587.3) >= 250 ||
+        /1042|d-1042|kappa/i.test(pendingApproval.risk_reason || pendingApproval.diff_preview || pendingApproval.spoken_summary || ""))
+  );
   const hasConsultActivity = Boolean(
     consult && (consult.active || consult.ringing || consult.turns.length > 0 || consult.end || consult.selectedChoice)
   );
-  const visible = Boolean(pendingApproval || hasConsultActivity || committedClaimId);
+  const visible = Boolean(isHighStakesApproval || hasConsultActivity);
 
   const countdownActive = Boolean(
     pendingApproval &&
@@ -138,6 +146,11 @@ export function OperatorConsultPanel({
   const resolvedChoice = inferChoice(consult, committedClaimId);
   const callLive = Boolean(consult?.active || consult?.ringing);
   const callCompleted = Boolean(consult?.end || (!pendingApproval && committedClaimId));
+  const panelTitle = callLive
+    ? "Ringing Your iPhone · Live Call Active"
+    : pendingApproval
+    ? "Shipment D-1042 Decision — Live ERP & Vendor Email Held"
+    : "Shipment D-1042 Resolution — Live ERP & Vendor Email Committed";
 
   return (
     <motion.div
@@ -149,12 +162,12 @@ export function OperatorConsultPanel({
       onMouseLeave={() => setHovered(false)}
     >
       <Panel
-        title="Shipment D-1042 Resolution & Operator Escalation"
+        title={panelTitle}
         icon={<PhoneIncoming />}
         meta={
           callLive ? (
             <Chip tone="signal">
-              <Dot tone="signal" live /> live mobile call
+              <Dot tone="signal" live /> Ringing Your iPhone · Live Call Active
             </Chip>
           ) : callCompleted ? (
             <Chip tone="ok">
@@ -182,10 +195,10 @@ export function OperatorConsultPanel({
                   }
                   onEscalateToPhone(activeReqId, claimId);
                 }}
-                className={cx(btn("signal", "sm"), "h-7 px-2.5")}
+                className={cx(btn("signal", "sm"), "h-7 px-2.5 font-semibold")}
               >
                 <PhoneForwarded className="h-3.5 w-3.5" />
-                Step Away · Ring Phone Now
+                Call My iPhone Now
               </button>
             )}
           </div>
@@ -212,7 +225,7 @@ export function OperatorConsultPanel({
                     <span className="text-[12px] font-semibold text-ink">
                       {countdownPaused
                         ? `Desktop presence confirmed — auto-call paused (${secondsLeft}s remaining)`
-                        : `Operator at desk? Auto-calling mobile phone in ${secondsLeft}s…`}
+                        : `At your desk? Calling your iPhone in ${secondsLeft}s if away…`}
                     </span>
                   </div>
 
@@ -241,10 +254,10 @@ export function OperatorConsultPanel({
                         }
                         onEscalateToPhone(activeReqId, claimId);
                       }}
-                      className={cx(btn("signal", "sm"), "h-7 px-2.5 text-[11.5px]")}
+                      className={cx(btn("signal", "sm"), "h-7 px-2.5 text-[11.5px] font-semibold")}
                     >
                       <Smartphone className="h-3.5 w-3.5" />
-                      Step Away · Ring Phone Now
+                      Call My iPhone Now
                     </button>
                   </div>
                 </div>
@@ -290,24 +303,23 @@ export function OperatorConsultPanel({
                 </div>
                 <div className="mt-1.5 flex items-start gap-2">
                   <PackageCheck className="mt-0.5 h-4 w-4 shrink-0 text-signal" />
-                  <div className="text-[12.5px] font-semibold leading-snug text-ink">
-                    Accept 22-Unit Re-Delivery (€202.30 SLA/Price Credit)
+                  <div className="text-[13.5px] font-semibold leading-snug text-ink">
+                    Accept 22-Unit Re-Delivery (<span className="text-signal">€202.30</span> credit + email vendor)
                   </div>
                 </div>
                 <p className="mt-1.5 text-[11.5px] leading-relaxed text-ink-2">
-                  Next-day replacement of 22 missing/damaged USB-C hubs + AADE <code className="font-mono text-[11px]">myDATA</code> Type{" "}
-                  <code className="font-mono text-[11px]">9.3</code> discrepancy note for unit-price &amp; SLA variance.
+                  Next-day replacement of 22 missing/damaged hubs + AADE <code className="font-mono text-[11px]">myDATA 9.3</code> discrepancy note + email <code className="font-mono text-[11px]">accounts@kappaoffice.example</code>.
                 </p>
               </div>
-              <div className="mt-2.5 flex items-center justify-between border-t border-line/70 pt-2 font-mono text-[10.5px] text-ink-3">
-                <span>22 hubs restocked + €202.30 credit</span>
+              <div className="mt-2.5 flex items-center justify-between border-t border-line/70 pt-2 font-mono text-[13px] text-ink">
+                <span>22 hubs restocked · <span className="font-semibold text-signal">€202.30 credit</span></span>
                 <span className="font-semibold text-signal group-hover:underline">
                   {resolvedChoice === "redelivery" ? "Committed" : "Choose Option A →"}
                 </span>
               </div>
             </button>
 
-            {/* Option B: Enforce €587.30 Refund + Stage AADE myDATA 5.1 Credit Note (Recommended / Emerald highlight) */}
+            {/* Option B: Enforce €587.30 Refund (Recommended) */}
             <button
               type="button"
               disabled={callLive && Boolean(consult?.selectedChoice)}
@@ -324,25 +336,24 @@ export function OperatorConsultPanel({
             >
               <div>
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-mono text-[10.5px] font-semibold uppercase tracking-wider text-ok">
+                  <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-ok">
                     Option B · Full Financial Recovery
                   </span>
                   <Chip tone="ok" solid={resolvedChoice === "refund"}>
-                    {resolvedChoice === "refund" ? "Selected · AADE 5.1" : "Recommended · AADE 5.1"}
+                    {resolvedChoice === "refund" ? "Selected · Recommended" : "Recommended · AADE 5.1"}
                   </Chip>
                 </div>
                 <div className="mt-1.5 flex items-start gap-2">
                   <FileCheck2 className="mt-0.5 h-4 w-4 shrink-0 text-ok" />
-                  <div className="text-[12.5px] font-semibold leading-snug text-ink">
-                    Enforce €587.30 Refund + Stage AADE myDATA 5.1 Credit Note
+                  <div className="text-[13.5px] font-semibold leading-snug text-ink">
+                    Enforce <span className="text-ok">€587.30</span> Refund (AADE 5.1 + hold invoice + email vendor)
                   </div>
                 </div>
                 <p className="mt-1.5 text-[11.5px] leading-relaxed text-ink-2">
-                  Full AP hold on <code className="font-mono text-[11px]">INV-7781</code> + Greek AADE{" "}
-                  <code className="font-mono text-[11px]">myDATA</code> Type <code className="font-mono text-[11px]">5.1</code> credit note (€587.30 net + €140.95 24% VAT = €728.25 gross).
+                  Hold <code className="font-mono text-[11px]">INV-7781</code> + stage Greek AADE <code className="font-mono text-[11px]">myDATA 5.1</code> credit note (€587.30 net + €140.95 24% VAT = €728.25 gross) + email <code className="font-mono text-[11px]">accounts@kappaoffice.example</code>.
                 </p>
               </div>
-              <div className="mt-2.5 flex items-center justify-between border-t border-ok/25 pt-2 font-mono text-[10.5px]">
+              <div className="mt-2.5 flex items-center justify-between border-t border-ok/25 pt-2 font-mono text-[13px]">
                 <span className="font-semibold text-ok">€587.30 net · €728.25 gross</span>
                 <span className="font-semibold text-ok group-hover:underline">
                   {resolvedChoice === "refund" ? "Committed" : "Enforce Option B →"}
@@ -350,6 +361,22 @@ export function OperatorConsultPanel({
               </div>
             </button>
           </div>
+
+          {pendingApproval && onReject && (
+            <div className="flex items-center justify-between border-t border-line/60 pt-2 text-[11.5px] text-ink-3">
+              <span>Holding ERP changes &amp; outbound vendor email until authorized.</span>
+              <button
+                type="button"
+                onClick={() => {
+                  soundFx.playUiClick();
+                  onReject(pendingApproval.req_id);
+                }}
+                className="font-medium text-ink-3 transition-colors hover:text-danger hover:underline"
+              >
+                Cancel &amp; Roll Back
+              </button>
+            </div>
+          )}
 
           {/* Live Two-Way Escalation Transcript (Recoup AI <-> You (Mobile)) */}
           {consult && (consult.active || consult.ringing || consult.turns.length > 0 || consult.end) && (
@@ -391,7 +418,7 @@ export function OperatorConsultPanel({
                     className="h-4 w-16 shrink-0"
                   />
                 ) : (
-                  <span className="font-mono text-[10.5px] text-ink-3 tabular">
+                  <span className="font-mono text-[13px] font-semibold text-ink tabular">
                     {claimId} · €{(consult.claimAmount || 587.3).toFixed(2)}
                   </span>
                 )}
@@ -403,9 +430,9 @@ export function OperatorConsultPanel({
                 aria-live="polite"
               >
                 {consult.turns.length === 0 && (consult.ringing || consult.active) && (
-                  <div className="flex items-center justify-center gap-2 py-3 font-mono text-[11.5px] text-ink-2">
+                  <div className="flex items-center justify-center gap-2 py-3 font-mono text-[12px] font-semibold text-ink">
                     <Dot tone="signal" live />
-                    Ringing operator mobile (/mobile) · awaiting spoken decision…
+                    Ringing operator iPhone (/mobile) · live call active…
                   </div>
                 )}
 

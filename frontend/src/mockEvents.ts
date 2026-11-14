@@ -452,6 +452,7 @@ export function mockEvents(): ServerEvent[] {
       {
         req_id: "req_demo_d1042",
         tool_name: "send_email",
+        channel: "voice_call",
         args: EMAIL_ARGS,
         diff_preview: CLAIM_DIFF,
         risk_reason: "claims.amount EUR 587.30 >= EUR 250.00 policy threshold & external action (`send_email`)",
@@ -569,134 +570,6 @@ export function mockDecisionEvents(approved: boolean): ServerEvent[] {
       }
     ),
   ];
-}
-
-function buildCallSequence(
-  baseTs: number,
-  startId: number,
-  runId: string,
-  claimId: string,
-  claimAmount: number
-): ServerEvent[] {
-  const callId = `CALL-${claimId}`;
-  const openAmt = Math.round(claimAmount * 70) / 100;
-  const floorAmt = Math.round(claimAmount * 85) / 100;
-  let id = startId;
-  const mk = (
-    dt: number,
-    type: ServerEvent["type"],
-    payload: Record<string, unknown>,
-    step: number | null,
-    thought: string
-  ): ServerEvent => ({
-    id: id++,
-    run_id: runId,
-    ts: baseTs + dt,
-    type,
-    step,
-    thought,
-    cost_eur: 0,
-    latency_ms: 0,
-    payload,
-  });
-
-  return [
-    mk(
-      0.0,
-      "call_start",
-      {
-        call_id: callId,
-        claim_id: claimId,
-        counterparty: "Kappa Office Systems AR desk",
-        claim_amount: claimAmount,
-        opening_pct: 70,
-        floor_pct: 85,
-      },
-      null,
-      `Dialing Kappa Office Systems AR desk to settle \`${claimId}\` (EUR ${claimAmount.toFixed(2)}, floor 85%).`
-    ),
-    mk(
-      0.35,
-      "call_turn",
-      {
-        call_id: callId,
-        speaker: "agent",
-        text: `Hello, calling from Recoup procurement operations regarding credit claim ${claimId} for EUR ${claimAmount.toFixed(2)} backed by our stockroom inspection log and master contract terms.`,
-        audio_url: "/api/voice/turn-audio",
-        offer_pct: 100,
-      },
-      1,
-      `Recoup Negotiator opened settlement call on \`${claimId}\` for EUR ${claimAmount.toFixed(2)}.`
-    ),
-    mk(
-      0.7,
-      "call_turn",
-      {
-        call_id: callId,
-        speaker: "counterparty",
-        text: `We see the receiving discrepancy on ${claimId}, and can offer an expedited 70% credit note of EUR ${openAmt.toFixed(2)} to close the dispute today.`,
-        audio_url: "/api/voice/turn-audio",
-        offer_pct: 70,
-      },
-      2,
-      `Kappa Office Systems AR desk countered at 70% (EUR ${openAmt.toFixed(2)}).`
-    ),
-    mk(
-      1.05,
-      "call_turn",
-      {
-        call_id: callId,
-        speaker: "agent",
-        text: `Per procurement policy we cannot accept 70%. With verified short-shipped, DOA, and late SLA items, we can settle immediately at 85% (EUR ${floorAmt.toFixed(2)}) or maintain the full EUR ${claimAmount.toFixed(2)} invoice hold.`,
-        audio_url: "/api/voice/turn-audio",
-        offer_pct: 85,
-      },
-      3,
-      `Recoup Negotiator enforced ≥85% governance floor (EUR ${floorAmt.toFixed(2)}).`
-    ),
-    mk(
-      1.4,
-      "call_turn",
-      {
-        call_id: callId,
-        speaker: "counterparty",
-        text: `Understood. To release the invoice hold, we can authorize 85% — a credit note of EUR ${floorAmt.toFixed(2)} on ${claimId} issued today.`,
-        audio_url: "/api/voice/turn-audio",
-        offer_pct: 85,
-      },
-      4,
-      `Kappa Office Systems AR desk agreed to 85% (EUR ${floorAmt.toFixed(2)}).`
-    ),
-    mk(
-      1.75,
-      "call_turn",
-      {
-        call_id: callId,
-        speaker: "agent",
-        text: `Agreed at 85% (EUR ${floorAmt.toFixed(2)}), meeting our 85% policy threshold. Recording provisional settlement for ${claimId}.`,
-        audio_url: "/api/voice/turn-audio",
-        offer_pct: 85,
-      },
-      5,
-      `Recoup Negotiator confirmed provisional settlement at 85% (EUR ${floorAmt.toFixed(2)}).`
-    ),
-    mk(
-      2.1,
-      "call_end",
-      {
-        call_id: callId,
-        outcome: "accepted",
-        agreed_amount: floorAmt,
-        summary: `Settled ${claimId} at 85% (EUR ${floorAmt.toFixed(2)}).`,
-      },
-      null,
-      `Settled ${claimId} at 85% (EUR ${floorAmt.toFixed(2)}).`
-    ),
-  ];
-}
-
-export function mockVendorCallEvents(claimId = "CLM-D-1042", claimAmount = 587.3): ServerEvent[] {
-  return buildCallSequence(Date.now() / 1000, 500, `call_demo_${Date.now().toString(36).slice(-4)}`, claimId, claimAmount);
 }
 
 export function buildDemoAadeXml(claimId: string, choice: "refund" | "redelivery"): string {

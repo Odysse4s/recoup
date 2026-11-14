@@ -72,10 +72,11 @@ export function narrate(ev: ServerEvent, brandName = "Recoup"): string {
       if (name === "write_file" || name === "patch_file")
         return `Staging \`${String(a.path ?? "file")}\` in rehearsal — live ERP files remain untouched.`;
       if (name === "send_email")
-        return `Staging credit claim email to ${String(a.to ?? "vendor")} — held in the dry-run outbox until approved.`;
+        return `Staging credit claim email to ${String(a.to ?? "vendor")} — held safely until your approval.`;
       if (name === "place_call")
-        return `Staging outbound vendor AR call to ${String(a.counterparty ?? a.phone ?? "counterparty")} — held for Risk Gate review.`;
-      if (name === "trigger_webhook") return `Staging webhook \`${String(a.endpoint ?? "")}\` in the dry-run outbox…`;
+        return "Preparing operator iPhone escalation if away from desk…";
+      if (name === "trigger_webhook")
+        return `Staging webhook \`${String(a.endpoint ?? "")}\` — held safely until your approval.`;
       if (name === "upsert_row" || name === "delete_rows" || name === "query_db")
         return `Running \`${name}\` against the rehearsal copy of \`${String(a.table ?? "sqlite")}\`…`;
       return `Executing \`${name}\` inside the isolated rehearsal environment…`;
@@ -112,21 +113,16 @@ export function narrate(ev: ServerEvent, brandName = "Recoup"): string {
       return `Reversible undo restored \`${r.tool ?? "step"}\` from its pre-image receipt.`;
     }
     case "call_start": {
-      const s = ev.payload as { mode?: string; claim_id?: string };
-      if (s.mode === "user_consult") {
-        return `Operator away from desk — ringing mobile phone to resolve \`${s.claim_id ?? "CLM-D-1042"}\`…`;
-      }
-      return "Initiating audited vendor AR settlement call…";
+      return "Ringing your iPhone to resolve shipment D-1042 while away from desk…";
     }
     case "call_turn": {
       const t = ev.payload as unknown as CallTurnPayload;
-      const who = t.speaker === "agent" ? brandName : t.speaker === "user" ? "Operator (Mobile)" : "Vendor AR";
+      const who = t.speaker === "agent" ? brandName : "You (iPhone)";
       return `${who}: “${t.text}”`;
     }
     case "call_end": {
       const c = ev.payload as unknown as CallEndPayload;
-      const isConsult = String(c.call_id ?? "").startsWith("CONSULT-");
-      return `${isConsult ? "Operator consult" : "Vendor AR call"} concluded (${c.outcome}): ${c.summary}`;
+      return `iPhone decision call completed (${c.outcome}): ${c.summary}`;
     }
     case "run_done": {
       const r = ev.payload as { status?: string; fingerprint?: string };

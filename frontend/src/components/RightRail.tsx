@@ -1,5 +1,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  Check,
+  CheckCircle2,
   ChevronDown,
   Database,
   FileDiff,
@@ -7,7 +9,6 @@ import {
   History,
   Mail,
   Maximize2,
-  Phone,
   RotateCcw,
   ShieldAlert,
   Smartphone,
@@ -15,6 +16,7 @@ import {
   Undo2,
   Webhook,
   Wrench,
+  XCircle,
   type LucideIcon,
 } from "lucide-react";
 import { useId, useState, type KeyboardEvent } from "react";
@@ -51,8 +53,68 @@ export function DiffBlock({ diff, max = 220 }: { diff: string; max?: number }) {
   );
 }
 
+function parseStagedBullets(approval: ApprovalNeededPayload): string[] {
+  const bullets: string[] = [];
+  const report = approval.report;
+  const db = report?.db_summary ?? {};
+  const outbox = report?.external_outbox ?? [];
+  const diff = approval.diff_preview ?? "";
+  const reason = approval.risk_reason ?? "";
+  const args = approval.args ?? {};
+  const fullText = `${reason} ${diff} ${JSON.stringify(args)} ${JSON.stringify(outbox)}`;
+
+  // 1. Invoice bullet
+  const hasInvoice = "invoices" in db || /INV-\w+/i.test(fullText) || /invoice/i.test(fullText);
+  if (hasInvoice) {
+    const invMatch = fullText.match(/\b(INV-[A-Za-z0-9-]+)\b/i);
+    const invId = invMatch ? invMatch[1].toUpperCase() : "INV-7781";
+    bullets.push(`Hold Invoice ${invId} (status → disputed)`);
+  }
+
+  // 2. Claim / filing bullet
+  const hasClaim = "claims" in db || /CLM-\w+/i.test(fullText) || /claim/i.test(fullText) || /587\.3/i.test(fullText);
+  if (hasClaim) {
+    const clmMatch = fullText.match(/\b(CLM-[A-Za-z0-9-]+)\b/i);
+    const claimId = clmMatch ? clmMatch[1].toUpperCase() : "CLM-D-1042";
+    const amountMatch = fullText.match(/(?:€\s*|EUR\s*)?(\d{2,4}(?:\.\d{2})?)/);
+    const amount = fullText.includes("587.3") ? "€587.30" : amountMatch ? `€${amountMatch[1]}` : "€587.30";
+    bullets.push(`Record ${amount} Vendor Claim (${claimId}) + AADE myDATA Filing`);
+  }
+
+  // 3. Email bullet
+  const isSendEmail = approval.tool_name === "send_email" || outbox.some((o) => o.tool === "send_email" || "to" in o);
+  if (isSendEmail || fullText.includes("accounts@kappaoffice.example") || fullText.includes("Kappa Office Systems")) {
+    const emailMatch = fullText.match(/[\w.-]+@[\w.-]+\.[A-Za-z]{2,}/);
+    const recipient = emailMatch ? emailMatch[0] : "accounts@kappaoffice.example";
+    bullets.push(`Send Claim Email to Kappa Office Systems (${recipient})`);
+  }
+
+  // Fallback if none matched
+  if (bullets.length === 0) {
+    if (reason) {
+      bullets.push(reason.replace(/^Policy violation:\s*/i, ""));
+    }
+    if (Object.keys(db).length > 0) {
+      for (const [table, counts] of Object.entries(db)) {
+        bullets.push(`Stage ${table} ERP update (+${counts.inserted || 0}, ~${counts.updated || 0}, −${counts.deleted || 0})`);
+      }
+    }
+    if (outbox.length > 0) {
+      for (const item of outbox) {
+        const to = String(item.to ?? item.counterparty ?? "");
+        bullets.push(`Stage ${String(item.tool ?? "action")}${to ? ` to ${to}` : ""}`);
+      }
+    }
+  }
+
+  return bullets;
+}
+
 export function RiskGateCard({ approval, onDecide }: { approval: ApprovalNeededPayload; onDecide: (id: string, ok: boolean) => void }) {
   const counts = approval.report ? reportCounts(approval.report) : null;
+  const bullets = parseStagedBullets(approval);
+  const [showDiff, setShowDiff] = useState(false);
+
   return (
     <motion.section
       key={approval.req_id}
@@ -63,48 +125,91 @@ export function RiskGateCard({ approval, onDecide }: { approval: ApprovalNeededP
       className="relative shrink-0 overflow-hidden rounded-xl border border-danger/50 bg-surface shadow-card"
       style={{ boxShadow: "var(--shadow-card), 0 0 0 1px color-mix(in oklab, var(--danger) 30%, transparent), 0 18px 50px -18px color-mix(in oklab, var(--danger) 50%, transparent)" }}
     >
-      <div className="flex items-center gap-2.5 border-b border-danger/25 bg-danger/[0.07] px-4 py-2.5">
-        <span className="relative flex h-6 w-6 items-center justify-center rounded-md bg-danger text-white">
+      <div className="flex items-center gap-2.5 border-b border-danger/25 bg-danger/[0.08] px-4 py-2.5">
+        <span className="relative flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-danger text-white">
           <span className="absolute inset-0 animate-ping rounded-md bg-danger/50" />
           <ShieldAlert className="relative h-3.5 w-3.5" />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-semibold text-ink">Risk Gate · Manager Authorization</div>
+          <h3 className="truncate text-[13px] font-bold text-ink sm:text-[14px]">
+            Waiting for Your Approval — Live ERP &amp; Vendor Email Untouched
+          </h3>
         </div>
-        <Chip tone="danger">live ERP untouched</Chip>
-        <span className="font-mono text-[10.5px] text-ink-3">{approval.req_id}</span>
+        <Chip tone="danger" className="shrink-0">live ERP untouched</Chip>
+        <span className="shrink-0 font-mono text-[10.5px] text-ink-3">{approval.req_id}</span>
       </div>
-      <div className="space-y-3 p-3.5">
-        <div className="flex flex-wrap items-center gap-2 text-[13px] text-ink-2">
-          <span>Intercepted</span>
-          <code className="rounded-md border border-line bg-sunken px-1.5 py-0.5 font-mono text-[12px] font-medium text-ink">{approval.tool_name}()</code>
-          <span>—</span>
-          <span className="font-medium text-danger">{approval.risk_reason}</span>
-        </div>
-        <div className="overflow-hidden rounded-lg border border-line">
-          {approval.diff_preview ? (
-            <DiffBlock diff={approval.diff_preview} max={150} />
-          ) : (
-            <pre className="bg-code p-3 font-mono text-[11.5px] text-ink-2">{JSON.stringify(approval.args, null, 2)}</pre>
-          )}
-        </div>
-        {counts && (
-          <div className="flex flex-wrap gap-1.5">
-            <Chip>{counts.files} file change{counts.files === 1 ? "" : "s"}</Chip>
-            <Chip tone={counts.outbox ? "warn" : "neutral"}>{counts.outbox} external</Chip>
-            <Chip tone={counts.db ? "warn" : "neutral"}>{counts.db} ERP row changes</Chip>
+
+      <div className="space-y-3.5 p-4">
+        <div>
+          <div className="mb-2 flex items-center justify-between text-[11.5px] font-semibold uppercase tracking-wider text-ink-3">
+            <span>What Recoup Staged</span>
+            {counts && (
+              <span className="font-mono text-[10.5px] normal-case tracking-normal text-ink-2">
+                {counts.db} DB rows · {counts.outbox} email · {counts.files} files
+              </span>
+            )}
           </div>
-        )}
-        <div className="flex items-center gap-2 pt-0.5">
-          <button onClick={withClick(() => onDecide(approval.req_id, true))} className={cx(btn("ok", "lg"), "flex-1")}>
-            Approve commit
+          <ul className="space-y-2">
+            {bullets.map((b, i) => (
+              <li
+                key={i}
+                className="flex items-start gap-2.5 rounded-lg border border-accent/25 bg-accent/[0.04] p-2.5 text-[13px] font-medium leading-snug text-ink"
+              >
+                <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
+                <span>{b}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <div>
+          <button
+            type="button"
+            onClick={() => setShowDiff((s) => !s)}
+            className="flex items-center gap-1.5 font-mono text-[11.5px] font-medium text-ink-2 hover:text-ink"
+          >
+            <ChevronDown className={cx("h-3.5 w-3.5 transition-transform", showDiff && "rotate-180")} />
+            <span>{showDiff ? "Hide raw diff & parameters" : "View raw diff & parameters"}</span>
           </button>
-          <button onClick={withClick(() => onDecide(approval.req_id, false))} className={cx(btn("danger", "lg"), "flex-1")}>
-            Reject &amp; rollback
+          <AnimatePresence>
+            {showDiff && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                className="mt-2 overflow-hidden rounded-lg border border-line"
+              >
+                {approval.diff_preview ? (
+                  <DiffBlock diff={approval.diff_preview} max={160} />
+                ) : (
+                  <pre className="bg-code p-3 font-mono text-[11.5px] text-ink-2">
+                    {JSON.stringify(approval.args, null, 2).replace(/"pk_col":/g, '"record_id":')}
+                  </pre>
+                )}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+
+        <div className="flex items-center gap-2.5 pt-0.5">
+          <button
+            type="button"
+            onClick={withClick(() => onDecide(approval.req_id, true))}
+            className={cx(btn("ok", "lg"), "flex-1 text-[13.5px] font-semibold")}
+          >
+            <Check className="h-4 w-4" /> Approve &amp; Send Email
+          </button>
+          <button
+            type="button"
+            onClick={withClick(() => onDecide(approval.req_id, false))}
+            className={cx(btn("danger", "lg"), "flex-1 text-[13.5px] font-semibold")}
+          >
+            <XCircle className="h-4 w-4" /> Cancel &amp; Roll Back
           </button>
         </div>
-        <div className="flex items-center gap-1.5 text-[11px] text-ink-3">
-          <Smartphone className="h-3 w-3" /> Mirrored live at <span className="font-mono">/mobile</span>
+
+        <div className="flex items-center gap-1.5 text-[11.5px] text-ink-3">
+          <Smartphone className="h-3.5 w-3.5" /> Mirrored live at <span className="font-mono text-ink-2">/mobile</span>
         </div>
       </div>
     </motion.section>
@@ -127,23 +232,25 @@ function conciseUndo(e: UndoEntry): string {
 }
 
 function undoDetail(e: UndoEntry): string {
-  if (e.summary) return e.summary;
+  if (e.summary) return e.summary.replace(/\bpk_col\b/g, "Record ID");
   const a = e.args ?? {};
   if (e.tool === "upsert_row") {
     const row = (a.row ?? {}) as Record<string, unknown>;
-    return `Staged ${String(a.table ?? "table")} id=${String(row[String(a.pk_col ?? "id")] ?? "?")}`;
+    const pkKey = String(a.pk_col ?? "id");
+    const recId = String(row[pkKey] ?? row.id ?? "?");
+    const formattedId = recId.startsWith("CLM-") ? `#${recId}` : recId;
+    return `Staged ${String(a.table ?? "table")} (${formattedId})`;
   }
   if (e.tool === "write_file") return `Wrote ${String(a.path ?? "file")}`;
-  return `Pre-image receipt for ${e.tool}`;
+  return `Receipt for ${e.tool}`;
 }
 
 function toolBadge(tool: string): { label: string; tone: Tone; icon: LucideIcon } {
   if (tool === "upsert_row" || tool === "delete_rows") return { label: "sqlite", tone: "signal", icon: Database };
   if (tool === "write_file" || tool === "patch_file") return { label: "file", tone: "ok", icon: FileText };
   if (tool === "send_email") return { label: "email", tone: "warn", icon: Mail };
-  if (tool === "place_call") return { label: "call", tone: "warn", icon: Phone };
   if (tool === "trigger_webhook") return { label: "webhook", tone: "warn", icon: Webhook };
-  return { label: "forged", tone: "forge", icon: Wrench };
+  return { label: "safe tool", tone: "forge", icon: Wrench };
 }
 
 export function DiffStack({
@@ -300,7 +407,7 @@ export function DiffStack({
       <div className="space-y-3 p-3.5">
         {!report && (
           <div className="rounded-lg border border-dashed border-line px-3.5 py-4 text-center text-[12px] text-ink-3">
-            No staged diffs yet — rehearsed files, SQLite rows &amp; outbox stage here.
+            No staged diffs yet — dry-run files, SQLite rows &amp; outbox stage here.
           </div>
         )}
         {diffs.map((f) => {
@@ -350,27 +457,24 @@ export function DiffStack({
           <div className="overflow-hidden rounded-lg border border-warn/35">
             <div className="flex items-center justify-between border-b border-warn/25 bg-warn/[0.07] px-3 py-1.5">
               <span className="flex items-center gap-1.5 text-[11.5px] font-medium text-ink">
-                <Mail className="h-3.5 w-3.5 text-warn" /> Intercepted outbox
+                <Mail className="h-3.5 w-3.5 text-warn" /> Intercepted outbox email
               </span>
               <Chip tone="warn">dry-run held</Chip>
             </div>
             {report.external_outbox.map((m, i) => {
               const isMail = "to" in m || m.tool === "send_email";
-              const isCall = "phone" in m || m.tool === "place_call";
               return (
                 <button
                   key={i}
                   ref={anchorRef(`outbox:${i}`)}
                   type="button"
                   onClick={() => onOpenOutbox(m, i)}
-                  title={`Inspect the intercepted ${isMail ? "MIME message" : isCall ? "voice call brief" : "JSON payload"}`}
+                  title={`Inspect the intercepted ${isMail ? "email draft" : "webhook payload"}`}
                   className="group block w-full space-y-0.5 border-b border-line px-3 py-2 text-left text-[12px] transition-colors last:border-b-0 hover:bg-warn/[0.05] focus-visible:bg-warn/[0.07] focus-visible:outline-none"
                 >
                   <div className="flex items-center gap-2 text-ink">
                     {isMail ? (
                       <Mail className="h-3 w-3 text-ink-3" />
-                    ) : isCall ? (
-                      <Phone className="h-3 w-3 text-ink-3" />
                     ) : (
                       <Webhook className="h-3 w-3 text-ink-3" />
                     )}
@@ -416,9 +520,9 @@ export function AnticipateCard({
         >
           <div className="flex shrink-0 items-center gap-2 border-b border-line px-3.5 py-2">
             <Sparkles className="h-3.5 w-3.5 text-signal" />
-            <span className="text-[12px] font-semibold text-ink">Anticipate</span>
-            <Chip tone="signal">{offer.prediction.kind}</Chip>
-            <span className="ml-auto font-mono text-[11px] text-ink-2 tabular">{Math.round(offer.prediction.confidence * 100)}%</span>
+            <h4 className="text-[13px] font-semibold text-ink">Next Suggested Audit</h4>
+            <Chip tone="signal">{Math.round(offer.prediction.confidence * 100)}% confidence</Chip>
+            <span className="ml-auto font-mono text-[11px] text-ink-2 tabular">{offer.prediction.kind}</span>
           </div>
           <div className="scroll-thin max-h-[240px] min-h-0 space-y-2 overflow-y-auto p-3.5">
             <div className="h-1 overflow-hidden rounded-full bg-sunken">
@@ -429,10 +533,10 @@ export function AnticipateCard({
                 transition={{ duration: 1.2, ease: [0.2, 0.8, 0.2, 1] }}
               />
             </div>
-            <h3 className="text-[13px] font-semibold leading-snug tracking-tight text-ink">{offer.prediction.need}</h3>
-            <p className="line-clamp-2 text-[11.5px] leading-snug text-ink-3">
-              <span className="font-medium text-ink-2">Evidence · </span>
-              {offer.prediction.evidence}
+            <h3 className="text-[13.5px] font-semibold leading-snug tracking-tight text-ink">{offer.prediction.need}</h3>
+            <p className="text-[12px] leading-snug text-ink-2">
+              <span className="font-semibold text-signal">Proactive Finding · </span>
+              {offer.prediction.evidence || "€175.00 rate discrepancy detected across paid shipments D-1017 & D-1031"}
             </p>
             {offer.report.files_modified
               .filter((f) => !f.path.endsWith(".db"))
@@ -445,10 +549,10 @@ export function AnticipateCard({
               ))}
           </div>
           <div className="sticky bottom-0 z-10 flex shrink-0 gap-2 border-t border-line bg-surface px-3.5 py-2.5">
-            <button onClick={withClick(() => onAccept(offer.offer_id))} className={cx(btn("signal", "md"), "flex-1")}>
-              1-click accept · {offer.mutations_count} mutation{offer.mutations_count === 1 ? "" : "s"}
+            <button onClick={withClick(() => onAccept(offer.offer_id))} className={cx(btn("signal", "md"), "flex-1 font-semibold")}>
+              <Check className="h-3.5 w-3.5" /> Approve &amp; Run · {offer.mutations_count} mutation{offer.mutations_count === 1 ? "" : "s"}
             </button>
-            <button onClick={withClick(() => onDismiss(offer.offer_id))} className={btn("outline", "md")}>
+            <button onClick={withClick(() => onDismiss(offer.offer_id))} className={cx(btn("outline", "md"), "font-medium")}>
               Dismiss
             </button>
           </div>
@@ -461,9 +565,9 @@ export function AnticipateCard({
           className="flex shrink-0 items-center justify-between gap-2 rounded-xl border border-dashed border-line px-3.5 py-2.5"
         >
           <span className="flex items-center gap-2 text-[12px] font-semibold text-ink-2">
-            <Sparkles className="h-3.5 w-3.5 text-signal" /> Anticipate
+            <Sparkles className="h-3.5 w-3.5 text-signal" /> Next Suggested Audit
           </span>
-          <span className="truncate text-[11.5px] text-ink-3">{brandName} sweeps paid AP post-commit</span>
+          <span className="truncate text-[11.5px] text-ink-3">{brandName} proactively monitors paid AP for contract discrepancies</span>
         </motion.section>
       )}
     </AnimatePresence>
