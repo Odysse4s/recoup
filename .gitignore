@@ -1,0 +1,32 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# runtime state
+backend/workspace/
+backend/undo_log.json
+backend/feedback.json
+backend/.llm_cache/
+backend/.voice_cache/
+backend/forged_tools/
+*.db
+
+# os / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
