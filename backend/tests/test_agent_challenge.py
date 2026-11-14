@@ -159,9 +159,9 @@ def test_prompt_injection_firewall_and_forensic_auditor(tmp_path: Path) -> None:
     assert "[REDACTED_UNTRUSTED_DIRECTIVE" in clean
 
     ev_list = audit_workspace_evidence(env)
-    assert len(ev_list) == 1
-    assert ev_list[0].source == "inbox/D-1042_receiving_note.md"
-    assert any("Security alert" in f for f in ev_list[0].findings)
+    assert len(ev_list) == 2
+    poisoned_ev = next(e for e in ev_list if e.source == "inbox/D-1042_receiving_note.md")
+    assert any("Security alert" in f for f in poisoned_ev.findings)
 
     snapshot = gather_workspace_evidence(env)
     assert "<untrusted_evidence source=\"inbox/D-1042_receiving_note.md\">" in snapshot

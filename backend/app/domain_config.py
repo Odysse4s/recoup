@@ -98,6 +98,19 @@ DOMAIN: dict[str, Any] = {
             "goal": FOLLOW_UP_GOAL,
             "desc": "Finds short-shipped and DOA units on already-paid invoices and stages one consolidated claim.",
         },
+        {
+            "title": "Audit Late Coffee Delivery & Auto-Stage Small SLA Credit",
+            "badge": "AUTO-RESOLVE",
+            "goal": (
+                "Audit shipment D-2010 against our Orion Breakroom Supplies contract for the SLA "
+                "late-delivery penalty and stage the credit claim on invoice INV-8801."
+            ),
+            "desc": (
+                "Shows the risk gate's threshold in action: a EUR 14.70 late-delivery credit is small "
+                "enough to auto-commit to the ERP, while dispatching the vendor email still pauses for "
+                "a human tap."
+            ),
+        },
     ],
     "files": {
         "inbox/D-1042_receiving_note.md": (
@@ -115,6 +128,20 @@ DOMAIN: dict[str, Any] = {
             "3. DOA / transit-damaged hardware is credited at the contracted unit price.\n"
             "4. Late SLA delivery penalty: 1% of accepted hardware value per day late, capped at 10%.\n"
             "5. Credit claims must be submitted within 14 days of delivery.\n"
+        ),
+        "inbox/D-2010_receiving_note.md": (
+            "# Facilities Receiving Log: Shipment D-2010\n\n"
+            "- Vendor: Orion Breakroom Supplies Ltd.\n"
+            "- SLA promised date: 2026-11-12, delivered: 2026-11-15.\n"
+            "- PO quantity: 100 units of COF-BEAN; Facilities stockroom counted 100 units delivered, "
+            "all accepted in good condition, no damage.\n"
+            "- Logged by: Workplace Facilities, HQ Ground Floor\n"
+        ),
+        "contracts/orion_breakroom_terms.md": (
+            "# Master Supply Agreement: Orion Breakroom Supplies Ltd.\n\n"
+            "1. COF-BEAN contracted unit price: EUR 9.80 per unit for FY2026.\n"
+            "2. Late SLA delivery penalty: 0.5% of accepted goods value per day late, capped at 5%.\n"
+            "3. Credit claims must be submitted within 14 days of delivery.\n"
         ),
         "policies/claims_policy.md": (
             "# Enterprise Agent Safety & Governance Policy\n\n"
@@ -184,22 +211,26 @@ DOMAIN: dict[str, Any] = {
         "suppliers": [
             ("SUP-KAPPA", "Kappa Office Systems S.A.", "accounts@kappaoffice.example", "+30 210 000 0001"),
             ("SUP-NOVA", "Nova Workplace Cloud", "billing@novacloud.example", "+30 210 000 0002"),
+            ("SUP-ORION", "Orion Breakroom Supplies Ltd.", "accounts@orionbreakroom.example", "+30 210 000 0003"),
         ],
         "contract_prices": [
             (1, "SUP-KAPPA", "HUB-USBC", "USB-C Enterprise Workstation Hub", 17.50, 1.0, 10.0),
             (2, "SUP-NOVA", "KEY-MECH", "Wireless Office Keyboard", 14.20, 0.5, 5.0),
+            (3, "SUP-ORION", "COF-BEAN", "Premium Coffee Beans 1kg Bag", 9.80, 0.5, 5.0),
         ],
         "deliveries": [
             ("D-1017", "SUP-KAPPA", "HUB-USBC", 80, 74, 0, "2026-11-02", "2026-11-02", "received"),
             ("D-1031", "SUP-KAPPA", "HUB-USBC", 60, 60, 4, "2026-11-06", "2026-11-06", "received"),
             ("D-1042", "SUP-KAPPA", "HUB-USBC", 120, 104, 6, "2026-11-10", "2026-11-12", "received"),
             ("D-1050", "SUP-NOVA", "KEY-MECH", 40, 40, 0, "2026-11-11", "2026-11-11", "received"),
+            ("D-2010", "SUP-ORION", "COF-BEAN", 100, 100, 0, "2026-11-12", "2026-11-15", "received"),
         ],
         "invoices": [
             ("INV-7702", "SUP-KAPPA", "D-1017", 80, 17.50, 1400.00, "paid"),
             ("INV-7735", "SUP-KAPPA", "D-1031", 60, 17.50, 1050.00, "paid"),
             ("INV-7781", "SUP-KAPPA", "D-1042", 120, 18.90, 2268.00, "unpaid"),
             ("INV-7790", "SUP-NOVA", "D-1050", 40, 14.20, 568.00, "unpaid"),
+            ("INV-8801", "SUP-ORION", "D-2010", 100, 9.80, 980.00, "unpaid"),
         ],
         "claims": [],
     },
