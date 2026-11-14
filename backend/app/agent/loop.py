@@ -97,9 +97,16 @@ def _strip_fences(raw: str) -> str:
     return text
 
 
-def make_plan(goal: str, llm: LLMProvider, env: Env | None = None) -> tuple[PlanPayload, float]:
+def make_plan(
+    goal: str, llm: LLMProvider, env: Env | None = None, workspace_evidence: str | None = None
+) -> tuple[PlanPayload, float]:
     tool_list = ", ".join(REGISTRY.keys())
-    schema_ctx = f"\nWorkspace state:\n{gather_workspace_evidence(env)}\n" if env is not None else ""
+    ev_text = (
+        workspace_evidence
+        if workspace_evidence is not None
+        else (gather_workspace_evidence(env) if env is not None else "")
+    )
+    schema_ctx = f"\nWorkspace state:\n{ev_text}\n" if ev_text else ""
     resp = llm.complete(
         PLAN_SYSTEM,
         [{"role": "user", "content": f"Available tools: [{tool_list}]{schema_ctx}\nGoal: {goal}"}],
@@ -323,7 +330,10 @@ async def run_agent_loop(
             )
 
     # Phase 2: [Contract Strategist] Build execution plan grounded in contracts & sanitized evidence
-    plan, plan_cost = await asyncio.to_thread(make_plan, goal, llm, env=shadow_env)
+    initial_evidence = gather_workspace_evidence(shadow_env) if shadow_env is not None else ""
+    plan, plan_cost = await asyncio.to_thread(
+        make_plan, goal, llm, env=shadow_env, workspace_evidence=initial_evidence
+    )
     if emit:
         emit(
             EventType.PLAN_CREATED,
@@ -361,23 +371,48 @@ async def run_agent_loop(
 
     # Phase 4: [Rehearsal Executor] + [Compliance Critic] Pre-Check ReAct Loop with 3-strike error replan
     plan_summary = "\n".join(f"{s.id}. {s.intent} (tool={s.tool})" for s in plan.steps)
-    evidence_ctx = (
-        f"\nWorkspace state:\n{gather_workspace_evidence(shadow_env)}" if shadow_env is not None else ""
-    )
+    evidence_ctx = f"\nWorkspace state:\n{initial_evidence}" if initial_evidence else ""
     react_system = f"{REACT_SYSTEM}\n\nPlanned steps:\n{plan_summary}{evidence_ctx}"
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": goal}]
     done: list[ToolCall] = []
     consecutive_errors = 0
+    critic_remediation_attempted = False
 
     for _ in range(max_steps):
         tools = [t.spec() for t in REGISTRY.values()]
         resp = await asyncio.to_thread(llm.complete, react_system, messages, tools)
         if not resp.tool_calls:
+            # Edge-case guard: if live LLM stops early with unverified criteria, give 1 remediation turn
+            if shadow_env is not None and not critic_remediation_attempted and done:
+                interim_verify = verify_goal(plan, shadow_env, done)
+                if not interim_verify.passed:
+                    critic_remediation_attempted = True
+                    failed_details = "; ".join(
+                        f"{c.criterion} ({c.detail})" for c in interim_verify.criteria if not c.passed
+                    )
+                    messages.append(format_assistant_turn(resp))
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"[Compliance Critic] Audit failed on: {failed_details}. "
+                                "Complete or fix the missing steps before finishing."
+                            ),
+                        }
+                    )
+                    continue
             break
         messages.append(format_assistant_turn(resp))
         turn_results: list[tuple[ToolCall, str, bool]] = []
         for call in resp.tool_calls:
+            # Edge-case guard: if LLM invokes an unforged calculator directly in ReAct, synthesize on demand
+            if call.name not in REGISTRY and call.name.isidentifier():
+                await asyncio.to_thread(
+                    forge_missing_tool, llm, call.name, goal, emit=thread_emit, save_dir=forged_dir
+                )
+                await asyncio.sleep(0)
+
             critic_err = critic_precheck_call(call, shadow_env)
             if critic_err is not None:
                 result = ToolResult(call_id=call.id, ok=False, error=critic_err)
@@ -394,6 +429,33 @@ async def run_agent_loop(
                 if result.ok:
                     done.append(call)
                     consecutive_errors = 0
+                    if call.name == "place_call" and shadow_env is not None and emit is not None:
+                        with contextlib.suppress(Exception):
+                            from .negotiator import run_vendor_negotiation
+
+                            claim_id = str(call.args.get("claim_id") or "CLM-D-1042")
+                            turns, call_end = await asyncio.to_thread(
+                                run_vendor_negotiation, claim_id, shadow_env, llm=llm
+                            )
+                            emit(
+                                EventType.CALL_START,
+                                {"call_id": call_end.call_id, "claim_id": claim_id},
+                                f"[Settlement Negotiator] Initiating settlement call for {claim_id}.",
+                                0.0,
+                            )
+                            for turn in turns:
+                                emit(
+                                    EventType.CALL_TURN,
+                                    turn.model_dump(),
+                                    f"[{turn.speaker}] {turn.text}",
+                                    0.0,
+                                )
+                            emit(
+                                EventType.CALL_END,
+                                call_end.model_dump(),
+                                f"[Settlement Negotiator] {call_end.summary}",
+                                0.0,
+                            )
                 else:
                     consecutive_errors += 1
             turn_results.append((call, result.model_dump_json(), result.ok))
@@ -401,11 +463,17 @@ async def run_agent_loop(
         messages.append(format_tool_results_turn(turn_results))
 
         if consecutive_errors >= 3:
+            refreshed_ev = gather_workspace_evidence(shadow_env) if shadow_env is not None else ""
             plan, replan_cost = await asyncio.to_thread(
-                make_plan, f"{goal} (recover from tool errors)", llm, env=shadow_env
+                make_plan,
+                f"{goal} (recover from tool errors)",
+                llm,
+                env=shadow_env,
+                workspace_evidence=refreshed_ev,
             )
             plan.goal = goal
             plan_summary = "\n".join(f"{s.id}. {s.intent} (tool={s.tool})" for s in plan.steps)
+            evidence_ctx = f"\nWorkspace state:\n{refreshed_ev}" if refreshed_ev else ""
             react_system = f"{REACT_SYSTEM}\n\nRevised plan:\n{plan_summary}{evidence_ctx}"
             messages.append(
                 {
