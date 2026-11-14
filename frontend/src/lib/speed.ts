@@ -13,7 +13,7 @@ export interface PaceProfile {
 }
 
 export const PACE: Record<Speed, PaceProfile> = {
-  "1x": { label: "1x", eventMs: 1400, pop: 700, type: 3200, hold: 600, dock: 800, rewind: 2800 },
-  "2x": { label: "2x", eventMs: 700, pop: 450, type: 1600, hold: 300, dock: 600, rewind: 1800 },
-  turbo: { label: "Turbo", eventMs: 140, pop: 260, type: 520, hold: 120, dock: 380, rewind: 1000 },
+  "1x": { label: "1x", eventMs: 1950, pop: 800, type: 4200, hold: 1500, dock: 900, rewind: 3000 },
+  "2x": { label: "2x", eventMs: 975, pop: 500, type: 2100, hold: 750, dock: 650, rewind: 1900 },
+  turbo: { label: "Turbo", eventMs: 180, pop: 280, type: 600, hold: 220, dock: 400, rewind: 1050 },
 };

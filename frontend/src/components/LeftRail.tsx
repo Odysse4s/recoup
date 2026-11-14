@@ -1,9 +1,19 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowUpRight, Braces, CheckCircle2, Circle, Layers, Loader2, XCircle } from "lucide-react";
+import { ArrowUpRight, Braces, CheckCircle2, Circle, Layers, Loader2, ShieldCheck, XCircle } from "lucide-react";
 import type { ForgeSpecPayload, ForgeTestPayload, PlanPayload, VerifyPayload } from "../contracts";
 import { anchorRef } from "../lib/anchors";
 import type { Preset } from "../lib/types";
 import { Chip, cx, Panel } from "./ui";
+
+const SEVEN_LAYER_SEAL = [
+  "AST allowlist",
+  "python -I",
+  "0 env secrets",
+  "RLIMIT CPU/MEM",
+  "FSIZE=0 no disk writes",
+  "temp cwd",
+  "SHA-256 hash-pinned",
+] as const;
 
 export function PlanPanel({
   plan,
@@ -24,8 +34,8 @@ export function PlanPanel({
       bodyClassName="scroll-thin overflow-y-auto p-3"
     >
       {plan ? (
-        <div className="space-y-3">
-          <p className="line-clamp-2 px-0.5 text-[12.5px] leading-snug text-ink-2" title={plan.goal}>
+        <div className="space-y-2.5">
+          <p className="line-clamp-1 px-0.5 text-[12px] font-medium text-ink-2" title={plan.goal}>
             {plan.goal.includes("Goal:") ? plan.goal.split("Goal:").pop()!.trim() : plan.goal}
           </p>
           <ol className="relative space-y-1.5">
@@ -39,7 +49,7 @@ export function PlanPanel({
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: i * 0.08 }}
                   className={cx(
-                    "relative flex gap-2.5 rounded-lg border p-2.5 transition-colors duration-300",
+                    "relative flex gap-2.5 rounded-lg border p-2 transition-colors duration-300",
                     s.status === "running" && "border-accent/40 bg-accent/[0.07]",
                     s.status === "done" && "border-line bg-surface",
                     s.status === "failed" && "border-danger/40 bg-danger/[0.06]",
@@ -77,7 +87,7 @@ export function PlanPanel({
                 className="overflow-hidden"
               >
                 <div className="mb-1.5 mt-1 flex items-center justify-between px-0.5">
-                  <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-3">Success criteria</span>
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-3">Verification</span>
                   <Chip tone={verify.passed ? "ok" : "danger"}>{verify.passed ? "Verified" : "Failed"}</Chip>
                 </div>
                 <div className="space-y-1">
@@ -88,10 +98,10 @@ export function PlanPanel({
                       animate={{ opacity: 1, y: 0 }}
                       transition={{ delay: 0.12 * i }}
                       title={c.detail}
-                      className="flex items-center gap-2 rounded-md px-1 py-1 text-[12px]"
+                      className="flex items-center gap-2 rounded-md px-1 py-0.5 text-[12px]"
                     >
                       {c.passed ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-ok" /> : <XCircle className="h-3.5 w-3.5 shrink-0 text-danger" />}
-                      <span className="flex-1 text-ink-2">{c.criterion}</span>
+                      <span className="line-clamp-1 flex-1 text-ink-2">{c.criterion}</span>
                     </motion.div>
                   ))}
                 </div>
@@ -105,14 +115,14 @@ export function PlanPanel({
             <button
               key={i}
               onClick={() => onRun(p.goal)}
-              className="group block w-full rounded-lg border border-line bg-surface p-3 text-left transition-all hover:-translate-y-px hover:border-accent/40 hover:shadow-card"
+              className="group block w-full rounded-lg border border-line bg-surface p-2.5 text-left transition-all hover:-translate-y-px hover:border-accent/40 hover:shadow-card"
             >
-              <div className="mb-1.5 flex items-center justify-between">
+              <div className="mb-1 flex items-center justify-between">
                 <Chip tone={i === 0 ? "accent" : "neutral"}>{p.badge}</Chip>
                 <ArrowUpRight className="h-3.5 w-3.5 text-ink-3 transition-colors group-hover:text-accent" />
               </div>
               <div className="text-[13px] font-semibold leading-snug tracking-tight text-ink">{p.title}</div>
-              <div className="mt-1 line-clamp-2 text-[12px] leading-relaxed text-ink-3">{p.desc}</div>
+              {p.desc && <div className="mt-0.5 line-clamp-1 text-[11.5px] text-ink-3">{p.desc}</div>}
             </button>
           ))}
         </div>
@@ -143,14 +153,40 @@ export function ForgeVault({
     <Panel
       title="Synthesized Tools"
       icon={<Braces />}
-      meta={<Chip tone="forge">Sandboxed</Chip>}
+      meta={<Chip tone="forge">7-Layer Sandbox</Chip>}
       anchor={anchorRef("vault")}
       pulseKey={pulseKey}
       pulseTone="forge"
       className="shrink-0"
       bodyClassName="p-3"
     >
-      <div className="space-y-2">
+      <div className="space-y-2.5">
+        {/* 7-Layer Sandbox Security Seal */}
+        <div
+          aria-label="7-Layer Sandbox Security Seal"
+          className="rounded-lg border border-forge/35 bg-forge/[0.06] p-2.5"
+        >
+          <div className="mb-1.5 flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 font-mono text-[10.5px] font-bold uppercase tracking-wider text-forge">
+              <ShieldCheck className="h-3.5 w-3.5 text-ok" />
+              7-Layer Security Seal
+            </span>
+            <Chip tone="ok" className="h-4 px-1.5 text-[9.5px]">
+              enforced
+            </Chip>
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {SEVEN_LAYER_SEAL.map((guarantee) => (
+              <span
+                key={guarantee}
+                className="inline-flex items-center rounded border border-forge/30 bg-surface/90 px-1.5 py-0.5 font-mono text-[10px] font-medium text-ink"
+              >
+                {guarantee}
+              </span>
+            ))}
+          </div>
+        </div>
+
         <AnimatePresence initial={false}>
           {synthesizing && forgeSpec && (
             <motion.div
@@ -164,10 +200,10 @@ export function ForgeVault({
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 def {forgeSpec.name}(args)
                 <span className="ml-auto text-[10px] text-ink-3">
-                  {forgeTest ? `attempt ${forgeTest.attempt}` : `${forgeSpec.examples.length} examples`}
+                  {forgeTest ? `attempt ${forgeTest.attempt}` : `${forgeSpec.examples.length} tests`}
                 </span>
               </div>
-              <div className="mt-1 text-[11.5px] text-ink-3">{forgeSpec.purpose}</div>
+              <div className="mt-1 line-clamp-1 text-[11.5px] text-ink-3">{forgeSpec.purpose}</div>
             </motion.div>
           )}
         </AnimatePresence>
@@ -191,13 +227,12 @@ export function ForgeVault({
                 pass · {t.uses} use{t.uses === 1 ? "" : "s"}
               </Chip>
             </div>
-            <div className="mt-1 line-clamp-2 text-[11.5px] text-ink-3">{t.description}</div>
+            <div className="mt-1 line-clamp-1 text-[11.5px] text-ink-3">{t.description}</div>
           </motion.button>
         ))}
         {tools.length === 0 && !synthesizing && (
-          <p className="text-[12px] leading-relaxed text-ink-3">
-            When the planner encounters <code className="font-mono text-forge">MISSING:&lt;tool&gt;</code>, {brandName} synthesizes, AST-validates and unit-tests a
-            pure Python tool — then registers it here.
+          <p className="text-[11.5px] text-ink-3">
+            On <code className="font-mono text-forge">MISSING:&lt;tool&gt;</code>, {brandName} synthesizes &amp; TDD-verifies pure Python here.
           </p>
         )}
       </div>

@@ -43,7 +43,7 @@ function VoiceCaption({
 }) {
   const listening = mode === "listening";
   const signal = useVoiceSignal();
-  const provider = !listening && signal.provider === "elevenlabs" ? "ElevenLabs" : null;
+  const provider = !listening && signal.provider === "fal" ? "fal.ai Voice" : null;
   const { spoken, rest } = useMemo(() => {
     if (listening) return { spoken: text, rest: "" };
     const pos = Math.round(progress * text.length);
@@ -71,7 +71,10 @@ function VoiceCaption({
           listening ? "border-danger/40" : "border-accent/35"
         )}
       >
-        <div className="flex shrink-0 items-center gap-2">
+        <div
+          className="flex shrink-0 items-center gap-2"
+          title={listening ? "Push-to-talk microphone active" : provider ? "Cloud TTS: fal.ai Voice" : "Voice briefing active"}
+        >
           <Chip tone={listening ? "danger" : "accent"}>
             {listening ? <Mic className="h-2.5 w-2.5" /> : <Volume2 className="h-2.5 w-2.5" />}
             {listening ? "Push-to-talk" : provider ?? "Voice briefing"}

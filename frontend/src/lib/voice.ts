@@ -3,13 +3,15 @@ import { soundFx } from "./sound";
 
 /* ------------------------------------------------------------------------
    Voice signal: what the frequency radar (VoiceOrb) visualises.
-   `analyser` is set for real audio (ElevenLabs briefing); otherwise the radar
+   `analyser` is set for real cloud audio (fal.ai Voice); otherwise the radar
    synthesises a spectrum from speech cadence (word boundaries / mic results).
    ------------------------------------------------------------------------ */
 
+export type VoiceProvider = "fal" | "browser" | "mic" | null;
+
 export interface VoiceSignal {
   mode: "idle" | "speaking" | "listening";
-  provider: "elevenlabs" | "browser" | "mic" | null;
+  provider: VoiceProvider;
   analyser: AnalyserNode | null;
 }
 
@@ -47,8 +49,8 @@ export function useVoiceSignal() {
 }
 
 /* ------------------------------------------------------------------------
-   Voice briefing output: ElevenLabs via /api/voice/briefing when available,
-   otherwise falls back cleanly to browser Web Speech synthesis.
+   Voice output: fal.ai Voice via /api/voice/briefing & /api/voice/turn-audio
+   when available, otherwise falls back cleanly to a single calm Web Speech voice.
    ------------------------------------------------------------------------ */
 
 let remoteRetryAfter = 0;
@@ -56,13 +58,14 @@ let currentAudio: HTMLAudioElement | null = null;
 let chain: Promise<void> = Promise.resolve();
 let generation = 0;
 let cancelCurrent: (() => void) | null = null;
+let lastTurnKey = "";
+let lastTurnAt = 0;
 
 function pickVoice(): SpeechSynthesisVoice | undefined {
   const voices = window.speechSynthesis?.getVoices() ?? [];
   const preferred = [
     "Microsoft Aria Online (Natural)",
     "Microsoft Jenny Online (Natural)",
-    "Microsoft Guy Online (Natural)",
     "Google US English",
     "Samantha",
     "Microsoft Aria",
@@ -74,34 +77,18 @@ function pickVoice(): SpeechSynthesisVoice | undefined {
     const v = voices.find((x) => x.name.includes(name));
     if (v) return v;
   }
-  return voices.find((v) => v.lang?.startsWith("en") && v.name.includes("Natural")) ?? voices.find((v) => v.lang?.startsWith("en"));
+  return (
+    voices.find((v) => v.lang?.startsWith("en") && v.name.includes("Natural")) ??
+    voices.find((v) => v.lang?.startsWith("en"))
+  );
 }
 
-function pickCounterpartyVoice(agentVoice?: SpeechSynthesisVoice): SpeechSynthesisVoice | undefined {
-  const voices = window.speechSynthesis?.getVoices() ?? [];
-  const preferred = [
-    "Microsoft Guy Online (Natural)",
-    "Microsoft Ryan Online (Natural)",
-    "Google UK English Male",
-    "Google UK English Female",
-    "Daniel",
-    "Alex",
-    "Aaron",
-    "Fred",
-  ];
-  for (const name of preferred) {
-    const v = voices.find((x) => x.name.includes(name) && x.name !== agentVoice?.name);
-    if (v) return v;
-  }
-  return voices.find((v) => v.lang?.startsWith("en") && v.name !== agentVoice?.name) ?? agentVoice;
-}
-
-async function tryRemoteTurnAudio(speaker: "agent" | "counterparty", text: string): Promise<HTMLAudioElement | null> {
+async function tryRemoteTurnAudio(text: string): Promise<HTMLAudioElement | null> {
   try {
     const res = await fetch("/api/voice/turn-audio", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ speaker, text }),
+      body: JSON.stringify({ speaker: "agent", text }),
     });
     const type = res.headers.get("content-type") ?? "";
     if (!res.ok || res.status === 204 || !type.startsWith("audio")) {
@@ -172,7 +159,7 @@ function speakOnce(text: string, kind: string, hooks: SpeechHooks) {
         currentAudio = el;
         analyser = soundFx.attachVoiceAnalyser(el);
         el.onplay = () => {
-          setSignal({ mode: "speaking", provider: "elevenlabs", analyser });
+          setSignal({ mode: "speaking", provider: "fal", analyser });
           hooks.onStart();
         };
         el.ontimeupdate = () => {
@@ -189,7 +176,7 @@ function speakOnce(text: string, kind: string, hooks: SpeechHooks) {
       const v = pickVoice();
       if (v) u.voice = v;
       u.rate = 1.04;
-      u.pitch = 1;
+      u.pitch = 1.0;
       u.onstart = () => {
         setSignal({ mode: "speaking", provider: "browser", analyser: null });
         pulseVoice();
@@ -222,7 +209,7 @@ export function speakBriefing(text: string, kind: string, hooks: SpeechHooks, in
   });
 }
 
-function speakTurnOnce(speaker: "agent" | "counterparty", text: string, hooks?: Partial<SpeechHooks>) {
+function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
   return new Promise<void>((resolve) => {
     let finished = false;
     let audio: HTMLAudioElement | null = null;
@@ -242,7 +229,7 @@ function speakTurnOnce(speaker: "agent" | "counterparty", text: string, hooks?: 
       resolve();
     };
     cancelCurrent = done;
-    tryRemoteTurnAudio(speaker, text).then((remote) => {
+    tryRemoteTurnAudio(text).then((remote) => {
       if (finished) {
         if (remote?.src.startsWith("blob:")) URL.revokeObjectURL(remote.src);
         return;
@@ -253,7 +240,7 @@ function speakTurnOnce(speaker: "agent" | "counterparty", text: string, hooks?: 
         currentAudio = el;
         analyser = soundFx.attachVoiceAnalyser(el);
         el.onplay = () => {
-          setSignal({ mode: "speaking", provider: "elevenlabs", analyser });
+          setSignal({ mode: "speaking", provider: "fal", analyser });
           hooks?.onStart?.();
         };
         el.ontimeupdate = () => {
@@ -267,12 +254,10 @@ function speakTurnOnce(speaker: "agent" | "counterparty", text: string, hooks?: 
       const synth = window.speechSynthesis;
       if (!synth) return done();
       const u = new SpeechSynthesisUtterance(text);
-      const agentVoice = pickVoice();
-      const chosen = speaker === "agent" ? agentVoice : pickCounterpartyVoice(agentVoice);
-      if (chosen) u.voice = chosen;
-      // Dual-pitch Web Speech fallback distinguishes Recoup Negotiator vs Vendor AR Desk
-      u.rate = speaker === "agent" ? 1.06 : 0.98;
-      u.pitch = speaker === "agent" ? 1.06 : 0.85;
+      const calmVoice = pickVoice();
+      if (calmVoice) u.voice = calmVoice;
+      u.rate = 1.04;
+      u.pitch = 1.0;
       u.onstart = () => {
         setSignal({ mode: "speaking", provider: "browser", analyser: null });
         pulseVoice();
@@ -291,11 +276,31 @@ function speakTurnOnce(speaker: "agent" | "counterparty", text: string, hooks?: 
 }
 
 export function speakCallTurn(
-  speaker: "agent" | "counterparty",
+  speaker: "agent" | "counterparty" | "user",
   text: string,
   hooks?: Partial<SpeechHooks>,
   interrupt = false
 ) {
+  const cleanText = text.trim();
+  if (!cleanText) {
+    hooks?.onEnd?.();
+    return;
+  }
+  // Never synthesize TTS for the human operator's own transcript turn.
+  if (speaker === "user") {
+    hooks?.onStart?.();
+    hooks?.onProgress?.(1);
+    hooks?.onEnd?.();
+    return;
+  }
+
+  const now = Date.now();
+  if (!interrupt && cleanText === lastTurnKey && now - lastTurnAt < 2000) {
+    return;
+  }
+  lastTurnKey = cleanText;
+  lastTurnAt = now;
+
   if (interrupt) stopSpeaking();
   const gen = generation;
   let settled = false;
@@ -309,7 +314,7 @@ export function speakCallTurn(
       guardedEnd();
       return;
     }
-    return speakTurnOnce(speaker, text, {
+    return speakTurnOnce(cleanText, {
       onStart: hooks?.onStart,
       onEnd: guardedEnd,
       onProgress: hooks?.onProgress,

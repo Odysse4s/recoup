@@ -27,6 +27,7 @@ export interface WorkspaceState {
   };
   files: Record<string, string>;
   tables: Record<string, Record<string, unknown>[]>;
+  schema_sql?: Record<string, string>;
   outbox: Record<string, unknown>[];
   undo_stack: { step: number; tool: string; summary?: string; args?: Record<string, unknown>; ts: number }[];
   forged_tools: { name: string; description: string; uses: number }[];
@@ -76,6 +77,40 @@ export interface LiveWin {
   /** Two-line live rehearsal telemetry strip: static facts + lifecycle steps revealed with progress. */
   telemetry?: { facts: string[]; steps: string[] };
   toolName?: string;
+  /** High-visibility projector archetype banner label (e.g., SANDBOX · FORGING PYTHON TOOL). */
+  categoryBadge?: string;
+  /** Security seal pills shown on forged/sandbox windows. */
+  securitySeal?: string[];
+  /** Suppresses automatic popup during automated runs while still allowing manual click inspection. */
+  skipAutoPop?: boolean;
+}
+
+export type OperatorChoice = "refund" | "redelivery";
+
+export interface OperatorConsultTurn {
+  speaker: "agent" | "counterparty" | "user";
+  text: string;
+  audioUrl?: string | null;
+  ts: number;
+}
+
+export interface OperatorConsultState {
+  active: boolean;
+  ringing: boolean;
+  mode: "user_consult" | "vendor";
+  callId: string;
+  reqId: string | null;
+  claimId: string;
+  claimAmount: number;
+  counterparty: string;
+  turns: OperatorConsultTurn[];
+  activeSpeaker: "agent" | "counterparty" | "user" | null;
+  selectedChoice: OperatorChoice | null;
+  end: {
+    outcome: "accepted" | "escalated" | "rejected" | "no_answer";
+    agreed_amount?: number | null;
+    summary: string;
+  } | null;
 }
 
 export const STAGES = [

@@ -111,15 +111,22 @@ export function narrate(ev: ServerEvent, brandName = "Recoup"): string {
       const r = ev.payload as { tool?: string };
       return `Reversible undo restored \`${r.tool ?? "step"}\` from its pre-image receipt.`;
     }
-    case "call_start":
+    case "call_start": {
+      const s = ev.payload as { mode?: string; claim_id?: string };
+      if (s.mode === "user_consult") {
+        return `Operator away from desk — ringing mobile phone to resolve \`${s.claim_id ?? "CLM-D-1042"}\`…`;
+      }
       return "Initiating audited vendor AR settlement call…";
+    }
     case "call_turn": {
       const t = ev.payload as unknown as CallTurnPayload;
-      return `${t.speaker === "agent" ? brandName : "Vendor AR"}: “${t.text}”`;
+      const who = t.speaker === "agent" ? brandName : t.speaker === "user" ? "Operator (Mobile)" : "Vendor AR";
+      return `${who}: “${t.text}”`;
     }
     case "call_end": {
       const c = ev.payload as unknown as CallEndPayload;
-      return `Vendor AR call concluded (${c.outcome}): ${c.summary}`;
+      const isConsult = String(c.call_id ?? "").startsWith("CONSULT-");
+      return `${isConsult ? "Operator consult" : "Vendor AR call"} concluded (${c.outcome}): ${c.summary}`;
     }
     case "run_done": {
       const r = ev.payload as { status?: string; fingerprint?: string };

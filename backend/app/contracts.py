@@ -141,10 +141,21 @@ class VerifyPayload(BaseModel):
     criteria: list[VerifyCriterionResult]
 
 
-# ---------- supplier call ----------
+# ---------- supplier & operator calls ----------
+class CallStartPayload(BaseModel):
+    call_id: str
+    mode: Literal["vendor", "user_consult"] = "vendor"
+    counterparty: str = ""
+    req_id: str | None = None
+    claim_id: str = "CLM-D-1042"
+    claim_amount: float = 587.30
+    opening_pct: float | None = None
+    floor_pct: float | None = None
+
+
 class CallTurnPayload(BaseModel):
     call_id: str
-    speaker: Literal["agent", "counterparty"]
+    speaker: Literal["agent", "counterparty", "user"]
     text: str
     audio_url: str | None = None
     offer_pct: float | None = None

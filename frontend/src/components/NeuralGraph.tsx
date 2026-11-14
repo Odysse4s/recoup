@@ -39,9 +39,11 @@ import { connectedTo, STAGE_COLOR, type GEdge, type GNode, type NodeKind, type N
 import { soundFx } from "../lib/sound";
 import { btn, Chip, cx, Panel, type Tone } from "./ui";
 
-const MIN_K = 0.35;
+const MIN_K = 0.45;
+const FIT_MIN_K = 0.85;
+const FIT_MAX_K = 1.12;
 const MAX_K = 2.2;
-const INSPECTOR_W = 276;
+const INSPECTOR_W = 296;
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
 const KIND_ICON: Record<NodeKind, LucideIcon> = {
@@ -107,6 +109,27 @@ const STATUS_TONE: Record<NodeStatus, Tone> = {
   ghost: "signal",
 };
 
+function findActiveFocusNode(g: ThoughtGraph): GNode | null {
+  const byId = (id: string) => g.nodes.find((n) => n.id === id);
+  const gate = byId("gate");
+  if (gate?.status === "held") {
+    const heldBranch = g.nodes.find((n) => n.id !== "gate" && n.status === "held");
+    return heldBranch ?? gate;
+  }
+  const runningSub = [...g.nodes].reverse().find((n) => n.size === "sm" && n.status === "running");
+  if (runningSub) return runningSub;
+  const runningStep = [...g.nodes].reverse().find((n) => n.size === "md" && n.status === "running");
+  if (runningStep) return runningStep;
+  const runningAny = g.nodes.find((n) => n.status === "running");
+  if (runningAny) return runningAny;
+  const ant = byId("anticipate");
+  if (ant?.status === "ghost") return ant;
+  const commit = byId("commit");
+  if (commit?.status === "done" || commit?.status === "failed") return commit;
+  if (gate?.status === "approved" || gate?.status === "rejected") return gate;
+  return byId("root") ?? g.nodes[0] ?? null;
+}
+
 // ---------------------------------------------------------------- node
 function nodeSurface(n: GNode, c: string): CSSProperties {
   const tint = (pct: number, base = "var(--raised)") => `color-mix(in oklab, ${c} ${pct}%, ${base})`;
@@ -115,41 +138,64 @@ function nodeSurface(n: GNode, c: string): CSSProperties {
       return { background: "var(--surface)", borderColor: "var(--line-strong)" };
     case "running":
       return {
-        background: `linear-gradient(180deg, ${tint(12)}, var(--raised))`,
-        borderColor: tint(72, "transparent"),
-        boxShadow: `0 0 0 1px ${tint(28, "transparent")}, 0 10px 28px -12px ${tint(80, "transparent")}`,
+        background: `linear-gradient(180deg, ${tint(14)}, var(--raised))`,
+        borderColor: tint(78, "transparent"),
+        boxShadow: `0 0 0 1px ${tint(34, "transparent")}, 0 12px 30px -10px ${tint(85, "transparent")}`,
       };
     case "held":
       return {
-        background: `linear-gradient(180deg, ${tint(16)}, var(--raised))`,
+        background: `linear-gradient(180deg, ${tint(18)}, var(--raised))`,
         borderColor: c,
-        boxShadow: `0 0 0 1px ${tint(40, "transparent")}, 0 12px 34px -10px ${tint(85, "transparent")}`,
+        boxShadow: `0 0 0 1.5px ${tint(45, "transparent")}, 0 14px 36px -10px ${tint(88, "transparent")}`,
       };
     case "ghost":
-      return { background: tint(7, "transparent"), borderColor: tint(70, "transparent"), borderStyle: "dashed" };
+      return { background: tint(9, "var(--surface)"), borderColor: tint(75, "transparent"), borderStyle: "dashed" };
     case "failed":
     case "rejected":
-      return { background: tint(6), borderColor: tint(55, "transparent") };
+      return { background: tint(8), borderColor: tint(60, "transparent") };
     default:
-      return { background: `linear-gradient(180deg, ${tint(6)}, var(--raised))`, borderColor: tint(40, "var(--line)") };
+      return { background: `linear-gradient(180deg, ${tint(8)}, var(--raised))`, borderColor: tint(48, "var(--line)") };
   }
 }
 
 function StatusGlyph({ status }: { status: NodeStatus }) {
-  if (status === "done" || status === "approved") return <Check className="h-3 w-3 shrink-0" style={{ color: "var(--c)" }} strokeWidth={2.6} />;
-  if (status === "failed" || status === "rejected") return <X className="h-3 w-3 shrink-0 text-danger" strokeWidth={2.6} />;
-  if (status === "ghost") return <Sparkles className="h-3 w-3 shrink-0" style={{ color: "var(--c)" }} />;
+  if (status === "done" || status === "approved") return <Check className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--c)" }} strokeWidth={2.7} />;
+  if (status === "failed" || status === "rejected") return <X className="h-3.5 w-3.5 shrink-0 text-danger" strokeWidth={2.7} />;
+  if (status === "ghost") return <Sparkles className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--c)" }} />;
   if (status === "running" || status === "held")
     return (
-      <span className="relative inline-flex h-2 w-2 shrink-0">
-        <span className="absolute inset-0 animate-ping rounded-full opacity-60" style={{ background: "var(--c)" }} />
-        <span className="relative h-2 w-2 rounded-full" style={{ background: "var(--c)" }} />
+      <span className="relative inline-flex h-2.5 w-2.5 shrink-0">
+        <span className="absolute inset-0 animate-ping rounded-full opacity-65" style={{ background: "var(--c)" }} />
+        <span className="relative h-2.5 w-2.5 rounded-full" style={{ background: "var(--c)" }} />
       </span>
     );
   return <span className="h-2 w-2 shrink-0 rounded-full border border-line-strong" />;
 }
 
-const inkMix = "color-mix(in oklab, var(--c) 72%, var(--ink))";
+const inkMix = "color-mix(in oklab, var(--c) 76%, var(--ink))";
+
+function SecuritySealGrid({ seals, compact = false }: { seals: string[]; compact?: boolean }) {
+  return (
+    <span className={cx("grid grid-cols-2 gap-1", compact ? "mt-1 border-t border-line/70 pt-1" : "mt-1.5")}>
+      {seals.map((seal, idx) => {
+        const emerald = idx === 1 || idx === 2;
+        return (
+          <span
+            key={seal}
+            className={cx(
+              "truncate rounded border text-center font-mono font-semibold leading-tight",
+              compact ? "px-1 py-[1.5px] text-[8.5px]" : "px-1.5 py-0.5 text-[10px]",
+              emerald ? "border-ok/40 bg-ok/12 text-ok" : "border-forge/40 bg-forge/12 text-forge"
+            )}
+            title={`Sandbox security guarantee: ${seal}`}
+          >
+            {seal}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
 
 function GraphNode({
   n,
@@ -195,18 +241,18 @@ function GraphNode({
       onPointerLeave={() => onHover(null)}
       onFocus={() => onHover(n.id)}
       onBlur={() => onHover(null)}
-      initial={{ opacity: 0, scale: 0.9, x: left, y: top }}
-      animate={{ opacity: dimmed ? 0.3 : n.status === "pending" ? 0.78 : 1, scale: 1, x: left, y: top }}
+      initial={{ opacity: 0, scale: 0.92, x: left, y: top }}
+      animate={{ opacity: dimmed ? 0.3 : n.status === "pending" ? 0.84 : 1, scale: 1, x: left, y: top }}
       transition={reduce ? { duration: 0 } : { type: "spring", stiffness: 260, damping: 30, opacity: { duration: 0.25 } }}
       style={style}
-      className="absolute left-0 top-0 rounded-[10px] border text-left transition-[box-shadow,border-color,background] duration-300"
+      className="absolute left-0 top-0 rounded-[11px] border text-left transition-[box-shadow,border-color,background] duration-300"
     >
       {n.status === "held" && (
         <>
-          <span aria-hidden className="graph-radar pointer-events-none absolute -inset-px rounded-[11px] border-[1.5px]" style={{ borderColor: STAGE_COLOR.hold }} />
+          <span aria-hidden className="graph-radar pointer-events-none absolute -inset-px rounded-[12px] border-[1.5px]" style={{ borderColor: STAGE_COLOR.hold }} />
           <span
             aria-hidden
-            className="graph-radar pointer-events-none absolute -inset-px rounded-[11px] border-[1.5px] [animation-delay:0.9s]"
+            className="graph-radar pointer-events-none absolute -inset-px rounded-[12px] border-[1.5px] [animation-delay:0.9s]"
             style={{ borderColor: STAGE_COLOR.gate }}
           />
         </>
@@ -214,54 +260,58 @@ function GraphNode({
 
       {n.badge && n.size !== "sm" && (
         <span
-          className="absolute -top-2 right-2.5 inline-flex h-4 max-w-[70%] items-center truncate rounded-[5px] border bg-raised px-1.5 font-mono text-[9px] font-semibold uppercase tracking-wide"
-          style={{ color: inkMix, borderColor: "color-mix(in oklab, var(--c) 45%, var(--line))" }}
+          className="absolute -top-2.5 right-2.5 inline-flex h-[18px] max-w-[74%] items-center truncate rounded-[5px] border bg-raised px-1.5 font-mono text-[9.5px] font-semibold uppercase tracking-wide"
+          style={{ color: inkMix, borderColor: "color-mix(in oklab, var(--c) 48%, var(--line))" }}
         >
           {n.badge}
         </span>
       )}
 
       {n.size === "lg" && (
-        <span className="flex h-full items-center gap-2.5 px-2.5">
+        <span className="flex h-full items-center gap-2.5 px-3">
           <span
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
-            style={{ background: "color-mix(in oklab, var(--c) 15%, transparent)", color: inkMix }}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg"
+            style={{ background: "color-mix(in oklab, var(--c) 16%, transparent)", color: inkMix }}
           >
-            <Icon className="h-3.5 w-3.5" />
+            <Icon className="h-4 w-4" />
           </span>
           <span className="min-w-0 flex-1 leading-tight">
             <span className="flex items-center gap-1.5">
-              <span className="truncate text-[12px] font-semibold tracking-tight text-ink">{n.label}</span>
+              <span className="truncate text-[13.5px] font-semibold tracking-tight text-ink">{n.label}</span>
               <StatusGlyph status={n.status} />
             </span>
-            {n.sub && <span className="mt-0.5 block truncate font-mono text-[10px] text-ink-3">{n.sub}</span>}
+            {n.sub && <span className="mt-0.5 line-clamp-2 text-[11px] leading-[1.25] text-ink-2">{n.sub}</span>}
           </span>
         </span>
       )}
 
       {n.size === "md" && (
-        <span className="flex h-full flex-col justify-center gap-[3px] px-2.5">
+        <span className="flex h-full flex-col justify-center gap-[3px] px-2.5 py-1.5">
           <span className="flex items-center justify-between gap-1.5">
-            <span className="font-mono text-[9px] font-medium tracking-[0.12em] text-ink-3">{n.eyebrow}</span>
+            <span className="font-mono text-[9.5px] font-semibold tracking-[0.12em] text-ink-3">{n.eyebrow}</span>
             <StatusGlyph status={n.status} />
           </span>
           <span className="flex min-w-0 items-center gap-1.5">
-            <Icon className="h-3 w-3 shrink-0" style={{ color: inkMix }} />
-            <span className="truncate font-mono text-[11px] font-semibold text-ink">{n.label}</span>
+            <Icon className="h-3.5 w-3.5 shrink-0" style={{ color: inkMix }} />
+            <span className="truncate font-mono text-[13px] font-semibold tracking-tight text-ink">{n.label}</span>
           </span>
-          {n.sub && <span className="truncate text-[10px] leading-tight text-ink-3">{n.sub}</span>}
+          {n.sub && <span className="line-clamp-2 text-[11px] leading-[1.26] text-ink-2">{n.sub}</span>}
         </span>
       )}
 
       {n.size === "sm" && (
-        <span className="flex h-full flex-col justify-center gap-[2px] px-2">
-          <span className="flex min-w-0 items-center gap-1.5">
-            <Icon className="h-3 w-3 shrink-0" style={{ color: inkMix }} />
-            <span className="truncate text-[10.5px] font-medium text-ink">{n.label}</span>
+        <span className="flex h-full flex-col justify-center gap-[2px] px-2.5 py-1.5">
+          <span className="flex min-w-0 items-center justify-between gap-1.5">
+            <span className="flex min-w-0 items-center gap-1.5">
+              <Icon className="h-3.5 w-3.5 shrink-0" style={{ color: inkMix }} />
+              <span className="truncate text-[12px] font-semibold tracking-tight text-ink">{n.label}</span>
+            </span>
+            <StatusGlyph status={n.status} />
           </span>
-          <span className="truncate pl-[18px] font-mono text-[9.5px] leading-tight" style={{ color: n.badge ? inkMix : "var(--ink-3)" }}>
+          <span className="truncate pl-[20px] font-mono text-[10.5px] leading-tight" style={{ color: n.badge ? inkMix : "var(--ink-2)" }}>
             {n.badge ?? n.sub ?? STATUS_LABEL[n.status]}
           </span>
+          {n.securityBadges && n.securityBadges.length > 0 && <SecuritySealGrid seals={n.securityBadges} compact />}
         </span>
       )}
     </motion.button>
@@ -270,12 +320,12 @@ function GraphNode({
 
 // ---------------------------------------------------------------- edges
 const BASE_OPACITY: Record<GEdge["state"], number> = {
-  idle: 0.9,
-  ready: 0.38,
-  active: 0.5,
-  done: 0.72,
-  held: 0.95,
-  failed: 0.7,
+  idle: 0.78,
+  ready: 0.52,
+  active: 0.94,
+  done: 0.86,
+  held: 0.98,
+  failed: 0.85,
   ghost: 1,
 };
 
@@ -288,8 +338,9 @@ function GraphEdge({ e, highlight, dimmed, gradientId, reduce }: { e: GEdge; hig
       : e.state === "held"
       ? STAGE_COLOR.hold
       : STAGE_COLOR[e.stage];
-  const width = highlight ? 2.4 : 1.6;
-  const opacity = dimmed ? 0.14 : highlight ? 1 : BASE_OPACITY[e.state];
+  const energized = e.state === "active" || e.state === "done" || e.state === "held";
+  const width = highlight ? 2.85 : energized ? 2.25 : 1.85;
+  const opacity = dimmed ? 0.16 : highlight ? 1 : BASE_OPACITY[e.state];
   const t = reduce ? { duration: 0 } : { type: "spring" as const, stiffness: 260, damping: 30 };
 
   if (e.state === "ghost" || e.state === "held") {
@@ -301,14 +352,21 @@ function GraphEdge({ e, highlight, dimmed, gradientId, reduce }: { e: GEdge; hig
         className={e.state === "ghost" ? "graph-ghost" : "graph-held"}
         fill="none"
         stroke={e.state === "ghost" ? `url(#${gradientId})` : color}
-        strokeWidth={width + 0.4}
+        strokeWidth={width + 0.45}
         strokeLinecap="round"
-        style={{ filter: `drop-shadow(0 0 4px ${e.state === "ghost" ? STAGE_COLOR.anticipate : color})` }}
+        style={{ filter: `drop-shadow(0 0 6px ${e.state === "ghost" ? STAGE_COLOR.anticipate : color})` }}
       />
     );
   }
 
   const packet = e.state === "active" ? "graph-packet" : e.state === "done" ? "graph-packet-slow" : null;
+  const glowFilter =
+    highlight || e.state === "active"
+      ? `drop-shadow(0 0 6px ${color})`
+      : e.state === "done"
+      ? `drop-shadow(0 0 3px ${color})`
+      : undefined;
+
   return (
     <g>
       <motion.path
@@ -319,6 +377,7 @@ function GraphEdge({ e, highlight, dimmed, gradientId, reduce }: { e: GEdge; hig
         stroke={color}
         strokeWidth={width}
         strokeLinecap="round"
+        style={glowFilter ? { filter: glowFilter } : undefined}
       />
       {packet && !dimmed && (
         <motion.path
@@ -328,9 +387,9 @@ function GraphEdge({ e, highlight, dimmed, gradientId, reduce }: { e: GEdge; hig
           className={packet}
           fill="none"
           stroke={color}
-          strokeWidth={e.state === "active" ? width + 1.2 : width + 0.6}
+          strokeWidth={e.state === "active" ? width + 1.5 : width + 0.8}
           strokeLinecap="round"
-          style={{ filter: `drop-shadow(0 0 ${e.state === "active" ? 5 : 3}px ${color})` }}
+          style={{ filter: `drop-shadow(0 0 ${e.state === "active" ? 8 : 4}px ${color})` }}
         />
       )}
     </g>
@@ -378,12 +437,14 @@ function NodeInspector({
   onDecide,
   onAcceptOffer,
   onDismissOffer,
+  onSwitchToStudio,
 }: {
   node: GNode;
   onClose: () => void;
   onDecide: (reqId: string, ok: boolean) => void;
   onAcceptOffer: (id: string) => void;
   onDismissOffer: (id: string) => void;
+  onSwitchToStudio?: () => void;
 }) {
   const d = node.detail;
   const c = colorOf(node.status, node.stage);
@@ -394,6 +455,7 @@ function NodeInspector({
     soundFx.playUiClick();
     fn();
   };
+  const canInspectInStudio = onSwitchToStudio && (node.kind === "mutation" || node.kind === "diff" || node.kind === "root");
 
   return (
     <motion.aside
@@ -404,7 +466,7 @@ function NodeInspector({
       exit={{ opacity: 0, x: 10, transition: { duration: 0.15 } }}
       transition={{ type: "spring", stiffness: 420, damping: 34 }}
       aria-label={`${d.title} inspector`}
-      className="absolute right-2 top-2 z-20 flex max-h-[calc(100%-16px)] flex-col overflow-hidden rounded-xl border border-line bg-raised/90 shadow-float backdrop-blur-md"
+      className="absolute right-2 top-2 z-20 flex max-h-[calc(100%-16px)] flex-col overflow-hidden rounded-xl border border-line bg-raised/95 shadow-float backdrop-blur-md"
       style={{ width: `min(${INSPECTOR_W}px, calc(100% - 16px))`, "--c": c } as CSSProperties}
     >
       <div className="flex shrink-0 items-start gap-2.5 border-b border-line px-3 py-2.5">
@@ -412,9 +474,18 @@ function NodeInspector({
           <Icon className="h-3.5 w-3.5" />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="text-[12.5px] font-semibold leading-snug tracking-tight text-ink">{d.title}</div>
-          <div className="mt-1">
+          <div className="text-[13px] font-semibold leading-snug tracking-tight text-ink">{d.title}</div>
+          <div className="mt-1 flex flex-wrap items-center gap-1.5">
             <Chip tone={STATUS_TONE[node.status]}>{STATUS_LABEL[node.status]}</Chip>
+            {canInspectInStudio && (
+              <button
+                type="button"
+                onClick={act(() => onSwitchToStudio?.())}
+                className="inline-flex h-5 items-center gap-1 rounded-md border border-signal/35 bg-signal/10 px-1.5 font-mono text-[9.5px] font-semibold text-signal hover:bg-signal/20"
+              >
+                Open Ledger / Files →
+              </button>
+            )}
           </div>
         </div>
         <button type="button" onClick={act(onClose)} aria-label="Close inspector" className={cx(btn("ghost", "sm"), "h-6 w-6 px-0")}>
@@ -423,7 +494,16 @@ function NodeInspector({
       </div>
 
       <div className="scroll-thin min-h-0 flex-1 space-y-2.5 overflow-y-auto px-3 py-2.5">
-        {d.summary && <p className="text-[11.5px] leading-relaxed text-ink-2">{d.summary}</p>}
+        {d.summary && <p className="text-[12px] leading-relaxed text-ink-2">{d.summary}</p>}
+
+        {node.securityBadges && node.securityBadges.length > 0 && (
+          <div className="rounded-lg border border-forge/30 bg-forge/[0.06] p-2">
+            <div className="flex items-center gap-1.5 text-[9.5px] font-semibold uppercase tracking-wider text-forge">
+              <ShieldCheck className="h-3 w-3 text-ok" /> Sandbox Security Seal
+            </div>
+            <SecuritySealGrid seals={node.securityBadges} />
+          </div>
+        )}
 
         <div className="grid grid-cols-3 gap-1.5">
           <Metric label="Latency" value={d.latencyMs ? `${d.latencyMs} ms` : "—"} />
@@ -434,7 +514,7 @@ function NodeInspector({
         {d.facts.length > 0 && (
           <dl className="space-y-1.5">
             {d.facts.map((f, i) => (
-              <div key={`${f.label}-${i}`} className="grid grid-cols-[76px_1fr] gap-2 text-[11px] leading-snug">
+              <div key={`${f.label}-${i}`} className="grid grid-cols-[78px_1fr] gap-2 text-[11.5px] leading-snug">
                 <dt className="pt-px text-[9.5px] font-medium uppercase tracking-wider text-ink-3">{f.label}</dt>
                 <dd className={cx("min-w-0 break-words text-ink", f.mono && "font-mono text-[10.5px]")}>{f.value}</dd>
               </div>
@@ -510,6 +590,7 @@ export function NeuralGraph({
   onDecide,
   onAcceptOffer,
   onDismissOffer,
+  onSwitchToStudio,
   dockAnchor = false,
   className,
 }: {
@@ -517,6 +598,7 @@ export function NeuralGraph({
   onDecide: (reqId: string, ok: boolean) => void;
   onAcceptOffer: (id: string) => void;
   onDismissOffer: (id: string) => void;
+  onSwitchToStudio?: () => void;
   /** Receive docking live windows (SQLite) while SQLite Studio is hidden. */
   dockAnchor?: boolean;
   className?: string;
@@ -532,6 +614,7 @@ export function NeuralGraph({
   const [dragging, setDragging] = useState(false);
   const dragRef = useRef<{ px: number; py: number; x: number; y: number; moved: boolean } | null>(null);
   const userMovedRef = useRef(false);
+  const prevEmptyRef = useRef(graph.empty);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hoverId, setHoverId] = useState<string | null>(null);
 
@@ -539,6 +622,14 @@ export function NeuralGraph({
   const focusId = selected?.id ?? hoverId;
   const path = useMemo(() => (focusId ? connectedTo(focusId, graph.edges) : null), [focusId, graph.edges]);
   const status = graphStatus(graph);
+  const activeFocusNode = useMemo(() => findActiveFocusNode(graph), [graph]);
+
+  useEffect(() => {
+    if (prevEmptyRef.current !== graph.empty) {
+      userMovedRef.current = false;
+      prevEmptyRef.current = graph.empty;
+    }
+  }, [graph.empty]);
 
   useLayoutEffect(() => {
     const el = vpRef.current;
@@ -552,9 +643,24 @@ export function NeuralGraph({
 
   const fit = useCallback(() => {
     if (!size.w || !size.h) return;
-    const k = clamp(Math.min((size.w - 24) / graph.width, (size.h - 24) / graph.height), MIN_K, 1.15);
-    setView({ k, x: (size.w - graph.width * k) / 2, y: (size.h - graph.height * k) / 2 });
-  }, [size.w, size.h, graph.width, graph.height]);
+    const pad = 28;
+    const rawK = Math.min((size.w - pad) / graph.width, (size.h - pad) / graph.height);
+    const k = clamp(rawK, FIT_MIN_K, FIT_MAX_K);
+    const gw = graph.width * k;
+    const gh = graph.height * k;
+
+    let x = (size.w - gw) / 2;
+    if (gw > size.w - 24 && activeFocusNode) {
+      x = clamp(size.w / 2 - activeFocusNode.x * k, size.w - gw - 16, 16);
+    }
+
+    let y = (size.h - gh) / 2;
+    if (gh > size.h - 24 && activeFocusNode) {
+      y = clamp(size.h / 2 - activeFocusNode.y * k, size.h - gh - 16, 16);
+    }
+
+    setView({ k, x, y });
+  }, [size.w, size.h, graph.width, graph.height, activeFocusNode]);
 
   useLayoutEffect(() => {
     if (!userMovedRef.current) fit();
@@ -571,6 +677,7 @@ export function NeuralGraph({
   }, []);
 
   const refit = () => {
+    soundFx.playUiClick();
     userMovedRef.current = false;
     fit();
   };
@@ -697,24 +804,31 @@ export function NeuralGraph({
   const to = ghostEdge && graph.nodes.find((n) => n.id === ghostEdge.to);
   const gradientId = `ghost-${uid}`;
 
-  const ctl = cx(btn("ghost", "sm"), "h-6 w-6 px-0");
+  const ctl = cx(btn("outline", "sm"), "h-6 w-6 px-0");
 
   return (
     <Panel
-      title="Thought Graph"
+      title="Decision & Thought Graph"
       icon={<BrainCircuit />}
       meta={<Chip tone={status.tone}>{status.label}</Chip>}
       actions={
-        <div data-graph-ui className="flex items-center gap-0.5">
-          <button type="button" className={ctl} onClick={() => zoomAt(1 / 1.2)} aria-label="Zoom out" title="Zoom out (−)">
+        <div data-graph-ui className="flex items-center gap-1">
+          <button type="button" className={ctl} onClick={() => zoomAt(1 / 1.18)} aria-label="Zoom out" title="Zoom out (−)">
             <Minus className="h-3.5 w-3.5" />
           </button>
-          <span className="w-9 text-center font-mono text-[10.5px] text-ink-3 tabular">{Math.round(view.k * 100)}%</span>
-          <button type="button" className={ctl} onClick={() => zoomAt(1.2)} aria-label="Zoom in" title="Zoom in (+)">
+          <span className="w-10 text-center font-mono text-[11px] font-medium text-ink-2 tabular">{Math.round(view.k * 100)}%</span>
+          <button type="button" className={ctl} onClick={() => zoomAt(1.18)} aria-label="Zoom in" title="Zoom in (+)">
             <Plus className="h-3.5 w-3.5" />
           </button>
-          <button type="button" className={ctl} onClick={refit} aria-label="Fit graph to view" title="Fit to view (0)">
-            <Maximize className="h-3.5 w-3.5" />
+          <button
+            type="button"
+            className={cx(btn("outline", "sm"), "h-6 gap-1 px-2 text-[11px] font-semibold")}
+            onClick={refit}
+            aria-label="Fit graph to view"
+            title="Fit & follow active stage (0)"
+          >
+            <Maximize className="h-3 w-3" />
+            Fit
           </button>
         </div>
       }
@@ -784,20 +898,21 @@ export function NeuralGraph({
               onDecide={onDecide}
               onAcceptOffer={onAcceptOffer}
               onDismissOffer={onDismissOffer}
+              onSwitchToStudio={onSwitchToStudio}
             />
           )}
         </AnimatePresence>
       </div>
 
       <div className="flex h-8 shrink-0 items-center justify-between gap-3 border-t border-line px-3">
-        <span className="min-w-0 truncate text-[10.5px] text-ink-3">
-          {graph.empty ? "Assign a goal — the plan branches here live." : "Drag to pan · ⌘/Ctrl + scroll to zoom · arrows to traverse"}
+        <span className="min-w-0 truncate text-[11px] text-ink-3">
+          {graph.empty ? "Assign a goal — live chain-of-thought branches here." : "Drag to pan · ⌘/Ctrl + scroll to zoom · click any node to inspect receipt"}
         </span>
         <span className="hidden shrink-0 items-center gap-2.5 sm:flex" aria-label="Legend">
           {LEGEND.map((l) => (
-            <span key={l.label} className="flex items-center gap-1 text-[10px] text-ink-3">
-              <svg width="12" height="4" aria-hidden>
-                <line x1="1" y1="2" x2="11" y2="2" stroke={l.color} strokeWidth="2" strokeLinecap="round" strokeDasharray={l.dashed ? "3 2" : undefined} />
+            <span key={l.label} className="flex items-center gap-1 text-[10.5px] font-medium text-ink-2">
+              <svg width="14" height="4" aria-hidden>
+                <line x1="1" y1="2" x2="13" y2="2" stroke={l.color} strokeWidth="2.4" strokeLinecap="round" strokeDasharray={l.dashed ? "3 2" : undefined} />
               </svg>
               {l.label}
             </span>

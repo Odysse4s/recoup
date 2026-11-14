@@ -9,7 +9,7 @@ import { RewindOverlay } from "./components/RewindOverlay";
 import { AnticipateCard, DiffStack, RiskGateCard, StatsStrip } from "./components/RightRail";
 import { Telemetry } from "./components/Telemetry";
 import { TopBar } from "./components/TopBar";
-import { VendorCallPanel } from "./components/VendorCallPanel";
+import { OperatorConsultPanel } from "./components/OperatorConsultPanel";
 import { WorkspaceDeck } from "./components/WorkspaceDeck";
 import { useRecoup } from "./hooks/useRecoup";
 import { useTheme } from "./lib/theme";
@@ -86,8 +86,8 @@ export default function App() {
   const rewinding = !!r.rewind;
   const claimsRows = r.wsState?.tables?.claims ?? [];
   const latestClaim = claimsRows[claimsRows.length - 1];
-  const canNegotiate = r.runStatus === "committed" || claimsRows.length > 0;
-  const claimSettled = claimsRows.some((row) => row.status === "settled");
+  const committedClaimId =
+    r.runStatus === "committed" || claimsRows.length > 0 ? String(latestClaim?.id ?? "CLM-D-1042") : null;
 
   return (
     <div className="recoup-canvas flex min-h-screen flex-col text-ink lg:h-screen lg:overflow-hidden">
@@ -146,14 +146,16 @@ export default function App() {
         </div>
 
         <div className="scroll-thin flex min-h-0 flex-col gap-4 lg:col-span-4 lg:overflow-y-auto">
-          <VendorCallPanel
-            call={r.vendorCall}
-            canNegotiate={canNegotiate}
-            defaultClaimId={String(latestClaim?.id ?? "CLM-D-1042")}
-            defaultAmount={Number(latestClaim?.amount ?? 587.3)}
-            claimSettled={claimSettled}
-            onNegotiate={r.negotiateVendorCall}
-            onReplayTurnAudio={r.replayTurnAudio}
+          <OperatorConsultPanel
+            brandName={brand_name}
+            consult={r.operatorConsult}
+            pendingApproval={r.pendingApproval}
+            committedClaimId={committedClaimId}
+            voiceOn={r.voiceOn}
+            speaking={r.speaking}
+            onEscalateToPhone={r.escalateToPhone}
+            onSelectResolution={r.respondOperatorConsult}
+            onReplayTurn={r.replayConsultTurn}
           />
           <DiffStack
             report={r.report}

@@ -69,12 +69,12 @@ export function RiskGateCard({ approval, onDecide }: { approval: ApprovalNeededP
           <ShieldAlert className="relative h-3.5 w-3.5" />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-semibold text-ink">Risk Gate — manager authorization required</div>
-          <div className="text-[11.5px] text-ink-3">Deterministic policy rule fired. Live ERP stays untouched until you decide.</div>
+          <div className="text-[13px] font-semibold text-ink">Risk Gate · Manager Authorization</div>
         </div>
+        <Chip tone="danger">live ERP untouched</Chip>
         <span className="font-mono text-[10.5px] text-ink-3">{approval.req_id}</span>
       </div>
-      <div className="space-y-3 p-4">
+      <div className="space-y-3 p-3.5">
         <div className="flex flex-wrap items-center gap-2 text-[13px] text-ink-2">
           <span>Intercepted</span>
           <code className="rounded-md border border-line bg-sunken px-1.5 py-0.5 font-mono text-[12px] font-medium text-ink">{approval.tool_name}()</code>
@@ -95,7 +95,7 @@ export function RiskGateCard({ approval, onDecide }: { approval: ApprovalNeededP
             <Chip tone={counts.db ? "warn" : "neutral"}>{counts.db} ERP row changes</Chip>
           </div>
         )}
-        <div className="flex items-center gap-2 pt-1">
+        <div className="flex items-center gap-2 pt-0.5">
           <button onClick={withClick(() => onDecide(approval.req_id, true))} className={cx(btn("ok", "lg"), "flex-1")}>
             Approve commit
           </button>
@@ -103,8 +103,8 @@ export function RiskGateCard({ approval, onDecide }: { approval: ApprovalNeededP
             Reject &amp; rollback
           </button>
         </div>
-        <div className="flex items-center gap-1.5 text-[11.5px] text-ink-3">
-          <Smartphone className="h-3 w-3" /> Also ringing on the Mobile Risk Gate at <span className="font-mono">/mobile</span>
+        <div className="flex items-center gap-1.5 text-[11px] text-ink-3">
+          <Smartphone className="h-3 w-3" /> Mirrored live at <span className="font-mono">/mobile</span>
         </div>
       </div>
     </motion.section>
@@ -210,7 +210,7 @@ export function DiffStack({
       anchor={anchorRef("diff")}
       pulseKey={pulseKey}
       pulseTone="ok"
-      className="min-h-[200px] flex-1"
+      className="min-h-[180px] flex-1"
       bodyClassName="scroll-thin overflow-y-auto"
     >
       <AnimatePresence initial={false}>
@@ -225,7 +225,7 @@ export function DiffStack({
           >
             <div className="mb-2 flex items-center justify-between text-[11px] font-semibold uppercase tracking-wider text-ink-3">
               <span className="flex items-center gap-1.5">
-                <History className="h-3 w-3" /> Reversible checkpoints · newest first
+                <History className="h-3 w-3" /> Checkpoints
                 <span className="font-mono normal-case tracking-normal">({stack.length})</span>
               </span>
               {stack.length > 1 && (
@@ -240,7 +240,7 @@ export function DiffStack({
               )}
             </div>
             {stack.length === 0 ? (
-              <div className="text-[12px] text-ink-3">No checkpoints — live workspace is at its clean baseline.</div>
+              <div className="text-[11.5px] text-ink-3">Clean baseline · 0 checkpoints.</div>
             ) : (
               <ol className="space-y-1.5">
                 <AnimatePresence initial={false}>
@@ -299,8 +299,8 @@ export function DiffStack({
 
       <div className="space-y-3 p-3.5">
         {!report && (
-          <div className="rounded-lg border border-dashed border-line px-4 py-6 text-center text-[12px] leading-relaxed text-ink-3">
-            No staged changes yet. Every ERP mutation and claim file is rehearsed in an isolated copy and staged here for review before touching live ledgers.
+          <div className="rounded-lg border border-dashed border-line px-3.5 py-4 text-center text-[12px] text-ink-3">
+            No staged diffs yet — rehearsed files, SQLite rows &amp; outbox stage here.
           </div>
         )}
         {diffs.map((f) => {
@@ -380,7 +380,7 @@ export function DiffStack({
                     </span>
                     <Maximize2 className="h-3 w-3 shrink-0 text-ink-3 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
                   </div>
-                  {m.body !== undefined && <div className="line-clamp-2 pl-5 text-ink-3">{String(m.body)}</div>}
+                  {m.body !== undefined && <div className="line-clamp-1 pl-5 text-ink-3">{String(m.body)}</div>}
                 </button>
               );
             })}
@@ -414,13 +414,13 @@ export function AnticipateCard({
           className="relative flex shrink-0 flex-col overflow-hidden rounded-xl border border-signal/40 bg-surface"
           style={{ boxShadow: "var(--shadow-card), 0 18px 50px -22px color-mix(in oklab, var(--signal) 60%, transparent)" }}
         >
-          <div className="flex shrink-0 items-center gap-2 border-b border-line px-3.5 py-2.5">
+          <div className="flex shrink-0 items-center gap-2 border-b border-line px-3.5 py-2">
             <Sparkles className="h-3.5 w-3.5 text-signal" />
             <span className="text-[12px] font-semibold text-ink">Anticipate</span>
             <Chip tone="signal">{offer.prediction.kind}</Chip>
             <span className="ml-auto font-mono text-[11px] text-ink-2 tabular">{Math.round(offer.prediction.confidence * 100)}%</span>
           </div>
-          <div className="scroll-thin max-h-[260px] min-h-0 space-y-2.5 overflow-y-auto p-3.5">
+          <div className="scroll-thin max-h-[240px] min-h-0 space-y-2 overflow-y-auto p-3.5">
             <div className="h-1 overflow-hidden rounded-full bg-sunken">
               <motion.div
                 className="h-full rounded-full bg-signal"
@@ -429,8 +429,8 @@ export function AnticipateCard({
                 transition={{ duration: 1.2, ease: [0.2, 0.8, 0.2, 1] }}
               />
             </div>
-            <h3 className="text-[13.5px] font-semibold leading-snug tracking-tight text-ink">{offer.prediction.need}</h3>
-            <p className="text-[12px] leading-relaxed text-ink-3">
+            <h3 className="text-[13px] font-semibold leading-snug tracking-tight text-ink">{offer.prediction.need}</h3>
+            <p className="line-clamp-2 text-[11.5px] leading-snug text-ink-3">
               <span className="font-medium text-ink-2">Evidence · </span>
               {offer.prediction.evidence}
             </p>
@@ -458,14 +458,12 @@ export function AnticipateCard({
           key="idle"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="shrink-0 rounded-xl border border-dashed border-line px-3.5 py-3"
+          className="flex shrink-0 items-center justify-between gap-2 rounded-xl border border-dashed border-line px-3.5 py-2.5"
         >
-          <div className="flex items-center gap-2 text-[12px] font-semibold text-ink-2">
-            <Sparkles className="h-3.5 w-3.5 text-signal" /> Anticipate engine
-          </div>
-          <p className="mt-1 text-[12px] leading-relaxed text-ink-3">
-            After a verified commit, {brandName} sweeps paid AP invoices in idle time and pre-rehearses unclaimed vendor recoveries for 1-click apply.
-          </p>
+          <span className="flex items-center gap-2 text-[12px] font-semibold text-ink-2">
+            <Sparkles className="h-3.5 w-3.5 text-signal" /> Anticipate
+          </span>
+          <span className="truncate text-[11.5px] text-ink-3">{brandName} sweeps paid AP post-commit</span>
         </motion.section>
       )}
     </AnimatePresence>
@@ -494,10 +492,11 @@ export function StatsStrip({
   forged: number;
   pending: boolean;
 }) {
+  const formattedCost = cost < 0.10 ? `€${cost.toFixed(4)}` : `€${cost.toFixed(2)}`;
   return (
     <div className="hidden shrink-0 items-stretch divide-x divide-line lg:flex">
       <Stat label="Steps" value={String(steps)} />
-      <Stat label="Cost" value={`€${cost.toFixed(4)}`} tone="text-ok" />
+      <Stat label="Cost" value={formattedCost} tone="text-ok" />
       <Stat label="Synthesized" value={String(forged)} tone="text-forge" />
       <Stat label="Risk gate" value={pending ? "1 held" : "0"} tone={pending ? "text-danger" : "text-ink"} />
     </div>

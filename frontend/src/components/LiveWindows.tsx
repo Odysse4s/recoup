@@ -1,21 +1,122 @@
 import { AnimatePresence, motion, useAnimate, useDragControls } from "framer-motion";
-import { Activity, Braces, Check, CheckCircle2, Circle, Database, FileCode2, Pin, PinOff, SquareTerminal, XCircle } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  Activity,
+  Braces,
+  Check,
+  CheckCircle2,
+  Circle,
+  Database,
+  FileCode2,
+  FileSpreadsheet,
+  Pin,
+  PinOff,
+  ShieldCheck,
+  SquareTerminal,
+  XCircle,
+} from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { anchorCenter } from "../lib/anchors";
 import { highlightLine } from "../lib/highlight";
 import { soundFx } from "../lib/sound";
 import { PACE, type Speed } from "../lib/speed";
 import type { DockTarget, LiveWin, WindowKind } from "../lib/types";
+import { SANDBOX_SECURITY_SEAL } from "../lib/windows";
 import { cx, TONE, type Tone } from "./ui";
 
-const KIND_META: Record<WindowKind, { tone: Tone; icon: typeof Braces }> = {
-  forge: { tone: "forge", icon: Braces },
-  editor: { tone: "ok", icon: FileCode2 },
-  sqlite: { tone: "signal", icon: Database },
-  exec: { tone: "warn", icon: SquareTerminal },
+const KIND_META: Record<
+  WindowKind,
+  {
+    tone: Tone;
+    icon: typeof Braces;
+    hex: string;
+    defaultCategory: string;
+  }
+> = {
+  forge: {
+    tone: "forge",
+    icon: Braces,
+    hex: "#A855F7",
+    defaultCategory: "SANDBOX · FORGING PYTHON TOOL",
+  },
+  editor: {
+    tone: "warn",
+    icon: FileCode2,
+    hex: "#F59E0B",
+    defaultCategory: "WORKSPACE · WRITING STAGED FILE",
+  },
+  exec: {
+    tone: "warn",
+    icon: SquareTerminal,
+    hex: "#F59E0B",
+    defaultCategory: "WORKSPACE · WRITING STAGED FILE",
+  },
+  sqlite: {
+    tone: "ok",
+    icon: Database,
+    hex: "#10B981",
+    defaultCategory: "ERP & AADE · STAGING DB MUTATION",
+  },
 };
 
 type Phase = "pop" | "typing" | "hold" | "docking";
+
+/** Lightweight XML tag/attribute syntax highlighter for AADE myDATA & .xml artifacts. */
+function highlightXmlLine(line: string): ReactNode {
+  const trimmed = line.trim();
+  if (trimmed.startsWith("<!--")) {
+    return <span className="italic text-ink-3">{line}</span>;
+  }
+  if (trimmed.startsWith("<?xml")) {
+    return <span className="font-medium text-signal">{line}</span>;
+  }
+  const out: ReactNode[] = [];
+  const re = /(<\/?[\w:-]+)|(\/?>)|([\w:-]+)(=)("[^"]*"|'[^']*')/g;
+  let last = 0;
+  let k = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(line))) {
+    if (m.index > last) out.push(line.slice(last, m.index));
+    if (m[1]) {
+      out.push(
+        <span key={k++} className="font-semibold text-signal">
+          {m[1]}
+        </span>
+      );
+    } else if (m[2]) {
+      out.push(
+        <span key={k++} className="font-semibold text-signal">
+          {m[2]}
+        </span>
+      );
+    } else if (m[3]) {
+      out.push(
+        <span key={k++}>
+          <span className="text-warn">{m[3]}</span>
+          <span className="text-ink-3">{m[4]}</span>
+          <span className="text-ok">{m[5]}</span>
+        </span>
+      );
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < line.length) out.push(line.slice(last));
+  return out.length > 0 ? out : line;
+}
+
+function isXmlArtifact(win: LiveWin): boolean {
+  if (win.lang === "diff") return false;
+  const lowerPath = win.path.toLowerCase();
+  if (lowerPath.endsWith(".xml")) return true;
+  const trimmed = win.code.trimStart();
+  return trimmed.startsWith("<?xml") || (trimmed.startsWith("<") && trimmed.includes("</"));
+}
+
+function extractSqliteTable(path: string): string {
+  if (path.includes("›")) {
+    return path.split("›").pop()!.trim() || "ledger";
+  }
+  return path.trim() || "ledger";
+}
 
 /** Two-line live rehearsal telemetry: static facts + measured latency, then lifecycle steps revealed with progress. */
 function TelemetryStrip({ win, progress, typing }: { win: LiveWin; progress: number; typing: boolean }) {
@@ -92,6 +193,15 @@ function LiveWindow({
   const tone = TONE[meta.tone];
   const Icon = meta.icon;
 
+  // Defensive guard: if a window marked skipAutoPop reaches the layer un-manually, release immediately.
+  useEffect(() => {
+    if (win.skipAutoPop && !win.manual && !dockingRef.current) {
+      dockingRef.current = true;
+      onDocked(win.id, null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Background tabs pause requestAnimationFrame; never let a hidden tab stall the run.
   useEffect(() => {
     const finishIfHidden = () => {
@@ -111,6 +221,7 @@ function LiveWindow({
 
   // Stage 1 — origin pop: spring out of the active pipeline stage badge.
   useLayoutEffect(() => {
+    if (win.skipAutoPop && !win.manual) return;
     const el = scope.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
@@ -192,6 +303,8 @@ function LiveWindow({
     onDocked(win.id, target ? win.target : null);
   };
 
+  if (win.skipAutoPop && !win.manual) return null;
+
   const total = win.code.length;
   const shownChars = Math.floor(total * progress);
   const shown = win.code.slice(0, shownChars);
@@ -218,20 +331,57 @@ function LiveWindow({
     ? { label: win.doneLabel, tone: allOk ? ("ok" as Tone) : ("danger" as Tone) }
     : { label: win.liveLabel, tone: meta.tone };
 
+  const bannerTitle = win.categoryBadge ?? meta.defaultCategory;
+  const isForge = win.kind === "forge";
+  const isSqlite = win.kind === "sqlite";
+  const isWorkspaceFile = win.kind === "editor" || win.kind === "exec";
+  const hasMyDataXml = isWorkspaceFile && /aade|mydata/i.test(`${win.path}\n${win.code}`);
+  const sqliteTable = isSqlite ? extractSqliteTable(win.path) : null;
+  const securityPills = isForge ? (win.securitySeal?.length ? win.securitySeal : [...SANDBOX_SECURITY_SEAL]) : null;
+  const renderAsXml = isXmlArtifact(win);
+
   return (
     <motion.div drag dragListener={false} dragControls={dragControls} dragMomentum={false} className="pointer-events-auto">
       <div
         ref={scope}
         style={{
           opacity: 0,
-          boxShadow: `var(--shadow-float), 0 0 0 1px color-mix(in oklab, var(--${meta.tone}) 45%, transparent), 0 0 48px -10px color-mix(in oklab, var(--${meta.tone}) 55%, transparent)`,
+          boxShadow: `var(--shadow-float), 0 0 0 1.5px color-mix(in oklab, ${meta.hex} 65%, transparent), 0 0 54px -8px color-mix(in oklab, ${meta.hex} 60%, transparent)`,
         }}
-        className="relative w-[min(640px,calc(100vw-2rem))] overflow-hidden rounded-xl bg-raised"
+        className="relative w-[min(660px,calc(100vw-2rem))] overflow-hidden rounded-xl bg-raised"
       >
-        {/* titlebar */}
+        {/* High-contrast projector archetype banner (<0.5s recognition) */}
         <div
           onPointerDown={(e) => dragControls.start(e)}
-          className="relative flex h-10 cursor-grab touch-none items-center gap-3 border-b border-line bg-sunken/80 px-3 active:cursor-grabbing"
+          className={cx(
+            "flex min-h-8 cursor-grab touch-none flex-wrap items-center justify-between gap-2 px-3.5 py-1.5 font-mono text-[11px] font-bold uppercase tracking-[0.1em] active:cursor-grabbing",
+            isForge && "bg-gradient-to-r from-[#7e22ce] via-[#9333ea] to-[#A855F7] text-white",
+            isWorkspaceFile && "bg-[#F59E0B] text-slate-950",
+            isSqlite && "bg-[#10B981] text-slate-950"
+          )}
+        >
+          <div className="flex min-w-0 items-center gap-2">
+            <Icon className="h-3.5 w-3.5 shrink-0 stroke-[2.4]" />
+            <span className="truncate">{bannerTitle}</span>
+            {hasMyDataXml && (
+              <span className="inline-flex shrink-0 items-center gap-1 rounded-md border border-[#22d3ee]/80 bg-slate-950 px-2 py-0.5 font-mono text-[10px] font-bold tracking-wider text-[#34d399] shadow-sm">
+                <FileSpreadsheet className="h-3 w-3 text-[#22d3ee]" />
+                AADE myDATA XML
+              </span>
+            )}
+          </div>
+          {sqliteTable && (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-md border border-slate-950/25 bg-slate-950/90 px-2 py-0.5 font-mono text-[10px] font-bold tracking-wider text-[#34d399]">
+              <Database className="h-3 w-3" />
+              {`SQLITE CLONE › ${sqliteTable}`}
+            </span>
+          )}
+        </div>
+
+        {/* Window titlebar */}
+        <div
+          onPointerDown={(e) => dragControls.start(e)}
+          className="relative flex h-9 cursor-grab touch-none items-center gap-3 border-b border-line bg-sunken/85 px-3 active:cursor-grabbing"
         >
           <div className="flex items-center gap-1.5">
             <button
@@ -245,7 +395,6 @@ function LiveWindow({
             <span className="h-3 w-3 rounded-full bg-[#28c840] ring-1 ring-black/10" />
           </div>
           <div className="flex min-w-0 flex-1 items-center gap-2">
-            <Icon className={cx("h-3.5 w-3.5 shrink-0", tone.text)} />
             <span className="shrink-0 text-[12px] font-semibold text-ink">{win.title}</span>
             <span className="truncate font-mono text-[11px] text-ink-3">{win.path}</span>
           </div>
@@ -278,7 +427,33 @@ function LiveWindow({
           </button>
         </div>
 
-        {/* code body */}
+        {/* Dedicated Sandbox Security Seal strip for Forged Python Tools */}
+        {securityPills && (
+          <div
+            aria-label="Sandbox security seal"
+            className="flex flex-wrap items-center gap-1.5 border-b border-[#A855F7]/30 bg-[#A855F7]/[0.09] px-3 py-1.5"
+          >
+            <span className="inline-flex items-center gap-1 pr-1 font-mono text-[10px] font-bold uppercase tracking-wider text-forge">
+              <ShieldCheck className="h-3.5 w-3.5 text-ok" />
+              SEAL
+            </span>
+            {securityPills.map((pill, idx) => (
+              <span
+                key={pill}
+                className={cx(
+                  "inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[10px] font-semibold tracking-wide",
+                  idx === securityPills.length - 1
+                    ? "border-ok/40 bg-ok/12 text-ok"
+                    : "border-[#A855F7]/40 bg-surface/80 text-ink"
+                )}
+              >
+                {pill}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* Code body */}
         <div className="relative bg-code">
           {typing && (
             <div aria-hidden className={cx("pointer-events-none absolute inset-x-0 top-0 h-14 bg-gradient-to-b to-transparent opacity-50 scanline", tone.soft)} />
@@ -299,7 +474,7 @@ function LiveWindow({
                     {i + 1}
                   </span>
                   <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-ink">
-                    {highlightLine(line, win.lang)}
+                    {renderAsXml ? highlightXmlLine(line) : highlightLine(line, win.lang)}
                     {active && <span className={cx("ml-px inline-block h-[1.05em] w-[0.6em] translate-y-[2px] cursor-blink", tone.dot)} />}
                   </span>
                 </div>
@@ -314,7 +489,7 @@ function LiveWindow({
           </div>
         </div>
 
-        {/* assertions */}
+        {/* Assertions */}
         <div className="flex flex-wrap items-center gap-1.5 border-t border-line bg-surface px-3 py-2">
           {win.assertions.map((a, i) => {
             const done = resolved[i];
@@ -350,9 +525,9 @@ function LiveWindow({
 
         <TelemetryStrip win={win} progress={progress} typing={typing} />
 
-        {/* progress */}
+        {/* Progress bar matching archetype accent */}
         <div className="h-[3px] w-full bg-sunken">
-          <div className={cx("h-full transition-[width] duration-75", tone.dot)} style={{ width: `${pct}%` }} />
+          <div className="h-full transition-[width] duration-75" style={{ width: `${pct}%`, backgroundColor: meta.hex }} />
         </div>
       </div>
     </motion.div>
@@ -386,3 +561,5 @@ export function LiveWindowLayer({
     </div>
   );
 }
+
+export { LiveWindowLayer as LiveWindows };

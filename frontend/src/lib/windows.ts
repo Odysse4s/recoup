@@ -4,11 +4,20 @@ import type { LiveWin } from "./types";
 const sqlVal = (v: unknown) =>
   v === null || v === undefined ? "NULL" : typeof v === "number" ? String(v) : `'${String(v).replace(/'/g, "''")}'`;
 
+export const SANDBOX_SECURITY_SEAL = [
+  "python -I",
+  "0 ENV SECRETS",
+  "RLIMIT FSIZE=0",
+  "AST + SHA-256 PINNED",
+] as const;
+
 export function forgeWindow(ft: ForgeTestPayload, latencyMs?: number): LiveWin {
   return {
     latencyMs,
     id: `forge-${ft.name}-${ft.attempt}-${Date.now()}`,
     kind: "forge",
+    categoryBadge: "SANDBOX · FORGING PYTHON TOOL",
+    securitySeal: [...SANDBOX_SECURITY_SEAL],
     title: "Forge TDD Compiler",
     path: `forged_tools/${ft.name}.py`,
     liveLabel: "RUNNING SANDBOX AST…",
@@ -27,7 +36,7 @@ export function forgeWindow(ft: ForgeTestPayload, latencyMs?: number): LiveWin {
       facts: [
         `AST security check: ${ft.ast_errors.length} violation${ft.ast_errors.length === 1 ? "" : "s"}`,
         "subprocess python -I",
-        "RLIMIT_CPU 2s · FSIZE 1MB",
+        "RLIMIT_CPU 2s · FSIZE=0",
         `unit tests ${ft.test_results.filter((r) => r.passed).length}/${ft.test_results.length}`,
       ],
       steps: [
@@ -44,38 +53,23 @@ export function forgeWindow(ft: ForgeTestPayload, latencyMs?: number): LiveWin {
 export function toolWindow(
   call: { id?: string; name?: string; args?: Record<string, unknown> },
   latencyMs?: number
-): LiveWin {
+): LiveWin | null {
   const name = call.name ?? "tool";
   const a = call.args ?? {};
+
+  // Suppress noisy read-only inspections during automated runs so only high-signal
+  // forging, staged file writes, external outbox interceptions, and DB mutations pop.
+  if (name === "read_file" || name === "query_db") {
+    return null;
+  }
+
   const id = `${name}-${call.id ?? ""}-${Date.now()}`;
   const base = { id, pinned: false, origin: "stage:rehearse", latencyMs, callId: call.id } as const;
   const bytes = (v: unknown) => new TextEncoder().encode(typeof v === "string" ? v : JSON.stringify(v ?? "")).length;
 
-  if (name === "read_file") {
-    const path = String(a.path ?? "document.md");
-    return {
-      ...base,
-      kind: "editor",
-      title: "Evidence Reader",
-      path: `rehearsal://${path}`,
-      liveLabel: "READING EVIDENCE…",
-      doneLabel: "PARSED",
-      code: `# Inspecting workspace evidence\npath: ${path}\nmode: read-only rehearsal clone`,
-      lang: "markdown",
-      assertions: [
-        { label: "isolated clone", ok: true },
-        { label: "read-only access", ok: true },
-      ],
-      target: "db",
-      telemetry: {
-        facts: ["rehearsal fs", "read-only", path],
-        steps: ["open rehearsal clone", "read UTF-8", "extract facts"],
-      },
-    };
-  }
-
   if (name === "write_file" || name === "patch_file") {
     const path = String(a.path ?? "untitled");
+    const lowerPath = path.toLowerCase();
     const code =
       name === "write_file"
         ? String(a.content ?? "")
@@ -83,12 +77,22 @@ export function toolWindow(
     return {
       ...base,
       kind: "editor",
+      categoryBadge: "WORKSPACE · WRITING STAGED FILE",
       title: "Staged File Editor",
       path: `staged://${path}`,
       liveLabel: "STAGING FILE…",
       doneLabel: "STAGED FOR REVIEW",
       code,
-      lang: name === "patch_file" ? "diff" : path.endsWith(".py") ? "python" : "markdown",
+      lang:
+        name === "patch_file"
+          ? "diff"
+          : lowerPath.endsWith(".py")
+          ? "python"
+          : lowerPath.endsWith(".sql")
+          ? "sql"
+          : lowerPath.endsWith(".xml")
+          ? "text"
+          : "markdown",
       assertions: [
         { label: "rehearsal fs write", ok: true },
         { label: "unified diff", ok: true },
@@ -102,11 +106,10 @@ export function toolWindow(
     };
   }
 
-  if (name === "upsert_row" || name === "delete_rows" || name === "query_db") {
+  if (name === "upsert_row" || name === "delete_rows") {
     const table = String(a.table ?? "ledger");
     let sql = "";
-    if (name === "query_db") sql = String(a.sql ?? "SELECT 1;");
-    else if (name === "upsert_row") {
+    if (name === "upsert_row") {
       const row = (a.row ?? {}) as Record<string, unknown>;
       const cols = Object.keys(row);
       const pk = String(a.pk_col ?? "id");
@@ -123,16 +126,17 @@ export function toolWindow(
     return {
       ...base,
       kind: "sqlite",
+      categoryBadge: "ERP & AADE · STAGING DB MUTATION",
       title: "SQLite Rehearsal Inspector",
       path: `rehearsal.db › ${table}`,
       liveLabel: "EXECUTING ON REHEARSAL DB…",
-      doneLabel: name === "query_db" ? "ROWS FETCHED" : "ROWS STAGED",
+      doneLabel: "ROWS STAGED",
       code: sql,
       lang: "sql",
       assertions: [
         { label: "online backup clone", ok: true },
         { label: "statement prepared", ok: true },
-        { label: "pre-image captured", ok: name !== "query_db" },
+        { label: "pre-image captured", ok: true },
       ],
       target: "db",
       telemetry: {
@@ -144,13 +148,8 @@ export function toolWindow(
                 `${Object.keys((a.row ?? {}) as object).length} cols staged`,
                 "pre-image receipt",
               ]
-            : name === "delete_rows"
-            ? [`table ${table}`, `WHERE ${String(a.where_col ?? "id")}`, "rows snapshotted", "pre-image receipt"]
-            : ["read-only SELECT", "rehearsal.db"],
-        steps:
-          name === "query_db"
-            ? ["online-backup rehearsal.db", "prepare SELECT", "fetch rows"]
-            : ["online-backup rehearsal.db", "SELECT pre-image", "write in rehearsal txn", "diff rows vs live", "hold for Risk Gate"],
+            : [`table ${table}`, `WHERE ${String(a.where_col ?? "id")}`, "rows snapshotted", "pre-image receipt"],
+        steps: ["online-backup rehearsal.db", "SELECT pre-image", "write in rehearsal txn", "diff rows vs live", "hold for Risk Gate"],
       },
     };
   }
@@ -160,6 +159,7 @@ export function toolWindow(
   return {
     ...base,
     kind: "exec",
+    categoryBadge: "WORKSPACE · WRITING STAGED FILE",
     title: external ? "Outbox Interceptor" : "Rehearsal Exec Console",
     path: `${name}()`,
     liveLabel: external ? "INTERCEPTING SIDE-EFFECT…" : "EXECUTING IN SANDBOX…",
@@ -182,22 +182,30 @@ export function toolWindow(
           steps: ["intercept side-effect", "serialize payload", "hold in dry-run outbox", "queue for Risk Gate"],
         }
       : {
-          facts: ["synthesized pure tool", "subprocess python -I", "RLIMIT_CPU 2s · FSIZE 1MB"],
+          facts: ["synthesized pure tool", "subprocess python -I", "RLIMIT_CPU 2s · FSIZE=0"],
           steps: ["validate args", "spawn python -I", "capture JSON output", "record trace"],
         },
   };
 }
 
 export function fileWindow(path: string, content: string): LiveWin {
+  const lowerPath = path.toLowerCase();
   return {
     id: `file-${path}-${Date.now()}`,
     kind: "editor",
+    categoryBadge: "WORKSPACE · WRITING STAGED FILE",
     title: "Workspace File Viewer",
     path: `workspace/${path}`,
     liveLabel: "OPENING…",
     doneLabel: "VERIFIED ARTIFACT",
     code: content,
-    lang: path.endsWith(".py") ? "python" : path.endsWith(".sql") ? "sql" : "markdown",
+    lang: lowerPath.endsWith(".py")
+      ? "python"
+      : lowerPath.endsWith(".sql")
+      ? "sql"
+      : lowerPath.endsWith(".xml")
+      ? "text"
+      : "markdown",
     assertions: [{ label: "live workspace artifact", ok: true }],
     telemetry: {
       facts: ["live workspace", `${content.split("\n").length} lines`, "read-only view"],
@@ -218,6 +226,7 @@ export function diffWindow(path: string, diff: string, created: boolean): LiveWi
   return {
     id: `diff-${path}-${Date.now()}`,
     kind: "editor",
+    categoryBadge: "WORKSPACE · WRITING STAGED FILE",
     title: "Staged Diff Inspector",
     path: `staged://${path}`,
     liveLabel: "OPENING…",
@@ -291,6 +300,7 @@ export function outboxWindow(item: Record<string, unknown>, index: number): Live
   return {
     id: `outbox-${index}-${Date.now()}`,
     kind: "exec",
+    categoryBadge: "WORKSPACE · WRITING STAGED FILE",
     title: "Outbox Payload Inspector",
     path: isMail
       ? `send_email → ${String(item.to ?? "")}`

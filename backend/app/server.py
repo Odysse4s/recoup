@@ -5,7 +5,7 @@ import asyncio
 import base64
 import contextlib
 import gc
-import hashlib
+import importlib
 import inspect
 import json
 import os
@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from .contracts import (
     ApprovalDecision,
     CallEndPayload,
+    CallStartPayload,
     CallTurnPayload,
     EventType,
     EvidencePayload,
@@ -62,6 +63,40 @@ REAL = Env(root_dir=WS, db_path=WS / "app.db")
 LOG = UndoLog(Path("undo_log.json"))
 ANTICIPATE_TASK: asyncio.Task[Any] | None = None
 SHUTDOWN_EVENT: asyncio.Event | None = None
+_EXTRA_VOICE_COST_EUR: float = 0.0
+
+
+def _is_live_fal_voice_active() -> bool:
+    provider = os.getenv("VOICE_PROVIDER", "").strip().lower()
+    if provider in ("none", "offline", "fake", "disabled"):
+        return False
+    return bool(os.getenv("FAL_KEY", "").strip())
+
+
+def _voice_micro_cost(text: str) -> float:
+    if not _is_live_fal_voice_active():
+        return 0.0
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return 0.0
+    return round(max(0.0005, min(0.0012, len(cleaned) * 0.0000045)), 6)
+
+
+def _record_direct_voice_cost(text: str) -> float:
+    global _EXTRA_VOICE_COST_EUR
+    mc = _voice_micro_cost(text)
+    if mc <= 0.0:
+        return 0.0
+    cleaned = text.strip()
+    already_charged = any(
+        e.type == EventType.CALL_TURN
+        and str(e.payload.get("text") or "").strip() == cleaned
+        and e.cost_eur > 0.0
+        for e in reversed(BUS.history[-6:])
+    )
+    if not already_charged:
+        _EXTRA_VOICE_COST_EUR = round(_EXTRA_VOICE_COST_EUR + mc, 6)
+    return mc
 
 
 @contextlib.asynccontextmanager
@@ -96,6 +131,19 @@ def _read_db_tables(db_path: Path) -> dict[str, list[dict[str, Any]]]:
     return out
 
 
+def _read_db_schema_sql(db_path: Path) -> dict[str, str]:
+    if not db_path.exists():
+        return {}
+    out: dict[str, str] = {}
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
+        rows = conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall()
+        for name, sql in rows:
+            out[str(name)] = str(sql or "")
+    return out
+
+
 def _read_ws_files(root_dir: Path, db_path: Path) -> dict[str, str]:
     if not root_dir.exists():
         return {}
@@ -117,15 +165,14 @@ def health():
     }
 
 
-@app.get("/api/state")
-def state():
-    """Complete live workspace and safety runtime state for HUD initialization and live inspection."""
+def _workspace_snapshot() -> dict[str, Any]:
     forged = [
         {"name": t.name, "description": t.description, "uses": t.uses}
         for t in REGISTRY.values()
         if t.source == "forged"
     ]
-    total_cost = round(sum(e.cost_eur for e in BUS.history), 5)
+    extra_voice = _EXTRA_VOICE_COST_EUR if _is_live_fal_voice_active() else 0.0
+    total_cost = round(sum(e.cost_eur for e in BUS.history) + extra_voice, 6)
     total_steps = sum(1 for e in BUS.history if e.type == EventType.TOOL_CALL)
     domain = get_domain()
     return {
@@ -143,6 +190,7 @@ def state():
         },
         "files": _read_ws_files(REAL.root_dir, REAL.db_path),
         "tables": _read_db_tables(REAL.db_path),
+        "schema_sql": _read_db_schema_sql(REAL.db_path),
         "outbox": list(REAL.outbox),
         "undo_stack": list(LOG.entries),
         "tools": [
@@ -175,6 +223,12 @@ def state():
             "unapproved_high_risk": len(PENDING_PAYLOADS),
         },
     }
+
+
+@app.get("/api/state")
+def state():
+    """Complete live workspace and safety runtime state for HUD initialization and live inspection."""
+    return _workspace_snapshot()
 
 
 @app.get("/api/events")
@@ -329,6 +383,7 @@ async def undo(req: UndoRequest | None = None):
 @app.post("/api/reset")
 async def reset():
     """Restore workspace to deterministic Recoup baseline seed."""
+    global _EXTRA_VOICE_COST_EUR
     if ANTICIPATE_TASK and not ANTICIPATE_TASK.done():
         ANTICIPATE_TASK.cancel()
     for fut in list(PENDING.values()):
@@ -359,6 +414,7 @@ async def reset():
     LOG.entries.clear()
     LOG._flush()
     BUS.history.clear()
+    _EXTRA_VOICE_COST_EUR = 0.0
     return {"ok": True, "fingerprint": fingerprint_env(REAL)[:12]}
 
 
@@ -491,11 +547,12 @@ VOICE_CACHE_DIR = Path(os.getenv("VOICE_CACHE_DIR", "./.voice_cache")).resolve()
 
 @app.post("/api/voice/briefing")
 async def voice_briefing(req: VoiceBriefingRequest):
-    """Synthesize spoken executive briefing via voice module or ElevenLabs, with 204 Web Speech fallback."""
+    """Synthesize spoken executive briefing via single calm AI voice (fal.ai), with 204 Web Speech fallback."""
     text = req.text.strip()
     if not text:
         raise HTTPException(400, "empty briefing text")
 
+    audio_bytes: bytes | None = None
     with contextlib.suppress(Exception):
         from .voice.elevenlabs_agent import synthesize_briefing  # type: ignore[import-not-found]
 
@@ -508,36 +565,32 @@ async def voice_briefing(req: VoiceBriefingRequest):
         )
         if not pytest_offline:
             maybe_audio = synthesize_briefing(text)
-            audio_bytes = await maybe_audio if inspect.isawaitable(maybe_audio) else maybe_audio
-            if audio_bytes:
-                return Response(content=audio_bytes, media_type="audio/mpeg")
+            candidate = await maybe_audio if inspect.isawaitable(maybe_audio) else maybe_audio
+            if candidate:
+                audio_bytes = candidate
 
-    voice_id = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
-    model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_turbo_v2_5")
-    cache_key = hashlib.sha256(f"{voice_id}:{model_id}:{text}".encode()).hexdigest()
-    VOICE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache_file = VOICE_CACHE_DIR / f"{cache_key}.mp3"
+    if not audio_bytes:
+        with contextlib.suppress(Exception):
+            from .voice.call_audio import synthesize_call_turn  # type: ignore[import-not-found]
 
-    if cache_file.exists():
-        return Response(content=cache_file.read_bytes(), media_type="audio/mpeg")
+            is_unpatched_turn = getattr(synthesize_call_turn, "__module__", "").endswith("call_audio")
+            pytest_turn_offline = (
+                "PYTEST_CURRENT_TEST" in os.environ
+                and is_unpatched_turn
+                and not os.getenv("ELEVENLABS_API_KEY", "").strip()
+                and not os.getenv("VOICE_PROVIDER", "").strip()
+            )
+            if not pytest_turn_offline:
+                maybe_turn = synthesize_call_turn("agent", text)
+                candidate = await maybe_turn if inspect.isawaitable(maybe_turn) else maybe_turn
+                if candidate:
+                    audio_bytes = candidate
 
-    api_key = os.getenv("ELEVENLABS_API_KEY", "").strip()
-    if not api_key:
-        return Response(status_code=204)
+    if audio_bytes:
+        mc = _record_direct_voice_cost(text)
+        headers = {"X-Voice-Cost-Eur": f"{mc:.6f}"} if mc > 0 else {}
+        return Response(content=audio_bytes, media_type="audio/mpeg", headers=headers)
 
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-    headers = {"xi-api-key": api_key, "Content-Type": "application/json", "Accept": "audio/mpeg"}
-    payload = {
-        "text": text,
-        "model_id": model_id,
-        "voice_settings": {"stability": 0.48, "similarity_boost": 0.78},
-    }
-    with contextlib.suppress(Exception):
-        async with httpx.AsyncClient(timeout=12.0) as client:
-            resp = await client.post(url, headers=headers, json=payload)
-            if resp.status_code == 200 and resp.content:
-                cache_file.write_bytes(resp.content)
-                return Response(content=resp.content, media_type="audio/mpeg")
     return Response(status_code=204)
 
 
@@ -808,12 +861,14 @@ async def negotiate_vendor_call(req: NegotiateCallRequest | None = None):
         ).model_dump()
         emitted_turns.append(turn_payload)
         speaker_label = "Recoup Negotiator" if turn_payload["speaker"] == "agent" else counterparty
+        turn_cost = _voice_micro_cost(turn_payload["text"]) if turn_payload["speaker"] == "agent" else 0.0
         BUS.emit(
             run_id,
             EventType.CALL_TURN,
             turn_payload,
             step=idx,
             thought=f"{speaker_label}: {turn_payload['text']}",
+            cost_eur=turn_cost,
         )
         if pace > 0 and idx < len(raw_turns):
             await asyncio.sleep(pace)
@@ -873,37 +928,55 @@ async def negotiate_vendor_call(req: NegotiateCallRequest | None = None):
 
 
 class TurnAudioRequest(BaseModel):
-    speaker: Literal["agent", "counterparty"] = "agent"
+    speaker: Literal["agent", "counterparty", "user"] = "agent"
     text: str
 
 
 @app.post("/api/voice/turn-audio")
 async def voice_turn_audio(req: TurnAudioRequest):
-    """Synthesize a single call turn via call_audio or elevenlabs_agent, else HTTP 204 for Web Speech."""
+    """Synthesize a call turn strictly via single calm AI agent voice (fal.ai), else HTTP 204."""
     text = req.text.strip()
     if not text:
         raise HTTPException(400, "empty turn text")
 
+    audio_bytes: bytes | None = None
     with contextlib.suppress(Exception):
         from .voice.call_audio import synthesize_call_turn  # type: ignore[import-not-found]
 
-        maybe_turn = synthesize_call_turn(req.speaker, text)
-        turn_bytes = await maybe_turn if inspect.isawaitable(maybe_turn) else maybe_turn
-        if turn_bytes:
-            return Response(content=turn_bytes, media_type="audio/mpeg")
-
-    with contextlib.suppress(Exception):
-        from .voice.elevenlabs_agent import synthesize_briefing
-
-        cp_voice = (
-            os.getenv("ELEVENLABS_COUNTERPARTY_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
-            if req.speaker == "counterparty"
-            else None
+        is_unpatched_turn = getattr(synthesize_call_turn, "__module__", "").endswith("call_audio")
+        pytest_turn_offline = (
+            "PYTEST_CURRENT_TEST" in os.environ
+            and is_unpatched_turn
+            and not os.getenv("ELEVENLABS_API_KEY", "").strip()
+            and not os.getenv("VOICE_PROVIDER", "").strip()
         )
-        maybe_audio = synthesize_briefing(text, voice_id=cp_voice)
-        audio_bytes = await maybe_audio if inspect.isawaitable(maybe_audio) else maybe_audio
-        if audio_bytes:
-            return Response(content=audio_bytes, media_type="audio/mpeg")
+        if not pytest_turn_offline:
+            maybe_turn = synthesize_call_turn("agent", text)
+            candidate = await maybe_turn if inspect.isawaitable(maybe_turn) else maybe_turn
+            if candidate:
+                audio_bytes = candidate
+
+    if not audio_bytes:
+        with contextlib.suppress(Exception):
+            from .voice.elevenlabs_agent import synthesize_briefing
+
+            is_unpatched_brief = getattr(synthesize_briefing, "__module__", "").endswith("elevenlabs_agent")
+            pytest_brief_offline = (
+                "PYTEST_CURRENT_TEST" in os.environ
+                and is_unpatched_brief
+                and not os.getenv("ELEVENLABS_API_KEY", "").strip()
+                and not os.getenv("VOICE_PROVIDER", "").strip()
+            )
+            if not pytest_brief_offline:
+                maybe_audio = synthesize_briefing(text)
+                candidate = await maybe_audio if inspect.isawaitable(maybe_audio) else maybe_audio
+                if candidate:
+                    audio_bytes = candidate
+
+    if audio_bytes:
+        mc = _record_direct_voice_cost(text)
+        headers = {"X-Voice-Cost-Eur": f"{mc:.6f}"} if mc > 0 else {}
+        return Response(content=audio_bytes, media_type="audio/mpeg", headers=headers)
 
     return Response(status_code=204)
 
@@ -970,6 +1043,7 @@ async def voice_decision(request: Request):
                 break
 
     decision: str | None = None
+    had_initial_transcript = bool(transcript)
     if audio_bytes:
         with contextlib.suppress(Exception):
             from .voice.call_audio import transcribe_and_decide  # type: ignore[import-not-found]
@@ -998,6 +1072,8 @@ async def voice_decision(request: Request):
 
         if not transcript and decision is None:
             transcript = await _transcribe_audio_fallback(audio_bytes, filename, mime_type)
+        if not had_initial_transcript and transcript:
+            _record_direct_voice_cost(transcript)
 
     if decision not in ("approve", "reject", "unknown"):
         from .voice.elevenlabs_agent import parse_voice_decision
@@ -1032,4 +1108,827 @@ async def voice_decision(request: Request):
         "decision": decision,
         "approved": approved,
         "resolved": resolved,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: Operator Consult Escalation Call, AADE myDATA XML & Dynamic Ledger
+# ---------------------------------------------------------------------------
+
+_REFUND_INTENT_RE = re.compile(r"\b(refund|credit|587|hold|aade|mydata|enforce)\b")
+_REDELIVERY_INTENT_RE = re.compile(
+    r"\b(redeliver|re-deliver|redelivery|re-delivery|replace|replacement|22|hubs|tomorrow)\b"
+)
+
+
+def _active_pending_req_id() -> str | None:
+    for cand_id, cand_fut in PENDING.items():
+        if isinstance(cand_fut, asyncio.Event):
+            if not cand_fut.is_set():
+                return cand_id
+        elif not cand_fut.done():
+            return cand_id
+    return next(iter(PENDING.keys()), None)
+
+
+def _classify_operator_consult_intent(transcript: str) -> Literal["refund", "redelivery"]:
+    with contextlib.suppress(Exception):
+        call_audio = importlib.import_module(".voice.call_audio", __package__)
+
+        parser = getattr(call_audio, "parse_user_resolution_intent", None)
+        if callable(parser):
+            parsed = parser(transcript)
+            norm = ""
+            if isinstance(parsed, dict):
+                norm = str(parsed.get("choice") or parsed.get("intent") or parsed.get("resolution") or "")
+            elif isinstance(parsed, tuple) and parsed:
+                norm = str(parsed[0] or "")
+            elif isinstance(parsed, str):
+                norm = parsed
+            norm_clean = norm.strip().lower()
+            if norm_clean in ("refund", "redelivery"):
+                return "refund" if norm_clean == "refund" else "redelivery"
+
+    lowered = (transcript or "").lower()
+    if re.search(r"\b(?:no|not|don'?t|instead of)\s+(?:the\s+|full\s+)?(?:refund|hold)\b", lowered):
+        return "redelivery"
+    if re.search(
+        r"\b(?:no|not|don'?t|instead of)\s+(?:next[- ]day\s+)?(?:redeliver\w*|re-deliver\w*|replacement)\b",
+        lowered,
+    ):
+        return "refund"
+
+    refund_hits = len(_REFUND_INTENT_RE.findall(lowered))
+    redelivery_hits = len(_REDELIVERY_INTENT_RE.findall(lowered))
+    if redelivery_hits > refund_hits:
+        return "redelivery"
+    if refund_hits > 0:
+        return "refund"
+    return "refund"
+
+
+async def _transcribe_operator_consult_audio(
+    audio_bytes: bytes,
+    filename: str,
+    mime_type: str,
+) -> str:
+    if not audio_bytes:
+        return ""
+
+    with contextlib.suppress(Exception):
+        call_audio = importlib.import_module(".voice.call_audio", __package__)
+
+        for fn_name in ("transcribe_operator_voice", "transcribe_audio_bytes", "transcribe_and_decide"):
+            fn = getattr(call_audio, fn_name, None)
+            if not callable(fn):
+                continue
+            sig = inspect.signature(fn)
+            kwargs: dict[str, Any] = {}
+            if "mime_type" in sig.parameters:
+                kwargs["mime_type"] = mime_type
+            if "content_type" in sig.parameters:
+                kwargs["content_type"] = mime_type
+            if "filename" in sig.parameters:
+                kwargs["filename"] = filename
+            maybe_out = fn(audio_bytes, **kwargs)
+            out = await maybe_out if inspect.isawaitable(maybe_out) else maybe_out
+            if isinstance(out, str) and out.strip():
+                return out.strip()
+            if isinstance(out, tuple) and out and isinstance(out[0], str) and out[0].strip():
+                return out[0].strip()
+            if isinstance(out, dict):
+                txt = str(out.get("transcript") or out.get("text") or "").strip()
+                if txt:
+                    return txt
+
+    with contextlib.suppress(Exception):
+        elevenlabs_agent = importlib.import_module(".voice.elevenlabs_agent", __package__)
+
+        fn_el = getattr(elevenlabs_agent, "transcribe_voice_decision", None)
+        if callable(fn_el):
+            sig = inspect.signature(fn_el)
+            kwargs = {"mime_type": mime_type} if "mime_type" in sig.parameters else {}
+            maybe_out = fn_el(audio_bytes, **kwargs)
+            out = await maybe_out if inspect.isawaitable(maybe_out) else maybe_out
+            if isinstance(out, str) and out.strip():
+                return out.strip()
+            if isinstance(out, dict):
+                txt = str(out.get("transcript") or out.get("text") or "").strip()
+                if txt:
+                    return txt
+
+    return await _transcribe_audio_fallback(audio_bytes, filename, mime_type)
+
+
+def _build_aade_mydata_xml(claim_id: str, choice: Literal["refund", "redelivery"]) -> str:
+    if choice == "refund":
+        invoice_type = "5.1"
+        series = "CR-AADE"
+        net_val = "587.30"
+        vat_val = "140.95"
+        gross_val = "728.25"
+        qty_block = ""
+        move_block = ""
+        comments = (
+            f"Πιστωτικό Τιμολόγιο Συσχετιζόμενο (Credit Note) for claim {claim_id} "
+            "on delivery D-1042 / correlated invoice INV-7781"
+        )
+    else:
+        invoice_type = "9.3"
+        series = "DN-AADE"
+        net_val = "202.30"
+        vat_val = "48.55"
+        gross_val = "250.85"
+        qty_block = "\n        <quantity>22</quantity>"
+        move_block = "\n      <movePurpose>1</movePurpose>"
+        comments = (
+            "Δελτίο Αποστολής - Συμφωνία Επαναποστολής 22 τεμ. USB-C hubs next-day "
+            f"plus SLA and unit overbill adjustment on D-1042 / INV-7781 ({claim_id})"
+        )
+
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<InvoicesDoc xmlns="http://www.aade.gr/myDATA/invoice/v1.0">\n'
+        "  <invoice>\n"
+        "    <issuer>\n"
+        "      <vatNumber>EL094281773</vatNumber>\n"
+        "      <country>GR</country>\n"
+        "      <branch>0</branch>\n"
+        "      <name>Kappa Office Systems S.A.</name>\n"
+        "    </issuer>\n"
+        "    <counterpart>\n"
+        "      <vatNumber>EL998451220</vatNumber>\n"
+        "      <country>GR</country>\n"
+        "      <branch>0</branch>\n"
+        "      <name>Recoup Enterprise Operations</name>\n"
+        "    </counterpart>\n"
+        "    <invoiceHeader>\n"
+        f"      <series>{series}</series>\n"
+        "      <aa>1042</aa>\n"
+        "      <issueDate>2026-11-14</issueDate>\n"
+        f"      <invoiceType>{invoice_type}</invoiceType>\n"
+        "      <currency>EUR</currency>\n"
+        "      <correlatedInvoices>INV-7781</correlatedInvoices>\n"
+        f"      <deliveryRef>D-1042</deliveryRef>{move_block}\n"
+        "    </invoiceHeader>\n"
+        "    <invoiceDetails>\n"
+        f"      <lineNumber>1</lineNumber>{qty_block}\n"
+        f"      <netValue>{net_val}</netValue>\n"
+        "      <vatCategory>1</vatCategory>\n"
+        f"      <vatAmount>{vat_val}</vatAmount>\n"
+        f"      <lineComments>{comments}</lineComments>\n"
+        "      <incomeClassification>\n"
+        "        <classificationType>E3_561_001</classificationType>\n"
+        "        <classificationCategory>category1_1</classificationCategory>\n"
+        f"        <amount>{net_val}</amount>\n"
+        "      </incomeClassification>\n"
+        "    </invoiceDetails>\n"
+        "    <invoiceSummary>\n"
+        f"      <totalNetValue>{net_val}</totalNetValue>\n"
+        f"      <totalVatAmount>{vat_val}</totalVatAmount>\n"
+        "      <totalWithheldAmount>0.00</totalWithheldAmount>\n"
+        "      <totalFeesAmount>0.00</totalFeesAmount>\n"
+        "      <totalStampDutyAmount>0.00</totalStampDutyAmount>\n"
+        "      <totalOtherTaxesAmount>0.00</totalOtherTaxesAmount>\n"
+        "      <totalDeductionsAmount>0.00</totalDeductionsAmount>\n"
+        f"      <totalGrossValue>{gross_val}</totalGrossValue>\n"
+        "    </invoiceSummary>\n"
+        "  </invoice>\n"
+        "</InvoicesDoc>\n"
+    )
+
+
+def _pick_allowed_column_value(
+    ddl: str,
+    col_name: str,
+    preferred: list[str],
+    fallback: str,
+) -> str:
+    if ddl:
+        in_match = re.search(rf"\b{re.escape(col_name)}\b\s+IN\s*\(([^)]+)\)", ddl, re.IGNORECASE)
+        if in_match:
+            allowed = re.findall(r"'([^']*)'", in_match.group(1))
+            if allowed:
+                for cand in preferred:
+                    if cand in allowed:
+                        return cand
+                if fallback in allowed:
+                    return fallback
+                return allowed[0]
+    return preferred[0] if preferred else fallback
+
+
+def _record_reversible_mutation(
+    run_id: str,
+    tool_name: str,
+    args: dict[str, Any],
+    summary: str,
+) -> bool:
+    tool = REGISTRY.get(tool_name)
+    if tool is None:
+        return False
+    receipt = tool.do(args, REAL)
+    tool.uses += 1
+    step_no = len(LOG.entries) + 1
+    LOG.record(step_no, tool_name, args, receipt, summary=summary)
+    BUS.emit(
+        run_id,
+        EventType.REPLAY_STEP_DONE,
+        {"step": step_no, "tool": tool_name, "summary": summary, "receipt": receipt},
+        step=step_no,
+        thought=summary,
+    )
+    return True
+
+
+def _apply_consult_resolution_mutations(
+    run_id: str,
+    claim_id: str,
+    choice: Literal["refund", "redelivery"],
+    agreed_amount: float,
+    aade_xml_path: str,
+    xml_content: str,
+) -> int:
+    mutations = 0
+    invoice_type = "5.1" if choice == "refund" else "9.3"
+    net_amount = 587.30 if choice == "refund" else 202.30
+    vat_amount = 140.95 if choice == "refund" else 48.55
+    gross_amount = 728.25 if choice == "refund" else 250.85
+
+    if _record_reversible_mutation(
+        run_id,
+        "write_file",
+        {"path": aade_xml_path, "content": xml_content},
+        f"Staged Greek AADE myDATA {invoice_type} XML `{aade_xml_path}`",
+    ):
+        mutations += 1
+
+    if not REAL.db_path.exists() or "upsert_row" not in REGISTRY:
+        return mutations
+
+    schema_ddls = _read_db_schema_sql(REAL.db_path)
+    table_cols: dict[str, list[dict[str, Any]]] = {}
+    with contextlib.closing(sqlite3.connect(REAL.db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        for tbl_name in schema_ddls:
+            info_rows = conn.execute(f'PRAGMA table_info("{tbl_name}")').fetchall()
+            table_cols[tbl_name] = [dict(r) for r in info_rows]
+
+        delivery_id = claim_id[4:] if claim_id.upper().startswith("CLM-") else "D-1042"
+        supplier_id = "SUP-KAPPA"
+        invoice_id = "INV-7781"
+
+        if "suppliers" in table_cols:
+            sup_pk = next((c["name"] for c in table_cols["suppliers"] if c["pk"] > 0), None)
+            if sup_pk:
+                s_row = conn.execute(f'SELECT "{sup_pk}" FROM "suppliers" LIMIT 1').fetchone()
+                if s_row:
+                    supplier_id = str(s_row[0])
+
+        if "deliveries" in table_cols:
+            del_pk = next((c["name"] for c in table_cols["deliveries"] if c["pk"] > 0), None)
+            if del_pk:
+                d_row = conn.execute(
+                    f'SELECT * FROM "deliveries" WHERE "{del_pk}" = ?', (delivery_id,)
+                ).fetchone()
+                if d_row is None:
+                    d_row = conn.execute('SELECT * FROM "deliveries" LIMIT 1').fetchone()
+                if d_row is not None:
+                    d_dict = dict(d_row)
+                    delivery_id = str(d_dict.get(del_pk, delivery_id))
+                    if d_dict.get("supplier_id"):
+                        supplier_id = str(d_dict["supplier_id"])
+
+        if "invoices" in table_cols:
+            inv_pk = next((c["name"] for c in table_cols["invoices"] if c["pk"] > 0), None)
+            inv_cols = {c["name"] for c in table_cols["invoices"]}
+            if inv_pk:
+                i_row = None
+                if "delivery_id" in inv_cols:
+                    i_row = conn.execute(
+                        'SELECT * FROM "invoices" WHERE "delivery_id" = ? LIMIT 1', (delivery_id,)
+                    ).fetchone()
+                if i_row is None:
+                    i_row = conn.execute(
+                        f'SELECT * FROM "invoices" WHERE "{inv_pk}" = ?', (invoice_id,)
+                    ).fetchone()
+                if i_row is not None:
+                    i_dict = dict(i_row)
+                    invoice_id = str(i_dict.get(inv_pk, invoice_id))
+
+        existing_claim: dict[str, Any] | None = None
+        claims_pk: str | None = None
+        if "claims" in table_cols:
+            pks = [c["name"] for c in table_cols["claims"] if c["pk"] > 0]
+            claims_pk = pks[0] if len(pks) == 1 else ("id" if any(c["name"] == "id" for c in table_cols["claims"]) else None)
+            if claims_pk:
+                c_row = conn.execute(
+                    f'SELECT * FROM "claims" WHERE "{claims_pk}" = ?', (claim_id,)
+                ).fetchone()
+                if c_row is not None:
+                    existing_claim = dict(c_row)
+
+        existing_delivery: dict[str, Any] | None = None
+        deliv_pk_col: str | None = None
+        if "deliveries" in table_cols:
+            d_pks = [c["name"] for c in table_cols["deliveries"] if c["pk"] > 0]
+            deliv_pk_col = (
+                d_pks[0]
+                if len(d_pks) == 1
+                else ("id" if any(c["name"] == "id" for c in table_cols["deliveries"]) else None)
+            )
+            if deliv_pk_col:
+                d_match = conn.execute(
+                    f'SELECT * FROM "deliveries" WHERE "{deliv_pk_col}" = ?', (delivery_id,)
+                ).fetchone()
+                if d_match is not None:
+                    existing_delivery = dict(d_match)
+
+    # 1. Dynamic `claims` upsert
+    if "claims" in table_cols and claims_pk:
+        claims_ddl = schema_ddls.get("claims", "")
+        c_col_map = {c["name"]: c for c in table_cols["claims"]}
+        note = (
+            f"Operator consult: enforced EUR {agreed_amount:.2f} refund hold + AADE myDATA 5.1"
+            if choice == "refund"
+            else f"Operator consult: next-day re-delivery of 22 hubs + EUR {agreed_amount:.2f} credit (AADE 9.3)"
+        )
+        chosen_status = _pick_allowed_column_value(
+            claims_ddl,
+            "status",
+            ["settled", "approved", "refund_enforced" if choice == "refund" else "redelivery_scheduled"],
+            fallback="settled",
+        )
+        claim_patch: dict[str, Any] = {claims_pk: claim_id}
+        if existing_claim is None:
+            defaults_by_col: dict[str, Any] = {
+                "supplier_id": supplier_id,
+                "delivery_id": delivery_id,
+                "invoice_id": invoice_id,
+                "amount": agreed_amount,
+                "reason": note,
+                "status": chosen_status,
+                "resolution": choice,
+                "aade_type": invoice_type,
+                "mydata_xml_path": aade_xml_path,
+            }
+            for col_name, col_meta in c_col_map.items():
+                if col_name == claims_pk:
+                    continue
+                if col_name in defaults_by_col:
+                    claim_patch[col_name] = defaults_by_col[col_name]
+                elif col_meta["notnull"] and col_meta["dflt_value"] is None:
+                    ctype = str(col_meta["type"] or "").upper()
+                    if any(tok in ctype for tok in ("REAL", "FLOA", "DOUB", "NUM", "DEC")):
+                        claim_patch[col_name] = 0.0
+                    elif "INT" in ctype:
+                        claim_patch[col_name] = 0
+                    else:
+                        claim_patch[col_name] = _pick_allowed_column_value(claims_ddl, col_name, [""], "")
+        else:
+            if "status" in c_col_map:
+                claim_patch["status"] = chosen_status
+            if "amount" in c_col_map:
+                claim_patch["amount"] = agreed_amount
+            if "reason" in c_col_map:
+                prev_reason = str(existing_claim.get("reason") or "").strip()
+                claim_patch["reason"] = (
+                    f"{prev_reason} | {note}" if prev_reason and note not in prev_reason else note
+                )
+            if "resolution" in c_col_map:
+                claim_patch["resolution"] = choice
+            if "aade_type" in c_col_map:
+                claim_patch["aade_type"] = invoice_type
+            if "mydata_xml_path" in c_col_map:
+                claim_patch["mydata_xml_path"] = aade_xml_path
+
+        with contextlib.suppress(sqlite3.Error, ValueError):
+            if _record_reversible_mutation(
+                run_id,
+                "upsert_row",
+                {"table": "claims", "pk_col": claims_pk, "row": claim_patch},
+                f"Updated claims #{claim_id} ({choice}, EUR {agreed_amount:.2f})",
+            ):
+                mutations += 1
+
+    # 2. Dynamic `deliveries` upsert (when row D-1042 exists)
+    if "deliveries" in table_cols and deliv_pk_col and existing_delivery is not None:
+        deliv_ddl = schema_ddls.get("deliveries", "")
+        d_col_map = {c["name"]: c for c in table_cols["deliveries"]}
+        deliv_patch: dict[str, Any] = {deliv_pk_col: delivery_id}
+        if "status" in d_col_map:
+            pref_deliv_statuses = (
+                ["redelivery_scheduled", "partial_redelivery", "disputed", "received"]
+                if choice == "redelivery"
+                else ["refund_hold", "disputed", "settled", "received"]
+            )
+            deliv_patch["status"] = _pick_allowed_column_value(
+                deliv_ddl,
+                "status",
+                pref_deliv_statuses,
+                fallback=str(existing_delivery.get("status") or "received"),
+            )
+        for note_col in ("notes", "resolution_note", "comment"):
+            if note_col in d_col_map:
+                deliv_patch[note_col] = (
+                    "Next-day replacement scheduled for 22 hubs"
+                    if choice == "redelivery"
+                    else f"Enforced EUR {agreed_amount:.2f} refund hold"
+                )
+        if len(deliv_patch) > 1:
+            with contextlib.suppress(sqlite3.Error, ValueError):
+                if _record_reversible_mutation(
+                    run_id,
+                    "upsert_row",
+                    {"table": "deliveries", "pk_col": deliv_pk_col, "row": deliv_patch},
+                    f"Updated deliveries #{delivery_id} ({choice})",
+                ):
+                    mutations += 1
+
+    # 3. Dynamic `aade*` / `mydata*` filing table upsert (if present in sqlite_master)
+    for tbl_name, cols_meta in table_cols.items():
+        lower_tbl = tbl_name.lower()
+        if not (lower_tbl.startswith(("aade", "mydata")) or "mydata" in lower_tbl or "aade" in lower_tbl):
+            continue
+        pks = [c for c in cols_meta if c["pk"] > 0]
+        if len(pks) == 1:
+            pk_meta = pks[0]
+        else:
+            id_candidates = [c for c in cols_meta if c["name"] == "id"]
+            if not id_candidates:
+                continue
+            pk_meta = id_candidates[0]
+        pk_name = str(pk_meta["name"])
+        pk_type = str(pk_meta["type"] or "").upper()
+        if "INT" in pk_type:
+            with contextlib.closing(sqlite3.connect(REAL.db_path)) as conn:
+                next_id_row = conn.execute(f'SELECT COALESCE(MAX("{pk_name}"), 0) + 1 FROM "{tbl_name}"').fetchone()
+                pk_val: Any = int(next_id_row[0]) if next_id_row else 1
+        else:
+            pk_val = f"AADE-{claim_id}"
+
+        tbl_ddl = schema_ddls.get(tbl_name, "")
+        semantic_values: dict[str, Any] = {
+            "claim_id": claim_id,
+            "invoice_id": invoice_id,
+            "correlated_invoice": invoice_id,
+            "delivery_id": delivery_id,
+            "supplier_id": supplier_id,
+            "supplier_vat": "EL094281773",
+            "issuer_vat": "EL094281773",
+            "vat_number": "EL094281773",
+            "afm": "EL094281773",
+            "invoice_type": invoice_type,
+            "mydata_type": invoice_type,
+            "doc_type": invoice_type,
+            "type": invoice_type,
+            "series": "CR-AADE" if choice == "refund" else "DN-AADE",
+            "aa": 1042,
+            "net_amount": net_amount,
+            "net_value": net_amount,
+            "total_net_value": net_amount,
+            "amount": net_amount,
+            "vat_amount": vat_amount,
+            "total_vat_amount": vat_amount,
+            "vat": vat_amount,
+            "gross_amount": gross_amount,
+            "gross_value": gross_amount,
+            "total_gross_value": gross_amount,
+            "total": gross_amount,
+            "vat_rate": 24.0,
+            "vat_pct": 24.0,
+            "vat_category": 1,
+            "classification": "E3_561_001",
+            "classification_code": "E3_561_001",
+            "e3_code": "E3_561_001",
+            "xml_path": aade_xml_path,
+            "file_path": aade_xml_path,
+            "path": aade_xml_path,
+            "xml_content": xml_content,
+            "payload_xml": xml_content,
+            "xml": xml_content,
+            "choice": choice,
+            "resolution": choice,
+            "issue_date": "2026-11-14",
+            "created_at": "2026-11-14T17:00:00Z",
+            "filed_at": "2026-11-14T17:00:00Z",
+            "date": "2026-11-14",
+            "currency": "EUR",
+        }
+        filing_row: dict[str, Any] = {pk_name: pk_val}
+        for c_meta in cols_meta:
+            cname = str(c_meta["name"])
+            if cname == pk_name:
+                continue
+            clower = cname.lower()
+            ctype = str(c_meta["type"] or "").upper()
+            if clower == "status":
+                filing_row[cname] = _pick_allowed_column_value(
+                    tbl_ddl,
+                    cname,
+                    ["staged", "submitted", "drafted", "pending", "filed"],
+                    fallback="staged",
+                )
+            elif clower in semantic_values:
+                val = semantic_values[clower]
+                if isinstance(val, int) and "TEXT" in ctype:
+                    val = str(val)
+                filing_row[cname] = val
+            elif c_meta["notnull"] and c_meta["dflt_value"] is None:
+                if any(tok in ctype for tok in ("REAL", "FLOA", "DOUB", "NUM", "DEC")):
+                    filing_row[cname] = 0.0
+                elif "INT" in ctype:
+                    filing_row[cname] = 0
+                else:
+                    filing_row[cname] = _pick_allowed_column_value(tbl_ddl, cname, ["staged"], "")
+
+        with contextlib.suppress(sqlite3.Error, ValueError):
+            if _record_reversible_mutation(
+                run_id,
+                "upsert_row",
+                {"table": tbl_name, "pk_col": pk_name, "row": filing_row},
+                f"Recorded AADE myDATA {invoice_type} filing in `{tbl_name}`",
+            ):
+                mutations += 1
+
+    return mutations
+
+
+@app.post("/api/call/user-consult")
+async def start_user_consult_call(request: Request):
+    """Escalate an unresolved shipment/claim hold to the away-from-desk operator mobile HUD."""
+    raw_body = await request.body()
+    body: dict[str, Any] = {}
+    if raw_body.strip():
+        try:
+            parsed = json.loads(raw_body)
+        except Exception as exc:
+            raise HTTPException(400, "invalid JSON payload") from exc
+        if not isinstance(parsed, dict):
+            raise HTTPException(400, "expected JSON object")
+        body = parsed
+
+    raw_req_id = body.get("req_id")
+    req_id = str(raw_req_id).strip() if isinstance(raw_req_id, str) and raw_req_id.strip() else None
+    if req_id is None and PENDING:
+        req_id = _active_pending_req_id()
+
+    claim_id = str(body.get("claim_id") or "CLM-D-1042").strip() or "CLM-D-1042"
+    claim_amount = 587.30
+    if REAL.db_path.exists():
+        with contextlib.closing(sqlite3.connect(REAL.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            with contextlib.suppress(sqlite3.Error):
+                row = conn.execute("SELECT * FROM claims WHERE id = ?", (claim_id,)).fetchone()
+                if row is not None and row["amount"] is not None:
+                    claim_amount = float(row["amount"])
+
+    call_id = f"CONSULT-{claim_id}"
+    run_id = f"consult_{uuid.uuid4().hex[:6]}"
+    opening_text = (
+        "Hi, I'm holding Kappa shipment D-1042 while you're away from your desk. "
+        "Would you like next-day re-delivery for the 22 missing and damaged hubs, "
+        "or should I enforce the 587 euro 30 cent refund hold and stage the AADE myDATA credit filing?"
+    )
+
+    start_validated = CallStartPayload(
+        call_id=call_id,
+        mode="user_consult",
+        counterparty="Operator Mobile",
+        req_id=req_id,
+        claim_id=claim_id,
+        claim_amount=claim_amount,
+    )
+    BUS.emit(
+        run_id,
+        EventType.CALL_START,
+        {
+            "call_id": start_validated.call_id,
+            "mode": start_validated.mode,
+            "counterparty": start_validated.counterparty,
+            "req_id": start_validated.req_id,
+            "claim_id": start_validated.claim_id,
+            "claim_amount": start_validated.claim_amount,
+        },
+        thought=f"Escalating `{claim_id}` to Operator Mobile for live consult decision.",
+    )
+
+    turn_validated = CallTurnPayload(
+        call_id=call_id,
+        speaker="agent",
+        text=opening_text,
+        audio_url="/api/voice/turn-audio",
+    )
+    BUS.emit(
+        run_id,
+        EventType.CALL_TURN,
+        {
+            "call_id": turn_validated.call_id,
+            "speaker": turn_validated.speaker,
+            "text": turn_validated.text,
+            "audio_url": turn_validated.audio_url,
+        },
+        step=1,
+        thought=f"Recoup Agent: {opening_text}",
+        cost_eur=_voice_micro_cost(opening_text),
+    )
+
+    return {
+        "ok": True,
+        "call_id": call_id,
+        "mode": "user_consult",
+        "req_id": req_id,
+        "claim_id": claim_id,
+        "claim_amount": claim_amount,
+        "opening_text": opening_text,
+    }
+
+
+@app.post("/api/call/user-respond")
+async def handle_user_consult_response(request: Request):
+    """Process spoken or tapped operator consult reply, resolve Risk Gate, and stage reversible AADE XML."""
+    content_type = (request.headers.get("content-type") or "").lower()
+    req_id: str | None = None
+    claim_id = "CLM-D-1042"
+    transcript = ""
+    explicit_choice: str | None = None
+    audio_bytes: bytes | None = None
+    filename = "operator_reply.webm"
+    mime_type = "audio/webm"
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        raw_req = str(form.get("req_id") or "").strip()
+        req_id = raw_req or None
+        raw_claim = str(form.get("claim_id") or "").strip()
+        if raw_claim:
+            claim_id = raw_claim
+        transcript = str(form.get("transcript") or "").strip()
+        raw_choice = str(form.get("choice") or "").strip().lower()
+        explicit_choice = raw_choice or None
+        upload = form.get("audio") or form.get("file")
+        if upload is not None and hasattr(upload, "read"):
+            filename = getattr(upload, "filename", None) or filename
+            mime_type = getattr(upload, "content_type", None) or mime_type
+            audio_bytes = await upload.read()  # type: ignore[misc]
+    else:
+        raw_body = await request.body()
+        if raw_body.strip():
+            try:
+                body = json.loads(raw_body)
+            except Exception as exc:
+                raise HTTPException(400, "invalid JSON payload") from exc
+            if not isinstance(body, dict):
+                raise HTTPException(400, "expected JSON object")
+            raw_req = str(body.get("req_id") or "").strip()
+            req_id = raw_req or None
+            raw_claim = str(body.get("claim_id") or "").strip()
+            if raw_claim:
+                claim_id = raw_claim
+            transcript = str(body.get("transcript") or "").strip()
+            raw_choice = str(body.get("choice") or "").strip().lower()
+            explicit_choice = raw_choice or None
+            mime_type = str(body.get("mime_type") or mime_type)
+            b64_audio = body.get("audio_b64")
+            if isinstance(b64_audio, str) and b64_audio.strip():
+                encoded = b64_audio.split(",", 1)[-1].strip()
+                with contextlib.suppress(Exception):
+                    audio_bytes = base64.b64decode(encoded)
+
+    if not audio_bytes and not transcript and not explicit_choice:
+        raise HTTPException(422, "provide choice, transcript, or audio")
+
+    stt_ran = False
+    if audio_bytes and not transcript:
+        transcript = await _transcribe_operator_consult_audio(audio_bytes, filename, mime_type)
+        stt_ran = bool(transcript)
+
+    if explicit_choice in ("refund", "redelivery"):
+        choice: Literal["refund", "redelivery"] = "refund" if explicit_choice == "refund" else "redelivery"
+    else:
+        choice = _classify_operator_consult_intent(transcript)
+
+    if not transcript:
+        transcript = (
+            "Enforce the 587.30 euro refund hold and file the AADE myDATA 5.1 credit note."
+            if choice == "refund"
+            else "Accept next-day re-delivery of the 22 hubs and log the 202.30 euro SLA discrepancy."
+        )
+
+    call_id = f"CONSULT-{claim_id}"
+    run_id = f"consult_{uuid.uuid4().hex[:6]}"
+
+    user_turn = CallTurnPayload(call_id=call_id, speaker="user", text=transcript)
+    BUS.emit(
+        run_id,
+        EventType.CALL_TURN,
+        {"call_id": user_turn.call_id, "speaker": user_turn.speaker, "text": user_turn.text},
+        step=2,
+        thought=f"Operator: {transcript}",
+        cost_eur=_voice_micro_cost(transcript) if stt_ran else 0.0,
+    )
+
+    if req_id is None and PENDING:
+        req_id = _active_pending_req_id()
+
+    pending_resolved = False
+    if req_id and req_id in PENDING:
+        pending_obj = PENDING.get(req_id)
+        history_idx = len(BUS.history)
+        if isinstance(pending_obj, asyncio.Event):
+            if not pending_obj.is_set():
+                pending_obj.set()
+                pending_resolved = True
+        elif pending_obj is not None and not pending_obj.done():
+            pending_obj.set_result(True)
+            pending_resolved = True
+
+        if pending_resolved:
+            await asyncio.sleep(0.05)
+            PENDING.pop(req_id, None)
+            PENDING_PAYLOADS.pop(req_id, None)
+            if not any(e.type == EventType.APPROVAL_RESULT for e in BUS.history[history_idx:]):
+                BUS.emit(
+                    run_id,
+                    EventType.APPROVAL_RESULT,
+                    {
+                        "req_id": req_id,
+                        "approved": True,
+                        "outcome": "approved",
+                        "resolution": choice,
+                    },
+                    thought=f"Operator resolved Risk Gate `{req_id}` via consult call (`{choice}`).",
+                )
+
+    agreed_amount = 587.30 if choice == "refund" else 202.30
+    aade_xml_path = f"aade/mydata_{claim_id}.xml"
+    xml_content = _build_aade_mydata_xml(claim_id, choice)
+    _apply_consult_resolution_mutations(
+        run_id=run_id,
+        claim_id=claim_id,
+        choice=choice,
+        agreed_amount=agreed_amount,
+        aade_xml_path=aade_xml_path,
+        xml_content=xml_content,
+    )
+
+    if choice == "refund":
+        confirmation_text = (
+            "Understood. Enforcing the 587 euro 30 cent refund hold on invoice INV-7781 and staging "
+            "Greek AADE myDATA Type 5.1 credit note for 728 euros 25 cents gross including 24 percent VAT. "
+            "Everything remains 1-click reversible."
+        )
+        summary_text = (
+            f"Enforced EUR 587.30 refund hold on {claim_id} and staged AADE myDATA 5.1 credit note."
+        )
+    else:
+        confirmation_text = (
+            "Confirmed. Scheduling next-day replacement delivery for all 22 hubs from Kappa Office Systems, "
+            "logging AADE myDATA Type 9.3 discrepancy note, and locking the 202 euro 30 cent unit overbill credit."
+        )
+        summary_text = (
+            f"Scheduled next-day replacement for 22 hubs on {claim_id} + EUR 202.30 credit (AADE myDATA 9.3)."
+        )
+
+    agent_turn = CallTurnPayload(
+        call_id=call_id,
+        speaker="agent",
+        text=confirmation_text,
+        audio_url="/api/voice/turn-audio",
+    )
+    BUS.emit(
+        run_id,
+        EventType.CALL_TURN,
+        {
+            "call_id": agent_turn.call_id,
+            "speaker": agent_turn.speaker,
+            "text": agent_turn.text,
+            "audio_url": agent_turn.audio_url,
+        },
+        step=3,
+        thought=f"Recoup Agent: {confirmation_text}",
+        cost_eur=_voice_micro_cost(confirmation_text),
+    )
+
+    end_ev = CallEndPayload(
+        call_id=call_id,
+        outcome="accepted",
+        agreed_amount=agreed_amount,
+        summary=summary_text,
+    )
+    BUS.emit(
+        run_id,
+        EventType.CALL_END,
+        end_ev.model_dump(),
+        thought=summary_text,
+    )
+
+    return {
+        "ok": True,
+        "call_id": call_id,
+        "choice": choice,
+        "transcript": transcript,
+        "agreed_amount": agreed_amount,
+        "aade_xml_path": aade_xml_path,
+        "confirmation_text": confirmation_text,
     }

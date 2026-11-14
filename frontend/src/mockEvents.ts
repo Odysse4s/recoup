@@ -540,9 +540,8 @@ export function mockDecisionEvents(approved: boolean): ServerEvent[] {
       { status: "committed", fingerprint: "94e7c2b18d0a" },
       { thought: "Run finished with status `committed`." }
     ),
-    ...buildCallSequence(t0 + 1.6, 230, "demo_d1042", "CLM-D-1042", 587.3),
     ev(
-      4.4,
+      2.0,
       "offer",
       {
         offer_id: "offer_demo_kappa",
@@ -698,4 +697,167 @@ function buildCallSequence(
 
 export function mockVendorCallEvents(claimId = "CLM-D-1042", claimAmount = 587.3): ServerEvent[] {
   return buildCallSequence(Date.now() / 1000, 500, `call_demo_${Date.now().toString(36).slice(-4)}`, claimId, claimAmount);
+}
+
+export function buildDemoAadeXml(claimId: string, choice: "refund" | "redelivery"): string {
+  const invoiceType = choice === "refund" ? "5.1" : "9.3";
+  const series = choice === "refund" ? "CR-AADE" : "DN-AADE";
+  const net = choice === "refund" ? 587.3 : 202.3;
+  const vat = choice === "refund" ? 140.95 : 48.55;
+  const gross = Number((net + vat).toFixed(2));
+  const note =
+    choice === "refund"
+      ? `Correlated credit note on INV-7781 / D-1042 (${claimId}): overcharge, 16 short-shipped, 6 DOA, 2-day SLA penalty`
+      : `Delivery discrepancy & next-day replacement of 22 USB-C hubs on D-1042 (${claimId}) + SLA/rate adjustment`;
+  return [
+    `<?xml version="1.0" encoding="UTF-8"?>`,
+    `<InvoicesDoc xmlns="http://www.aade.gr/myDATA/invoice/v1.0">`,
+    `  <invoice>`,
+    `    <issuer><vatNumber>EL094281773</vatNumber><country>GR</country><branch>0</branch></issuer>`,
+    `    <invoiceHeader>`,
+    `      <series>${series}</series>`,
+    `      <aa>1042</aa>`,
+    `      <issueDate>2026-11-14</issueDate>`,
+    `      <invoiceType>${invoiceType}</invoiceType>`,
+    `      <currency>EUR</currency>`,
+    `      <correlatedInvoices>INV-7781</correlatedInvoices>`,
+    `    </invoiceHeader>`,
+    `    <invoiceDetails>`,
+    `      <lineNumber>1</lineNumber>`,
+    `      <netValue>${net.toFixed(2)}</netValue>`,
+    `      <vatCategory>1</vatCategory>`,
+    `      <vatAmount>${vat.toFixed(2)}</vatAmount>`,
+    `      <lineComments>${note}</lineComments>`,
+    `    </invoiceDetails>`,
+    `    <invoiceSummary>`,
+    `      <totalNetValue>${net.toFixed(2)}</totalNetValue>`,
+    `      <totalVatAmount>${vat.toFixed(2)}</totalVatAmount>`,
+    `      <totalGrossValue>${gross.toFixed(2)}</totalGrossValue>`,
+    `      <incomeClassification>`,
+    `        <classificationType>E3_561_001</classificationType>`,
+    `        <amount>${net.toFixed(2)}</amount>`,
+    `      </incomeClassification>`,
+    `    </invoiceSummary>`,
+    `  </invoice>`,
+    `</InvoicesDoc>`,
+  ].join("\n");
+}
+
+export function mockUserConsultStartEvents(
+  reqId: string | null = "req_demo_d1042",
+  claimId = "CLM-D-1042",
+  claimAmount = 587.3
+): ServerEvent[] {
+  const ts = Date.now() / 1000;
+  const callId = `CONSULT-${claimId}`;
+  const openingText =
+    "Hi, I'm holding Kappa shipment D-1042 while you're away from your desk. " +
+    "Would you like next-day re-delivery for the 22 missing and damaged hubs, " +
+    "or should I enforce the 587 euro 30 cent refund hold and stage the AADE myDATA credit filing?";
+  return [
+    {
+      id: 700 + Math.floor(Math.random() * 100),
+      run_id: `consult_demo_${claimId}`,
+      ts,
+      type: "call_start",
+      step: null,
+      thought: `Escalating \`${claimId}\` to Operator Mobile for live consult decision.`,
+      cost_eur: 0,
+      latency_ms: 0,
+      payload: {
+        call_id: callId,
+        mode: "user_consult",
+        counterparty: "Operator Mobile",
+        req_id: reqId,
+        claim_id: claimId,
+        claim_amount: claimAmount,
+      },
+    },
+    {
+      id: 800 + Math.floor(Math.random() * 100),
+      run_id: `consult_demo_${claimId}`,
+      ts: ts + 0.15,
+      type: "call_turn",
+      step: 1,
+      thought: `Recoup Agent: ${openingText}`,
+      cost_eur: 0.00082,
+      latency_ms: 140,
+      payload: {
+        call_id: callId,
+        speaker: "agent",
+        text: openingText,
+        audio_url: "/api/voice/turn-audio",
+      },
+    },
+  ];
+}
+
+export function mockUserConsultRespondEvents(
+  choice: "refund" | "redelivery",
+  claimId = "CLM-D-1042"
+): ServerEvent[] {
+  const ts = Date.now() / 1000;
+  const callId = `CONSULT-${claimId}`;
+  const transcript =
+    choice === "refund"
+      ? "Enforce the 587.30 euro refund hold and file the AADE myDATA 5.1 credit note."
+      : "Accept next-day re-delivery of the 22 hubs and log the 202.30 euro SLA discrepancy.";
+  const confirmationText =
+    choice === "refund"
+      ? "Understood. Enforcing the 587 euro 30 cent refund hold on invoice INV-7781 and staging Greek AADE myDATA Type 5.1 credit note for 728 euros 25 cents gross including 24 percent VAT. Everything remains 1-click reversible."
+      : "Confirmed. Scheduling next-day replacement delivery for all 22 hubs from Kappa Office Systems, logging AADE myDATA Type 9.3 discrepancy note, and locking the 202 euro 30 cent unit overbill credit.";
+  const agreedAmount = choice === "refund" ? 587.3 : 202.3;
+  const summaryText =
+    choice === "refund"
+      ? `Enforced EUR 587.30 refund hold on ${claimId} and staged AADE myDATA 5.1 credit note.`
+      : `Scheduled next-day replacement for 22 hubs on ${claimId} + EUR 202.30 credit (AADE myDATA 9.3).`;
+  return [
+    {
+      id: 900 + Math.floor(Math.random() * 100),
+      run_id: `consult_demo_${claimId}`,
+      ts,
+      type: "call_turn",
+      step: 2,
+      thought: `Operator: ${transcript}`,
+      cost_eur: 0.00054,
+      latency_ms: 110,
+      payload: {
+        call_id: callId,
+        speaker: "user",
+        text: transcript,
+      },
+    },
+    {
+      id: 1000 + Math.floor(Math.random() * 100),
+      run_id: `consult_demo_${claimId}`,
+      ts: ts + 0.2,
+      type: "call_turn",
+      step: 3,
+      thought: `Recoup Agent: ${confirmationText}`,
+      cost_eur: 0.00086,
+      latency_ms: 150,
+      payload: {
+        call_id: callId,
+        speaker: "agent",
+        text: confirmationText,
+        audio_url: "/api/voice/turn-audio",
+      },
+    },
+    {
+      id: 1100 + Math.floor(Math.random() * 100),
+      run_id: `consult_demo_${claimId}`,
+      ts: ts + 0.35,
+      type: "call_end",
+      step: null,
+      thought: summaryText,
+      cost_eur: 0,
+      latency_ms: 0,
+      payload: {
+        call_id: callId,
+        outcome: "accepted",
+        agreed_amount: agreedAmount,
+        summary: summaryText,
+      },
+    },
+  ];
 }

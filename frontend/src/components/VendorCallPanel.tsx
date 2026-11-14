@@ -16,7 +16,7 @@ export interface VendorCallState {
   openingPct: number;
   floorPct: number;
   turns: CallTurnPayload[];
-  activeSpeaker: "agent" | "counterparty" | null;
+  activeSpeaker: "agent" | "counterparty" | "user" | null;
   end: CallEndPayload | null;
 }
 
@@ -35,7 +35,7 @@ export function VendorCallPanel({
   defaultAmount?: number;
   claimSettled?: boolean;
   onNegotiate: (claimId: string) => void;
-  onReplayTurnAudio: (speaker: "agent" | "counterparty", text: string) => void;
+  onReplayTurnAudio: (speaker: "agent" | "counterparty" | "user", text: string) => void;
 }) {
   const transcriptRef = useRef<HTMLDivElement>(null);
   const turnsCount = call?.turns.length ?? 0;

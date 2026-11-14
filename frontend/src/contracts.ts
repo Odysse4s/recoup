@@ -106,9 +106,20 @@ export interface VerifyPayload {
   criteria: VerifyCriterionResult[];
 }
 
+export interface CallStartPayload {
+  call_id: string;
+  mode?: "vendor" | "user_consult";
+  counterparty?: string;
+  req_id?: string | null;
+  claim_id?: string;
+  claim_amount?: number;
+  opening_pct?: number | null;
+  floor_pct?: number | null;
+}
+
 export interface CallTurnPayload {
   call_id: string;
-  speaker: "agent" | "counterparty";
+  speaker: "agent" | "counterparty" | "user";
   text: string;
   audio_url?: string | null;
   offer_pct?: number | null;

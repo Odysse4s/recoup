@@ -15,6 +15,7 @@ import type { RunStatus, WorkspaceState } from "./types";
 /* ---------------------------------------------------------------------------
    Thought Graph model: derives a live DAG from the run state and lays it
    out top → bottom (goal → plan branches → sub-branches → gate → commit → anticipate).
+   Projector-scaled geometry so reasoning chains & security seals read from 15m.
    Pure + deterministic so React can memoise it per render.
    --------------------------------------------------------------------------- */
 
@@ -29,6 +30,8 @@ export const STAGE_COLOR: Record<GraphStage, string> = {
   commit: "#10B981",
   anticipate: "#06B6D4",
 };
+
+export const SECURITY_SEAL_BADGES = ["python -I", "0 env secrets", "SHA-256", "AST + unit tests"] as const;
 
 export type NodeStatus = "pending" | "running" | "done" | "failed" | "held" | "approved" | "rejected" | "ghost";
 export type NodeKind = "root" | "step" | "ast" | "tests" | "vault" | "mutation" | "diff" | "outbox" | "gate" | "commit" | "anticipate";
@@ -63,6 +66,7 @@ export interface GNode {
   label: string;
   sub?: string;
   badge?: string;
+  securityBadges?: string[];
   x: number;
   y: number;
   w: number;
@@ -108,21 +112,31 @@ interface CallInfo {
   costEur: number;
   status: "running" | "done" | "failed";
   error?: string;
+  thought?: string;
+  preview?: string;
 }
+
+const cleanThought = (s?: string | null): string =>
+  s ? s.replace(/`/g, "").replace(/\s+/g, " ").trim() : "";
 
 function indexEvents(events: ServerEvent[]) {
   const calls = new Map<string, CallInfo>();
   const callsByTool = new Map<string, CallInfo[]>();
+  const stepThoughts = new Map<number, string>();
   const receipts = new Map<string, unknown>();
   const decisions: { tool: string; approved: boolean }[] = [];
   let plan: ServerEvent | null = null;
   let forgeSpec: ServerEvent | null = null;
   let forgeTest: ServerEvent | null = null;
   let forgeRegistered: ServerEvent | null = null;
+  let verifyEv: ServerEvent | null = null;
   let offer: AnticipateOfferPayload | null = null;
   let runDone: { status?: string; fingerprint?: string } | null = null;
   let forgeCost = 0;
   for (const ev of events) {
+    if (typeof ev.step === "number" && ev.thought) {
+      stepThoughts.set(ev.step, ev.thought);
+    }
     switch (ev.type) {
       case "plan":
       case "replan":
@@ -139,8 +153,11 @@ function indexEvents(events: ServerEvent[]) {
       case "forge_registered":
         forgeRegistered = ev;
         break;
+      case "verify":
+        verifyEv = ev;
+        break;
       case "tool_call": {
-        const c = callOf(ev);
+        const c = callOf(ev) as { id?: string; name?: string; args?: Record<string, unknown>; thought?: string | null } | undefined;
         if (c?.name) {
           const info: CallInfo = {
             args: c.args ?? {},
@@ -148,6 +165,7 @@ function indexEvents(events: ServerEvent[]) {
             latencyMs: null,
             costEur: ev.cost_eur || 0,
             status: "running",
+            thought: ev.thought || c.thought || undefined,
           };
           calls.set(c.name, info);
           const list = callsByTool.get(c.name) ?? [];
@@ -158,17 +176,21 @@ function indexEvents(events: ServerEvent[]) {
       }
       case "tool_done":
       case "tool_error": {
-        const c = callOf(ev);
+        const c = callOf(ev) as { id?: string; name?: string; args?: Record<string, unknown>; thought?: string | null } | undefined;
         if (c?.name) {
           const list = callsByTool.get(c.name) ?? [];
           const target = (c.id ? list.find((x) => x.callId === c.id) : undefined) ?? list.at(-1) ?? calls.get(c.name);
+          const payloadObj = ev.payload as { error?: unknown; preview?: unknown };
+          const preview = typeof payloadObj.preview === "string" ? payloadObj.preview : target?.preview;
           const nextInfo: CallInfo = {
             args: target?.args ?? c.args ?? {},
             callId: c.id ?? target?.callId,
             latencyMs: ev.latency_ms || target?.latencyMs || null,
             costEur: (target?.costEur ?? 0) + (ev.cost_eur || 0),
             status: ev.type === "tool_done" ? "done" : "failed",
-            error: ev.type === "tool_error" ? String((ev.payload as { error?: unknown }).error ?? "") : undefined,
+            error: ev.type === "tool_error" ? String(payloadObj.error ?? "") : undefined,
+            thought: ev.thought || c.thought || target?.thought,
+            preview,
           };
           calls.set(c.name, nextInfo);
           if (target) Object.assign(target, nextInfo);
@@ -197,17 +219,32 @@ function indexEvents(events: ServerEvent[]) {
         break;
     }
   }
-  return { calls, callsByTool, receipts, decisions, plan, forgeSpec, forgeTest, forgeRegistered, offer, runDone, forgeCost };
+  return {
+    calls,
+    callsByTool,
+    stepThoughts,
+    receipts,
+    decisions,
+    plan,
+    forgeSpec,
+    forgeTest,
+    forgeRegistered,
+    verifyEv,
+    offer,
+    runDone,
+    forgeCost,
+  };
 }
 
-const PAD = 18;
-const COL = 118;
-const STEP = { w: 110, h: 56 };
-const SUB = { w: 110, h: 34, gap: 8 };
-const LG = { h: 46, root: 236, gate: 252, commit: 212, ant: 200 };
-const PAIR_GAP = 24;
-const ROW_GAP = 32;
-const MIN_CONTENT_W = 440;
+/* Projector-legible dimensions & spacing (readable from 15 meters away) */
+const PAD = 24;
+const STEP = { w: 162, h: 76 };
+const SUB = { w: 162, h: 46, sealH: 84, gap: 12 };
+const COL = 182;
+const LG = { h: 60, root: 298, gate: 306, commit: 296, ant: 296 };
+const PAIR_GAP = 32;
+const ROW_GAP = 38;
+const MIN_CONTENT_W = 480;
 
 const r1 = (n: number) => Math.round(n * 10) / 10;
 const vpath = (x1: number, y1: number, x2: number, y2: number) => {
@@ -216,10 +253,10 @@ const vpath = (x1: number, y1: number, x2: number, y2: number) => {
 };
 const arcPath = (x1: number, y1: number, x2: number, y2: number) => {
   const dx = (x2 - x1) * 0.5;
-  return `M ${r1(x1)} ${r1(y1)} C ${r1(x1 + dx)} ${r1(y1 - 20)}, ${r1(x2 - dx)} ${r1(y2 - 20)}, ${r1(x2)} ${r1(y2)}`;
+  return `M ${r1(x1)} ${r1(y1)} C ${r1(x1 + dx)} ${r1(y1 - 24)}, ${r1(x2 - dx)} ${r1(y2 - 24)}, ${r1(x2)} ${r1(y2)}`;
 };
 const spreadX = (cx: number, i: number, n: number, width: number) =>
-  n <= 1 ? cx : cx + (i - (n - 1) / 2) * Math.min(34, (width - 64) / (n - 1));
+  n <= 1 ? cx : cx + (i - (n - 1) / 2) * Math.min(42, (width - 72) / (n - 1));
 
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -254,6 +291,13 @@ export function buildThoughtGraph(inp: GraphInput): ThoughtGraph {
     !!ix.forgeRegistered || !!inp.forgeTest?.registered || (!!inp.forgeSpec && inp.forgedTools.some((t) => t.name === inp.forgeSpec?.name));
 
   const goal = inp.plan?.goal ?? "";
+  const cleanGoal = cleanThought(goal.includes("Goal:") ? goal.split("Goal:").pop()! : goal);
+  const planThought = cleanThought(ix.plan?.thought);
+  const rootSub =
+    planThought ||
+    cleanGoal ||
+    `${domain?.label ?? "Enterprise Vendor Ops"} · ${plural(tables.length || 5, "table")} cloned in rehearsal`;
+
   const root: NodeSpec = {
     id: "root",
     kind: "root",
@@ -261,15 +305,16 @@ export function buildThoughtGraph(inp: GraphInput): ThoughtGraph {
     size: "lg",
     status: inp.plan ? "done" : errored ? "failed" : inp.runStatus === "running" ? "running" : "pending",
     label: "Goal & Ledger Scan",
-    sub: `${domain?.label ?? "Enterprise Vendor Ops"} · ${plural(tables.length || 5, "table")}`,
+    sub: rootSub,
     badge: inp.plan ? plural(steps.length, "step") : errored ? "error" : inp.runStatus === "running" ? "scanning" : "idle",
     detail: {
       title: "Goal & Ledger Scan",
-      summary: goal.includes("Goal:") ? goal.split("Goal:").pop()!.trim() : goal || "Waiting for a vendor audit goal.",
+      summary: cleanGoal || "Waiting for a vendor audit goal.",
       facts: [
         { label: "Domain", value: domain?.label ?? "Enterprise Vendor Ops", mono: true },
         { label: "Schema", value: tables.length ? tables.join(", ") : "suppliers, contract_prices, deliveries, invoices, claims", mono: true },
         { label: "Success criteria", value: String(inp.plan?.success_criteria.length ?? 0) },
+        ...(planThought ? [{ label: "Reasoning", value: planThought }] : []),
       ],
       argsLabel: "Plan",
       args: inp.plan ? { success_criteria: inp.plan.success_criteria, steps: steps.map((s) => s.tool) } : undefined,
@@ -304,6 +349,16 @@ export function buildThoughtGraph(inp: GraphInput): ThoughtGraph {
     : verify || inp.report
     ? "running"
     : "pending";
+
+  const verifyThought = cleanThought(ix.verifyEv?.thought);
+  const gateSub = held
+    ? cleanThought(`${held.tool_name}: ${held.risk_reason}`)
+    : decision
+    ? `${decision.approved ? "Manager approved" : "Manager rejected"} · ${decision.tool || "staged changes"}`
+    : verify
+    ? `Verified ${verifyPassed}/${verify.criteria.length} criteria · deterministic Python policy`
+    : verifyThought || "Deterministic Python policy · AUTO / ASK / BLOCK";
+
   const gate: NodeSpec = {
     id: "gate",
     kind: "gate",
@@ -311,7 +366,7 @@ export function buildThoughtGraph(inp: GraphInput): ThoughtGraph {
     size: "lg",
     status: gateStatus,
     label: "Deterministic Risk Gate",
-    sub: verify ? `verify ${verifyPassed}/${verify.criteria.length} · policy rules` : "verify · policy rules",
+    sub: gateSub,
     badge: held
       ? `HOLD: ${held.tool_name}`
       : gateStatus === "approved"
@@ -351,6 +406,13 @@ export function buildThoughtGraph(inp: GraphInput): ThoughtGraph {
     : errored || aborted || gateStatus === "rejected"
     ? "failed"
     : "pending";
+  const commitSub =
+    commitStatus === "done"
+      ? `sha256 ${fingerprint.slice(0, 12)} · ${plural(checkpoints, "undo receipt")} sealed`
+      : commitStatus === "failed"
+      ? "Rolled back cleanly from pre-image receipts"
+      : `sha256 ${fingerprint.slice(0, 12)} · OCC fingerprint check`;
+
   const commit: NodeSpec = {
     id: "commit",
     kind: "commit",
@@ -358,7 +420,7 @@ export function buildThoughtGraph(inp: GraphInput): ThoughtGraph {
     size: "lg",
     status: commitStatus,
     label: "SHA-256 Atomic Commit",
-    sub: `sha256 ${fingerprint.slice(0, 12)}`,
+    sub: commitSub,
     badge: commitStatus === "failed" ? "rolled back" : `undo ×${checkpoints}`,
     detail: {
       title: "SHA-256 Atomic Commit",
@@ -387,8 +449,8 @@ export function buildThoughtGraph(inp: GraphInput): ThoughtGraph {
         stage: "anticipate",
         size: "lg",
         status: inp.offer ? "ghost" : "done",
-        label: "Anticipate",
-        sub: clip(offer.prediction.need, 30),
+        label: "Anticipate · Proactive Sweep",
+        sub: cleanThought(offer.prediction.need),
         badge: inp.offer ? `${Math.round(offer.prediction.confidence * 100)}%` : "applied",
         detail: {
           title: "Anticipate · Proactive Recovery",
@@ -419,6 +481,7 @@ function buildColumn(
 ): { step: NodeSpec; chain: NodeSpec[]; tool: string } {
   const missing = s.tool.startsWith("MISSING:");
   const tool = missing ? s.tool.slice(8) : s.tool;
+  const isSynthesized = missing || inp.forgedTools.some((t) => t.name === tool);
   const toolList = ix.callsByTool.get(tool);
   const info = toolList?.[occurrence] ?? ix.calls.get(tool);
   const forging = missing && inp.forgeSpec?.name === tool && !registered;
@@ -427,9 +490,18 @@ function buildColumn(
   if (forging && status === "pending") status = "running";
   if (heldHere) status = "held";
   const external = EXTERNAL.has(tool);
-  const stage: GraphStage = missing ? "forge" : external ? "gate" : "rehearse";
+  const stage: GraphStage = missing || isSynthesized ? "forge" : external ? "gate" : "rehearse";
   const id = `step-${s.id}`;
   const receipt = ix.receipts.get(tool);
+
+  const rawThought =
+    info?.thought ??
+    ix.stepThoughts.get(s.id) ??
+    (missing ? ix.forgeTest?.thought ?? ix.forgeSpec?.thought : undefined) ??
+    info?.preview;
+  const liveThought = cleanThought(rawThought);
+  const cleanIntent = cleanThought(s.intent);
+  const stepSub = liveThought || cleanIntent;
 
   const step: NodeSpec = {
     id,
@@ -439,13 +511,16 @@ function buildColumn(
     status,
     eyebrow: `STEP ${String(s.id).padStart(2, "0")}`,
     label: missing ? `forge:${tool}` : tool,
-    sub: s.intent,
+    sub: stepSub,
+    badge: info?.latencyMs ? `${info.latencyMs}ms` : undefined,
+    securityBadges: isSynthesized ? [...SECURITY_SEAL_BADGES] : undefined,
     detail: {
       title: `Step ${s.id} · ${tool}`,
-      summary: s.intent,
+      summary: liveThought && liveThought !== cleanIntent ? `${s.intent} — ${liveThought}` : s.intent,
       facts: [
-        { label: "Tool", value: missing ? `${tool} (synthesized)` : tool, mono: true },
+        { label: "Tool", value: isSynthesized ? `${tool} (synthesized)` : tool, mono: true },
         { label: "Status", value: status },
+        ...(info?.preview ? [{ label: "Outcome", value: cleanThought(info.preview) }] : []),
         ...(info?.callId ? [{ label: "Call id", value: info.callId, mono: true }] : []),
         ...(info?.error ? [{ label: "Error", value: info.error }] : []),
       ],
@@ -474,6 +549,7 @@ function buildColumn(
         kind: "ast",
         status: astStatus,
         label: "AST safety scan",
+        sub: ft ? (ft.ast_errors.length ? `${ft.ast_errors.length} AST violations` : "0 disallowed imports") : "static AST guard",
         badge: ft ? (ft.ast_errors.length ? `${ft.ast_errors.length} viol.` : "clean") : undefined,
         detail: {
           title: "AST Safety Scan",
@@ -490,14 +566,15 @@ function buildColumn(
         id: `${id}-tests`,
         kind: "tests",
         status: testStatus,
-        label: "Unit tests",
-        badge: total ? `${passed}/${total}` : undefined,
+        label: "Sandbox unit tests",
+        sub: total ? `${passed}/${total} python -I tests` : "isolated subprocess",
+        badge: total ? `${passed}/${total} pass` : undefined,
         detail: {
           title: "Sandbox Unit Tests",
-          summary: "Spec examples executed inside an isolated `python -I` subprocess with CPU and file-size rlimits.",
+          summary: "Spec examples executed inside an isolated `python -I` subprocess with CPU and file-size rlimits and zero environment secrets.",
           facts: [
             { label: "Passed", value: `${passed}/${total}` },
-            { label: "Sandbox", value: "subprocess python -I · RLIMIT_CPU 2s", mono: true },
+            { label: "Sandbox", value: "subprocess python -I · 0 env secrets · RLIMIT_CPU 2s", mono: true },
           ],
           argsLabel: "Test results",
           args: ft?.test_results ?? spec?.examples,
@@ -510,12 +587,15 @@ function buildColumn(
         kind: "vault",
         status: vaultStatus,
         label: "Vault seal",
+        sub: registered ? "verified & sealed" : "awaiting sandbox pass",
         badge: registered ? "sealed" : undefined,
+        securityBadges: [...SECURITY_SEAL_BADGES],
         detail: {
           title: `Vault Registration · ${tool}`,
-          summary: spec?.purpose ?? "Registers the verified pure function in the tool registry.",
+          summary: spec?.purpose ?? "Registers the verified pure function in the tool registry with SHA-256 integrity seal.",
           facts: [
             { label: "Signature", value: `def ${tool}(args: dict) -> dict`, mono: true },
+            { label: "Security seal", value: SECURITY_SEAL_BADGES.join(" · "), mono: true },
             { label: "Registered", value: registered ? "yes" : "no" },
           ],
           code: ft?.code,
@@ -571,10 +651,10 @@ function buildColumn(
         status: status === "held" ? "running" : status,
         label: "File diff",
         sub: path,
-        badge: diff ? `+${adds} ln` : undefined,
+        badge: diff ? `+${adds} ln · ${clip(path.split("/").pop() ?? path, 14)}` : path,
         detail: {
           title: "Staged File Diff",
-          summary: `Written inside the isolated rehearsal copy; live workspace sees it only after Risk Gate commit.`,
+          summary: "Written inside the isolated rehearsal copy; live workspace sees it only after Risk Gate commit.",
           facts: [{ label: "Path", value: path, mono: true }],
           code: diff ?? (typeof info?.args.content === "string" ? info.args.content : patchFallback),
           latencyMs: info?.latencyMs ?? null,
@@ -593,7 +673,7 @@ function buildColumn(
         status: heldHere ? "held" : decided ? (decided.approved ? "approved" : "rejected") : status,
         label: "Dry-run outbox",
         sub: target,
-        badge: heldHere ? "held" : decided ? (decided.approved ? "sent" : "dropped") : info ? "intercepted" : undefined,
+        badge: heldHere ? `held · ${clip(target, 14)}` : decided ? (decided.approved ? "sent" : "dropped") : info ? "intercepted" : target,
         detail: {
           title: "Dry-run Outbox",
           summary: "External side-effect captured in dry-run outbox instead of dispatched; held for Risk Gate authorization.",
@@ -608,6 +688,31 @@ function buildColumn(
         },
       })
     );
+  } else if (isSynthesized) {
+    chain.push(
+      sub({
+        id: `${id}-exec`,
+        kind: "vault",
+        stage: "forge",
+        status,
+        label: "Vault sandbox exec",
+        sub: clip(tool, 22),
+        badge: info?.status === "done" ? "sealed · ok" : info?.status === "failed" ? "err" : "sealed",
+        securityBadges: [...SECURITY_SEAL_BADGES],
+        detail: {
+          title: `Synthesized Tool Execution · ${tool}`,
+          summary: "Verified Vault tool executed inside an isolated `python -I` subprocess with 0 env secrets.",
+          facts: [
+            { label: "Tool", value: tool, mono: true },
+            { label: "Security seal", value: SECURITY_SEAL_BADGES.join(" · "), mono: true },
+          ],
+          argsLabel: "Arguments",
+          args: info?.args,
+          latencyMs: info?.latencyMs ?? null,
+          receipt,
+        },
+      })
+    );
   } else if (info) {
     chain.push(
       sub({
@@ -615,11 +720,11 @@ function buildColumn(
         kind: "vault",
         status,
         label: "Rehearsal exec",
-        sub: clip(tool, 18),
-        badge: info.status === "done" ? "ok" : info.status === "failed" ? "err" : undefined,
+        sub: info.preview ? clip(cleanThought(info.preview), 24) : clip(tool, 22),
+        badge: info.status === "done" ? `ok · ${clip(tool, 14)}` : info.status === "failed" ? "err" : undefined,
         detail: {
           title: `Tool Execution · ${tool}`,
-          summary: "Executed inside the isolated rehearsal runtime.",
+          summary: info.preview ? cleanThought(info.preview) : "Executed inside the isolated rehearsal runtime.",
           facts: [{ label: "Tool", value: tool, mono: true }],
           argsLabel: "Arguments",
           args: info.args,
@@ -644,11 +749,11 @@ function layout(
   const edges: GEdge[] = [];
   const n = columns.length;
   const gridW = n ? n * COL - (COL - STEP.w) : 0;
-  const contentW = Math.max(gridW, MIN_CONTENT_W);
+  const pairW = LG.commit + PAIR_GAP + LG.ant;
+  const contentW = Math.max(gridW, MIN_CONTENT_W, anticipate ? pairW + 8 : 0);
   const width = contentW + PAD * 2;
   const cx = width / 2;
   const colX = (i: number) => PAD + (contentW - gridW) / 2 + i * COL + STEP.w / 2;
-  const maxDepth = columns.reduce((m, c) => Math.max(m, c.chain.length), 0);
 
   let y = PAD;
   const rootNode: GNode = { ...root, x: cx, y: y + LG.h / 2, w: LG.root, h: LG.h };
@@ -659,7 +764,8 @@ function layout(
   if (n) {
     const stepY = y + STEP.h / 2;
     y += STEP.h;
-    const subTop = y + 16;
+    const subTop = y + 18;
+    let maxColBottom = y;
     columns.forEach((c, i) => {
       const x = colX(i);
       const stepNode: GNode = { ...c.step, x, y: stepY, w: STEP.w, h: STEP.h };
@@ -673,8 +779,10 @@ function layout(
         d: vpath(spreadX(cx, i, n, LG.root), rootNode.y + LG.h / 2, x, stepY - STEP.h / 2),
       });
       let parent = stepNode;
-      c.chain.forEach((spec, d) => {
-        const node: GNode = { ...spec, x, y: subTop + d * (SUB.h + SUB.gap) + SUB.h / 2, w: SUB.w, h: SUB.h };
+      let curTop = subTop;
+      c.chain.forEach((spec) => {
+        const nh = spec.securityBadges?.length ? SUB.sealH : SUB.h;
+        const node: GNode = { ...spec, x, y: curTop + nh / 2, w: SUB.w, h: nh };
         nodes.push(node);
         edges.push({
           id: `${parent.id}>${node.id}`,
@@ -685,11 +793,14 @@ function layout(
           d: vpath(x, parent.y + parent.h / 2, x, node.y - node.h / 2),
         });
         parent = node;
+        curTop += nh + SUB.gap;
       });
+      if (c.chain.length > 0) {
+        maxColBottom = Math.max(maxColBottom, curTop - SUB.gap);
+      }
       lastOfColumn.push(parent);
     });
-    if (maxDepth) y = subTop + maxDepth * (SUB.h + SUB.gap) - SUB.gap;
-    y += ROW_GAP;
+    y = maxColBottom + ROW_GAP;
   }
 
   const gateNode: GNode = { ...gate, x: cx, y: y + LG.h / 2, w: LG.gate, h: LG.h };
@@ -726,7 +837,6 @@ function layout(
   });
   y += LG.h + ROW_GAP;
 
-  const pairW = LG.commit + PAIR_GAP + LG.ant;
   const commitX = anticipate ? cx - pairW / 2 + LG.commit / 2 : cx;
   const commitNode: GNode = { ...commit, x: commitX, y: y + LG.h / 2, w: LG.commit, h: LG.h };
   nodes.push(commitNode);
