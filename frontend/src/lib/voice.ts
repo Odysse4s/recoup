@@ -65,14 +65,25 @@ export function getVoiceProviderLabel(provider: VoiceProvider): string {
 let sharedAudioContext: AudioContext | null = null;
 let sharedMediaElement: HTMLAudioElement | null = null;
 let activeSourceNode: AudioBufferSourceNode | null = null;
+let warmMicStream: MediaStream | null = null;
 let activeWarmMicStream: MediaStream | null = null;
+let mobileCallOwnsAudio = false;
+
+export function setMobileCallOwnsAudio(active: boolean): void {
+  mobileCallOwnsAudio = active;
+}
+
+export function isMobileCallManagingAudio(): boolean {
+  return mobileCallOwnsAudio;
+}
 
 export function setActiveWarmMicStream(stream: MediaStream | null) {
   activeWarmMicStream = stream;
+  if (stream) warmMicStream = stream;
 }
 
 export function getActiveWarmMicStream(): MediaStream | null {
-  return activeWarmMicStream;
+  return activeWarmMicStream || warmMicStream;
 }
 
 export function getPrimedAudioElement(): HTMLAudioElement | null {
@@ -97,18 +108,18 @@ export function unlockAudioSession(mode: "playback" | "play-and-record" = "playb
 
   // 1. Configure iOS 17/18 audioSession type
   // CRITICAL: On iOS Safari, "playback" zeroes out all microphone audio (rms === 0)!
-  // If warm mic stream is active OR if navigator.audioSession.type is ALREADY "play-and-record",
+  // If warm mic stream is active OR if mobile call owns audio OR if navigator.audioSession.type is ALREADY "play-and-record",
   // NEVER overwrite "play-and-record" back to "playback".
   try {
     const nav = navigator as unknown as { audioSession?: { type: string } };
     if (nav?.audioSession) {
       const isMicActive = Boolean(
-        activeWarmMicStream &&
-        activeWarmMicStream.active &&
-        activeWarmMicStream.getAudioTracks().some((t) => t.readyState === "live")
+        warmMicStream &&
+        warmMicStream.active &&
+        warmMicStream.getAudioTracks().some((t) => t.readyState === "live")
       );
 
-      if (mode === "play-and-record" || isMicActive || nav.audioSession.type === "play-and-record") {
+      if (mode === "play-and-record" || mobileCallOwnsAudio || isMicActive || nav.audioSession.type === "play-and-record") {
         nav.audioSession.type = "play-and-record";
       } else {
         nav.audioSession.type = "playback";
@@ -170,10 +181,23 @@ export function getSharedAudioContext(): AudioContext | null {
   return unlockAudioSession();
 }
 
-export async function getWarmMicStream(): Promise<MediaStream | null> {
+export async function acquirePersistentMicStream(): Promise<MediaStream | null> {
   if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) return null;
+
+  if (
+    warmMicStream &&
+    warmMicStream.active &&
+    warmMicStream.getAudioTracks().some((t) => t.readyState === "live")
+  ) {
+    warmMicStream.getAudioTracks().forEach((t) => {
+      t.enabled = true;
+    });
+    activeWarmMicStream = warmMicStream;
+    unlockAudioSession("play-and-record");
+    return warmMicStream;
+  }
+
   try {
-    // Always configure iOS audio session to play-and-record before opening mic
     unlockAudioSession("play-and-record");
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -182,13 +206,32 @@ export async function getWarmMicStream(): Promise<MediaStream | null> {
         autoGainControl: true,
       },
     });
+    stream.getAudioTracks().forEach((t) => {
+      t.enabled = true;
+    });
+    warmMicStream = stream;
     activeWarmMicStream = stream;
     unlockAudioSession("play-and-record");
     return stream;
   } catch (err) {
-    console.warn("getWarmMicStream permission or hardware error", err);
+    console.warn("acquirePersistentMicStream permission or hardware error", err);
     return null;
   }
+}
+
+export function mutePersistentMicStream(): void {
+  if (!warmMicStream) return;
+  try {
+    warmMicStream.getAudioTracks().forEach((t) => {
+      t.enabled = false;
+    });
+  } catch {
+    // ignore
+  }
+}
+
+export async function getWarmMicStream(): Promise<MediaStream | null> {
+  return acquirePersistentMicStream();
 }
 
 export function pickRecorderMimeType(): { mimeType: string; ext: string } {
@@ -242,24 +285,26 @@ function pickVoice(): SpeechSynthesisVoice | undefined {
   );
 }
 
-async function fetchRemoteTurnAudio(text: string): Promise<ArrayBuffer | null> {
+async function fetchRemoteTurnAudio(text: string): Promise<{ buffer: ArrayBuffer; contentType: string } | null> {
   try {
     const res = await fetch("/api/voice/turn-audio", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ speaker: "agent", text }),
     });
-    const type = res.headers.get("content-type") ?? "";
-    if (!res.ok || res.status === 204 || !type.startsWith("audio")) {
+    const rawType = res.headers.get("content-type") ?? "";
+    if (!res.ok || res.status === 204 || !rawType.startsWith("audio")) {
       return null;
     }
-    return await res.arrayBuffer();
+    const contentType = rawType.split(";")[0].trim() || "audio/mpeg";
+    const buffer = await res.arrayBuffer();
+    return { buffer, contentType };
   } catch {
     return null;
   }
 }
 
-async function fetchRemoteBriefing(text: string, kind: string): Promise<ArrayBuffer | null> {
+async function fetchRemoteBriefing(text: string, kind: string): Promise<{ buffer: ArrayBuffer; contentType: string } | null> {
   if (Date.now() < remoteRetryAfter) return null;
   try {
     const res = await fetch("/api/voice/briefing", {
@@ -267,12 +312,14 @@ async function fetchRemoteBriefing(text: string, kind: string): Promise<ArrayBuf
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text, kind }),
     });
-    const type = res.headers.get("content-type") ?? "";
-    if (!res.ok || res.status === 204 || !type.startsWith("audio")) {
+    const rawType = res.headers.get("content-type") ?? "";
+    if (!res.ok || res.status === 204 || !rawType.startsWith("audio")) {
       return null;
     }
     remoteRetryAfter = 0;
-    return await res.arrayBuffer();
+    const contentType = rawType.split(";")[0].trim() || "audio/mpeg";
+    const buffer = await res.arrayBuffer();
+    return { buffer, contentType };
   } catch {
     remoteRetryAfter = Date.now() + 5000;
     return null;
@@ -334,10 +381,11 @@ function speakOnce(text: string, kind: string, hooks: SpeechHooks) {
 
     cancelCurrent = done;
 
-    fetchRemoteBriefing(text, kind).then(async (buf) => {
+    fetchRemoteBriefing(text, kind).then(async (remote) => {
       if (finished) return;
 
-      if (buf && buf.byteLength > 0) {
+      if (remote && remote.buffer.byteLength > 0) {
+        const { buffer: buf, contentType } = remote;
         const ctx = getSharedAudioContext();
         if (ctx) {
           if (ctx.state === "suspended") {
@@ -397,10 +445,10 @@ function speakOnce(text: string, kind: string, hooks: SpeechHooks) {
           }
         }
 
-        // Fallback: reuse sharedMediaElement
+        // Fallback: reuse sharedMediaElement with correct MIME type
         if (!finished) {
           try {
-            const blob = new Blob([buf], { type: "audio/wav" });
+            const blob = new Blob([buf], { type: contentType });
             const blobUrl = URL.createObjectURL(blob);
             blobUrlToRevoke = blobUrl;
             const el = getPrimedAudioElement() || new Audio();
@@ -472,10 +520,19 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
     let analyser: AnalyserNode | null = null;
     let rafId: number | null = null;
     let blobUrlToRevoke: string | null = null;
+    let safetyTimer: number | null = null;
+
+    const clearSafetyTimer = () => {
+      if (safetyTimer !== null) {
+        window.clearTimeout(safetyTimer);
+        safetyTimer = null;
+      }
+    };
 
     const done = () => {
       if (finished) return;
       finished = true;
+      clearSafetyTimer();
       if (cancelCurrent === done) cancelCurrent = null;
       if (rafId !== null) {
         cancelAnimationFrame(rafId);
@@ -514,97 +571,139 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
 
     cancelCurrent = done;
 
-    fetchRemoteTurnAudio(text).then(async (buf) => {
+    // Keep play-and-record steady throughout active call on iOS Safari
+    if (mobileCallOwnsAudio || (warmMicStream && warmMicStream.active)) {
+      unlockAudioSession("play-and-record");
+    }
+
+    fetchRemoteTurnAudio(text).then(async (remote) => {
       if (finished) return;
 
-      if (buf && buf.byteLength > 0) {
-        const ctx = getSharedAudioContext();
-        if (ctx) {
-          if (ctx.state === "suspended") {
-            await ctx.resume().catch(() => {});
+      if (remote && remote.buffer.byteLength > 0) {
+        const { buffer: buf, contentType } = remote;
+
+        // Primary path: unlocked sharedMediaElement with proper MIME Blob.
+        // On iOS / mobile calls, HTMLAudioElement with playsInline routes reliably through
+        // iOS's PlayAndRecord session without AudioContext sample-rate lockups after MediaRecorder stops.
+        let mediaElementPlayed = false;
+        try {
+          const blob = new Blob([buf], { type: contentType });
+          const blobUrl = URL.createObjectURL(blob);
+          blobUrlToRevoke = blobUrl;
+          const el = getPrimedAudioElement() || new Audio();
+          el.setAttribute("playsinline", "true");
+          (el as unknown as { "webkit-playsinline"?: string })["webkit-playsinline"] = "true";
+          el.volume = 1.0;
+          currentAudio = el;
+          el.src = blobUrl;
+
+          el.onplay = () => {
+            setSignal({ mode: "speaking", provider: "fal", analyser: null });
+            pulseVoice();
+            hooks?.onStart?.();
+          };
+          el.ontimeupdate = () => {
+            pulseVoice();
+            if (el.duration > 0) hooks?.onProgress?.(el.currentTime / el.duration);
+          };
+          el.onended = () => {
+            clearSafetyTimer();
+            done();
+          };
+          el.onerror = () => {
+            clearSafetyTimer();
+            done();
+          };
+
+          safetyTimer = window.setTimeout(() => {
+            clearSafetyTimer();
+            done();
+          }, Math.max(4000, text.length * 95));
+
+          await el.play();
+          mediaElementPlayed = true;
+          return;
+        } catch (elErr) {
+          console.warn("sharedMediaElement playback failed, falling back to WebAudio decode", elErr);
+          clearSafetyTimer();
+          if (blobUrlToRevoke) {
+            URL.revokeObjectURL(blobUrlToRevoke);
+            blobUrlToRevoke = null;
           }
-          if (finished) return;
-
-          let audioBuf: AudioBuffer | null = null;
-          try {
-            audioBuf = await ctx.decodeAudioData(buf.slice(0));
-          } catch (decodeErr) {
-            console.warn("decodeAudioData failed", decodeErr);
-          }
-
-          if (audioBuf && !finished) {
-            try {
-              const src = ctx.createBufferSource();
-              src.buffer = audioBuf;
-
-              const nodeAnalyser = ctx.createAnalyser();
-              nodeAnalyser.fftSize = 64;
-              nodeAnalyser.smoothingTimeConstant = 0.72;
-              src.connect(nodeAnalyser);
-              nodeAnalyser.connect(ctx.destination);
-              analyser = nodeAnalyser;
-
-              localSource = src;
-              activeSourceNode = src;
-
-              const duration = audioBuf.duration;
-              const startCtxTime = ctx.currentTime;
-
-              src.onended = () => {
-                done();
-              };
-
-              setSignal({ mode: "speaking", provider: "fal", analyser: nodeAnalyser });
-              hooks?.onStart?.();
-
-              const updateProgress = () => {
-                if (finished) return;
-                const elapsed = ctx.currentTime - startCtxTime;
-                if (duration > 0) {
-                  hooks?.onProgress?.(Math.min(1, elapsed / duration));
-                }
-                if (elapsed < duration) {
-                  rafId = requestAnimationFrame(updateProgress);
-                }
-              };
-              rafId = requestAnimationFrame(updateProgress);
-
-              src.start(0);
-              return;
-            } catch (playErr) {
-              console.warn("AudioBufferSourceNode play failed", playErr);
-            }
-          }
+          currentAudio = null;
         }
 
-        // Fallback: reuse sharedMediaElement
-        if (!finished) {
-          try {
-            const blob = new Blob([buf], { type: "audio/wav" });
-            const blobUrl = URL.createObjectURL(blob);
-            blobUrlToRevoke = blobUrl;
-            const el = getPrimedAudioElement() || new Audio();
-            currentAudio = el;
-            el.src = blobUrl;
-            analyser = soundFx.attachVoiceAnalyser(el);
-            el.onplay = () => {
-              setSignal({ mode: "speaking", provider: "fal", analyser });
-              hooks?.onStart?.();
-            };
-            el.ontimeupdate = () => {
-              if (el.duration > 0) hooks?.onProgress?.(el.currentTime / el.duration);
-            };
-            el.onended = done;
-            el.onerror = done;
-            await el.play();
-            return;
-          } catch (elErr) {
-            console.warn("sharedMediaElement fallback play failed", elErr);
+        // Secondary path: Web Audio Context decodeAudioData if media element rejected
+        if (!finished && !mediaElementPlayed) {
+          const ctx = getSharedAudioContext();
+          if (ctx) {
+            if (ctx.state === "suspended") {
+              await ctx.resume().catch(() => {});
+            }
+            if (finished) return;
+
+            let audioBuf: AudioBuffer | null = null;
+            try {
+              audioBuf = await ctx.decodeAudioData(buf.slice(0));
+            } catch (decodeErr) {
+              console.warn("decodeAudioData failed", decodeErr);
+            }
+
+            if (audioBuf && !finished) {
+              try {
+                const src = ctx.createBufferSource();
+                src.buffer = audioBuf;
+
+                const nodeAnalyser = ctx.createAnalyser();
+                nodeAnalyser.fftSize = 64;
+                nodeAnalyser.smoothingTimeConstant = 0.72;
+                src.connect(nodeAnalyser);
+                nodeAnalyser.connect(ctx.destination);
+                analyser = nodeAnalyser;
+
+                localSource = src;
+                activeSourceNode = src;
+
+                const duration = audioBuf.duration;
+                const startCtxTime = ctx.currentTime;
+
+                src.onended = () => {
+                  clearSafetyTimer();
+                  done();
+                };
+
+                safetyTimer = window.setTimeout(() => {
+                  clearSafetyTimer();
+                  done();
+                }, Math.max(4000, Math.round(duration * 1000) + 1200));
+
+                setSignal({ mode: "speaking", provider: "fal", analyser: nodeAnalyser });
+                hooks?.onStart?.();
+
+                const updateProgress = () => {
+                  if (finished) return;
+                  const elapsed = ctx.currentTime - startCtxTime;
+                  if (duration > 0) {
+                    hooks?.onProgress?.(Math.min(1, elapsed / duration));
+                  }
+                  if (elapsed < duration) {
+                    rafId = requestAnimationFrame(updateProgress);
+                  }
+                };
+                rafId = requestAnimationFrame(updateProgress);
+
+                src.start(0);
+                return;
+              } catch (playErr) {
+                console.warn("AudioBufferSourceNode play failed", playErr);
+                clearSafetyTimer();
+              }
+            }
           }
         }
       }
 
-      // Fallback: Web Speech Synthesis
+      // Tertiary fallback: Web Speech Synthesis
       if (finished) return;
       const synth = window.speechSynthesis;
       if (!synth) return done();
@@ -650,7 +749,7 @@ export function speakCallTurn(
   }
 
   const now = Date.now();
-  if (!interrupt && cleanText === lastTurnKey && now - lastTurnAt < 2000) {
+  if (!interrupt && cleanText === lastTurnKey && now - lastTurnAt < 1500) {
     // Same line fired twice in quick succession (e.g. a duplicate SSE delivery) - skip
     // re-synthesizing it, but still settle the caller's hooks so UI state (speaking/
     // activeSpeaker flags) never gets stuck waiting for an onEnd that would otherwise
@@ -1003,6 +1102,10 @@ export function useAutoVad({
       return;
     }
 
+    stream.getAudioTracks().forEach((t) => {
+      t.enabled = true;
+    });
+    warmMicStream = stream;
     activeWarmMicStream = stream;
     // Always configure iOS audioSession to "play-and-record" when mic stream is armed
     const ctx = unlockAudioSession("play-and-record");

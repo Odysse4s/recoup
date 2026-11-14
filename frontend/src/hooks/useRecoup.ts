@@ -36,8 +36,9 @@ import {
   type WorkspaceState,
 } from "../lib/types";
 import { usePersistentState } from "../lib/usePersistentState";
-import { speakBriefing, speakCallTurn, stopSpeaking } from "../lib/voice";
-import { diffWindow, fileWindow, forgeSpecWindow, forgeWindow, outboxWindow, toolWindow } from "../lib/windows";
+import { isMobileCallManagingAudio, speakBriefing, speakCallTurn, stopSpeaking } from "../lib/voice";
+
+import { buildCommitWindows, diffWindow, fileWindow, forgeSpecWindow, forgeWindow, outboxWindow, toolWindow } from "../lib/windows";
 import {
   buildDemoAadeXml,
   mockDecisionEvents,
@@ -216,6 +217,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     (text: string, kind: string, interrupt = false) => {
       setLastBriefing(text);
       if (!voiceRef.current) return;
+      if (isMobileCallManagingAudio()) return;
       if (windowsEnabledRef.current && phoneCallActiveRef.current) return;
       speakBriefing(text, kind, speechHooks(text), interrupt);
     },
@@ -224,6 +226,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
 
   const replayBriefing = useCallback(() => {
     if (!lastBriefing) return;
+    if (isMobileCallManagingAudio()) return;
     if (windowsEnabledRef.current && phoneCallActiveRef.current) return;
     speakBriefing(lastBriefing, "replay", speechHooks(lastBriefing), true);
   }, [lastBriefing, speechHooks]);
@@ -338,7 +341,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           const isConnected = ac.call_status === "connected" || (!ac.ringing && ac.active);
           setOperatorConsult((prev) => {
             const prevCount = prev?.turns.length ?? 0;
-            if (!windowsEnabledRef.current && voiceRef.current && mappedTurns.length > prevCount) {
+            if (!windowsEnabledRef.current && voiceRef.current && !isMobileCallManagingAudio() && mappedTurns.length > prevCount) {
               const newTurn = mappedTurns[mappedTurns.length - 1];
               if (newTurn && newTurn.speaker === "agent" && newTurn.text) {
                 speakCallTurn("agent", newTurn.text, {
@@ -521,6 +524,43 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     }
   }, []);
 
+  const commitCelebratedRef = useRef(false);
+
+  const triggerCommitCelebration = useCallback((choiceOverride?: OperatorChoice | null) => {
+    if (!windowsEnabledRef.current) return;
+    if (commitCelebratedRef.current) return;
+    commitCelebratedRef.current = true;
+
+    const choice: OperatorChoice =
+      choiceOverride ??
+      operatorConsult?.selectedChoice ??
+      "refund";
+
+    // 1. Switch deck view to live SQLite ERP database view with claims table
+    setRequestedDeckView({ view: "db", seq: Date.now() });
+    setRequestedDbTable({ table: "claims", seq: Date.now() });
+
+    // 2. Play commit success chime
+    soundFx.playCommitSuccess();
+
+    // 3. Spawn the 2 celebratory Live Commit Windows sequentially
+    const [win1, win2] = buildCommitWindows(choice);
+    if (win1) {
+      spawnWindow(win1);
+      window.setTimeout(() => {
+        dockWindow(win1.id, "db");
+      }, 2100);
+    }
+    if (win2) {
+      window.setTimeout(() => {
+        spawnWindow(win2);
+        window.setTimeout(() => {
+          dockWindow(win2.id, "diff");
+        }, 2300);
+      }, 950);
+    }
+  }, [operatorConsult?.selectedChoice, spawnWindow, dockWindow]);
+
   const togglePin = useCallback((id: string) => {
     setWindows((ws) => ws.map((w) => (w.id === id ? { ...w, pinned: !w.pinned } : w)));
   }, []);
@@ -621,13 +661,14 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           const choice = uiAction.choice;
           setOperatorConsult((prev) => (prev ? { ...prev, selectedChoice: choice } : prev));
         }
+        triggerCommitCelebration(uiAction.choice as OperatorChoice);
         window.setTimeout(() => {
           setWindows((ws) => ws.map((w) => (w.pinned ? { ...w, pinned: false } : w)));
           void refreshState();
         }, 400);
       }
     },
-    [report, spawnWindow, refreshState]
+    [report, spawnWindow, refreshState, triggerCommitCelebration]
   );
   executeUiActionRef.current = executeUiAction;
 
@@ -785,6 +826,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           turn.speaker === "agent" &&
           Boolean(turn.text) &&
           !windowsEnabledRef.current &&
+          !isMobileCallManagingAudio() &&
           isConnected; // never auto-speak while the call is still ringing - the user hasn't picked up yet
 
         if (shouldAutoSpeakTurn && turn.text) {
@@ -824,6 +866,11 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             : prev
         );
         if (endPayload.outcome === "accepted") {
+          const agreedChoice: OperatorChoice =
+            (typeof endPayload.agreed_amount === "number" && endPayload.agreed_amount < 350)
+              ? "redelivery"
+              : "refund";
+          triggerCommitCelebration(agreedChoice);
           soundFx.playCommitSuccess();
           if (modeRef.current !== "demo") {
             void refreshState().then((fresh) => {
@@ -903,7 +950,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             );
             window.setTimeout(() => {
               dockWindow(liveId, "vault");
-            }, 1600);
+            }, 2900);
           } else {
             const winToSpawn = {
               ...fresh,
@@ -913,7 +960,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             spawnWindow(winToSpawn);
             window.setTimeout(() => {
               dockWindow(liveId, "vault");
-            }, 1600);
+            }, 2900);
           }
         }
         break;
@@ -981,12 +1028,17 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         setPendingApproval(null);
         setStage(ok ? "commit" : "gate");
         setRunStatus(ok ? "committing" : "aborted");
-        if (!ok) soundFx.playRewindSweep(1);
+        if (ok) {
+          triggerCommitCelebration();
+        } else {
+          soundFx.playRewindSweep(1);
+        }
         break;
       }
       case "replay_step_done":
         setStage("commit");
         setRunStatus("committing");
+        triggerCommitCelebration();
         if (modeRef.current !== "demo") refreshState();
         break;
       case "undo_step": {
@@ -995,12 +1047,14 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         break;
       }
       case "run_done": {
-        const status = String((ev.payload as { status?: string }).status ?? "");
+        const payload = ev.payload as { status?: string; outcome?: string; choice?: OperatorChoice };
+        const status = String(payload?.status ?? payload?.outcome ?? "");
         setRehearsalActive(false);
-        if (status === "committed") {
+        if (status === "committed" || payload?.outcome === "committed") {
           setStage("commit");
           setStageDone(true);
           setRunStatus("committed");
+          triggerCommitCelebration(payload?.choice);
           soundFx.playCommitSuccess();
         } else if (status === "aborted_by_human" || status === "blocked" || status === "timed_out") {
           setRunStatus("aborted");
@@ -1036,12 +1090,21 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       const next = queueRef.current[0];
       if (!next) {
         if (deferredApprovalRef.current && windowsEnabledRef.current) {
+          const forgeActive = windowsRef.current.some((w) => w.kind === "forge" && !w.manual);
+          if (forgeActive) return;
+
           const deferred = deferredApprovalRef.current;
           deferredApprovalRef.current = null;
           setPendingApproval(deferred);
           setStage("gate");
           setRunStatus((curr) => (curr === "running" || curr === "idle" ? "awaiting" : curr));
         }
+        return;
+      }
+      // If a forge window is actively open, wait for it to finish docking before popping subsequent steps or approval_needed
+      // (Exception: allow forge_test to pop through immediately so it can update forge_spec in-place)
+      const forgeActive = windowsRef.current.some((w) => w.kind === "forge" && !w.manual);
+      if (forgeActive && next.type !== "forge_test") {
         return;
       }
       if (next.type === "approval_needed") {
@@ -1142,6 +1205,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
 
   // ---------------------------------------------------------------- actions
   const clearRun = () => {
+    commitCelebratedRef.current = false;
     if (forgeFallbackTimerRef.current !== null) {
       window.clearTimeout(forgeFallbackTimerRef.current);
       forgeFallbackTimerRef.current = null;
@@ -1218,6 +1282,9 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     setPendingApproval(null);
     setRunStatus(approved ? "committing" : "aborted");
     setStage(approved ? "commit" : "gate");
+    if (approved) {
+      triggerCommitCelebration();
+    }
     stopSpeaking();
     if (modeRef.current === "demo" || reqId.startsWith("req_demo")) {
       if (!approved) {

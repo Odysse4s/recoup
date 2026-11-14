@@ -169,8 +169,104 @@ function TelemetryStrip({ win, progress, typing }: { win: LiveWin; progress: num
   );
 }
 
-function ForgeAnvilVisual({ win }: { win: LiveWin }) {
-  const isRegistered = win.doneLabel === "REGISTERED";
+function DatabaseRowMorphVisual({
+  mutation,
+  progress,
+  typing,
+}: {
+  mutation: NonNullable<LiveWin["dbMutation"]>;
+  progress: number;
+  typing: boolean;
+}) {
+  const isCommit = mutation.mode === "LIVE ERP COMMIT";
+  const scanProgress = Math.min(1, progress / 0.55);
+  const morphed = progress >= 0.45;
+
+  return (
+    <div className="border-b border-line bg-surface/95 p-3 font-mono text-[11px]">
+      <div className="mb-2 flex items-center justify-between gap-2 border-b border-line/60 pb-1.5">
+        <div className="flex items-center gap-1.5 font-bold text-ink">
+          <Database className="h-3.5 w-3.5 text-ok" />
+          <span>
+            SQLite ERP · <span className="text-signal">{mutation.table}</span>
+          </span>
+        </div>
+        <span
+          className={cx(
+            "inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-bold tracking-wider transition-all duration-300",
+            isCommit
+              ? "border border-emerald-400/80 bg-emerald-950/80 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.35)] animate-pulse"
+              : "border border-cyan-400/50 bg-cyan-950/60 text-cyan-300"
+          )}
+        >
+          {isCommit ? "⚡ LIVE ERP COMMIT" : "STAGE IN CLONE"}
+        </span>
+      </div>
+
+      <div className="relative overflow-hidden rounded-lg border border-line bg-sunken/80 p-2.5 shadow-inner">
+        {typing && scanProgress < 1 && (
+          <motion.div
+            className="pointer-events-none absolute inset-y-0 w-10 bg-gradient-to-r from-transparent via-emerald-400/35 to-transparent blur-sm"
+            style={{ left: `${scanProgress * 100}%` }}
+          />
+        )}
+
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 items-center">
+          <div>
+            <div className="text-[10px] uppercase text-ink-3">Record ID</div>
+            <div className="font-bold text-ink truncate">{mutation.pk}</div>
+          </div>
+
+          {mutation.summaryCols.slice(0, 2).map((col, idx) => (
+            <div key={idx} className="min-w-0">
+              <div className="text-[10px] uppercase text-ink-3 truncate">{col.label}</div>
+              <div className="text-ink truncate">{col.value}</div>
+            </div>
+          ))}
+
+          <div>
+            <div className="text-[10px] uppercase text-ink-3">Status Mutation</div>
+            <div className="flex items-center gap-1.5">
+              {!morphed ? (
+                <span className="inline-flex items-center rounded border border-slate-700 bg-slate-800/90 px-1.5 py-0.5 text-[10px] font-medium text-slate-300">
+                  {mutation.beforeStatus ?? "active"}
+                </span>
+              ) : (
+                <div className="flex items-center gap-1">
+                  {mutation.beforeStatus && (
+                    <span className="text-[10px] text-rose-400/70 line-through">
+                      {mutation.beforeStatus}
+                    </span>
+                  )}
+                  <span
+                    className={cx(
+                      "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10.5px] font-bold shadow-sm transition-all duration-300",
+                      isCommit
+                        ? "border-emerald-500/80 bg-emerald-500/20 text-emerald-300 shadow-[0_0_8px_rgba(16,185,129,0.4)]"
+                        : "border-amber-500/80 bg-amber-500/20 text-amber-300"
+                    )}
+                  >
+                    {mutation.afterStatus}
+                  </span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {mutation.amount && (
+          <div className="mt-2 flex items-center justify-between border-t border-line/40 pt-1.5 text-[10.5px]">
+            <span className="text-ink-3">Mutation Ledger Impact:</span>
+            <span className="font-bold text-emerald-400">{mutation.amount}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ForgeAnvilRightPane({ win, progress }: { win: LiveWin; progress: number; typing: boolean }) {
+  const isRegistered = (win.forgeStage === "verified" || win.doneLabel === "REGISTERED") && progress >= 1;
   const totalTests = win.assertions?.length ? win.assertions.length : 3;
   const passedCount = win.assertions?.length ? win.assertions.filter((a) => a.ok).length : 3;
   const testRatio = `${passedCount}/${totalTests} TESTS PASSED`;
@@ -179,23 +275,23 @@ function ForgeAnvilVisual({ win }: { win: LiveWin }) {
     <div
       aria-label="Forge Blacksmith Anvil & Hammer"
       className={cx(
-        "relative flex flex-col sm:flex-row items-center justify-between gap-3 overflow-hidden border-b px-4 py-4 transition-colors duration-500",
+        "relative flex h-full min-h-[220px] flex-col justify-between overflow-hidden rounded-lg border p-3 transition-colors duration-500",
         isRegistered
-          ? "border-emerald-500/50 bg-gradient-to-r from-slate-950 via-emerald-950/50 to-slate-950 text-emerald-200"
-          : "border-purple-500/50 bg-gradient-to-r from-slate-950 via-[#241242] to-slate-950 text-purple-200"
+          ? "border-emerald-500/50 bg-gradient-to-b from-slate-950 via-emerald-950/40 to-slate-950 text-emerald-200"
+          : "border-purple-500/40 bg-gradient-to-b from-slate-950 via-[#241242] to-slate-950 text-purple-200"
       )}
     >
       {/* Background ambient forge glow */}
       <div
         className={cx(
-          "pointer-events-none absolute -left-10 top-1/2 h-32 w-52 -translate-y-1/2 rounded-full blur-2xl transition-colors duration-500",
+          "pointer-events-none absolute -left-6 top-1/2 h-28 w-44 -translate-y-1/2 rounded-full blur-2xl transition-colors duration-500",
           isRegistered ? "bg-emerald-500/25" : "bg-amber-500/20"
         )}
       />
 
-      {/* Heroic Center-Stage Hammer-on-Anvil SVG */}
-      <div className="relative flex shrink-0 items-center">
-        <svg viewBox="0 0 190 90" className="h-24 w-48 drop-shadow-xl" aria-hidden="true">
+      {/* Hammer-on-Anvil SVG */}
+      <div className="relative flex shrink-0 items-center justify-center py-1">
+        <svg viewBox="0 0 190 90" className="h-20 w-40 drop-shadow-xl" aria-hidden="true">
           <defs>
             <linearGradient id="anvilBodyGrad" x1="0%" y1="0%" x2="100%" y2="100%">
               <stop offset="0%" stopColor="#64748b" />
@@ -223,23 +319,21 @@ function ForgeAnvilVisual({ win }: { win: LiveWin }) {
           <path d="M 28 82 L 136 82 L 122 68 L 42 68 Z" fill="#1e293b" stroke="#475569" strokeWidth="1.2" />
           {/* Anvil Waist */}
           <path d="M 52 68 C 52 56, 60 50, 60 44 L 106 44 C 106 50, 114 56, 114 68 Z" fill="url(#anvilBodyGrad)" />
-          {/* Anvil Horn (left) and Step/Face (right) */}
+          {/* Anvil Horn and Face */}
           <path
             d="M 14 44 C 28 44, 42 41, 56 41 L 146 41 L 146 50 L 128 50 C 122 50, 116 54, 110 54 L 56 54 C 42 54, 28 48, 14 44 Z"
             fill="url(#anvilBodyGrad)"
             stroke="#64748b"
             strokeWidth="1.2"
           />
-          {/* Striking surface hardened face */}
           <line x1="56" y1="41" x2="146" y2="41" stroke="#e2e8f0" strokeWidth="2.5" strokeLinecap="round" />
 
           {!isRegistered ? (
             <>
-              {/* Hot glowing anvil contact spot */}
               <circle cx="102" cy="41" r="7" fill="#f59e0b" opacity="0.65" filter="url(#forgeGlow)" />
               <circle cx="102" cy="41" r="3" fill="#fef08a" />
 
-              {/* Bold Steel Hammer swinging down and striking */}
+              {/* Steel Hammer swinging down rhythmically */}
               <motion.g
                 animate={{
                   rotate: [0, -42, -42, 6, 0],
@@ -252,14 +346,12 @@ function ForgeAnvilVisual({ win }: { win: LiveWin }) {
                 }}
                 style={{ transformOrigin: "90px 14px" }}
               >
-                {/* Wooden handle */}
                 <rect x="87" y="10" width="6" height="34" rx="3" fill="#d97706" stroke="#78350f" strokeWidth="1" />
-                {/* Steel hammer head */}
                 <rect x="74" y="34" width="30" height="13" rx="2.5" fill="url(#hammerHeadGrad)" stroke="#cbd5e1" strokeWidth="1" />
                 <line x1="76" y1="36" x2="102" y2="36" stroke="#ffffff" strokeWidth="1" opacity="0.8" />
               </motion.g>
 
-              {/* Bright orange/gold impact flash on the anvil face */}
+              {/* Impact flash */}
               <motion.ellipse
                 cx="102"
                 cy="41"
@@ -279,9 +371,8 @@ function ForgeAnvilVisual({ win }: { win: LiveWin }) {
                 }}
               />
 
-              {/* 8 flying spark particles erupting outward on each strike */}
+              {/* Sparks erupting on each strike */}
               <g transform="translate(102, 41)">
-                {/* Spark 1 */}
                 <motion.circle
                   cx={0}
                   cy={0}
@@ -290,7 +381,6 @@ function ForgeAnvilVisual({ win }: { win: LiveWin }) {
                   animate={{ x: [0, 24, 38], y: [0, -18, -26], opacity: [0, 1, 0], scale: [0.6, 1.4, 0] }}
                   transition={{ repeat: Infinity, duration: 0.65, times: [0.58, 0.65, 0.88], ease: "easeOut" }}
                 />
-                {/* Spark 2 */}
                 <motion.circle
                   cx={0}
                   cy={0}
@@ -299,7 +389,6 @@ function ForgeAnvilVisual({ win }: { win: LiveWin }) {
                   animate={{ x: [0, -22, -34], y: [0, -16, -24], opacity: [0, 1, 0], scale: [0.6, 1.3, 0] }}
                   transition={{ repeat: Infinity, duration: 0.65, times: [0.58, 0.64, 0.86], ease: "easeOut" }}
                 />
-                {/* Spark 3 */}
                 <motion.circle
                   cx={0}
                   cy={0}
@@ -308,16 +397,6 @@ function ForgeAnvilVisual({ win }: { win: LiveWin }) {
                   animate={{ x: [0, 8, 14], y: [0, -28, -38], opacity: [0, 1, 0], scale: [0.5, 1.3, 0] }}
                   transition={{ repeat: Infinity, duration: 0.65, times: [0.58, 0.66, 0.9], ease: "easeOut" }}
                 />
-                {/* Spark 4 */}
-                <motion.circle
-                  cx={0}
-                  cy={0}
-                  r={1.8}
-                  fill="#eab308"
-                  animate={{ x: [0, -10, -18], y: [0, -26, -36], opacity: [0, 1, 0], scale: [0.5, 1.2, 0] }}
-                  transition={{ repeat: Infinity, duration: 0.65, times: [0.58, 0.65, 0.87], ease: "easeOut" }}
-                />
-                {/* Spark 5 */}
                 <motion.circle
                   cx={0}
                   cy={0}
@@ -325,33 +404,6 @@ function ForgeAnvilVisual({ win }: { win: LiveWin }) {
                   fill="#f59e0b"
                   animate={{ x: [0, 32, 48], y: [0, -8, -14], opacity: [0, 1, 0], scale: [0.6, 1.5, 0] }}
                   transition={{ repeat: Infinity, duration: 0.65, times: [0.58, 0.66, 0.92], ease: "easeOut" }}
-                />
-                {/* Spark 6 */}
-                <motion.circle
-                  cx={0}
-                  cy={0}
-                  r={2.2}
-                  fill="#ea580c"
-                  animate={{ x: [0, -30, -46], y: [0, -10, -16], opacity: [0, 1, 0], scale: [0.6, 1.4, 0] }}
-                  transition={{ repeat: Infinity, duration: 0.65, times: [0.58, 0.64, 0.88], ease: "easeOut" }}
-                />
-                {/* Spark 7 */}
-                <motion.circle
-                  cx={0}
-                  cy={0}
-                  r={1.6}
-                  fill="#c084fc"
-                  animate={{ x: [0, 18, 28], y: [0, -24, -32], opacity: [0, 1, 0], scale: [0.5, 1.2, 0] }}
-                  transition={{ repeat: Infinity, duration: 0.65, times: [0.58, 0.67, 0.94], ease: "easeOut" }}
-                />
-                {/* Spark 8 */}
-                <motion.circle
-                  cx={0}
-                  cy={0}
-                  r={1.5}
-                  fill="#ffffff"
-                  animate={{ x: [0, -2, -4], y: [0, -34, -46], opacity: [0, 1, 0], scale: [0.6, 1.1, 0] }}
-                  transition={{ repeat: Infinity, duration: 0.65, times: [0.58, 0.63, 0.84], ease: "easeOut" }}
                 />
               </g>
             </>
@@ -362,12 +414,10 @@ function ForgeAnvilVisual({ win }: { win: LiveWin }) {
                 <rect x="77" y="10" width="6" height="34" rx="3" fill="#78350f" opacity="0.85" />
                 <rect x="64" y="34" width="30" height="13" rx="2.5" fill="url(#hammerHeadGrad)" stroke="#64748b" strokeWidth="1" />
               </g>
-
-              {/* Gleaming Emerald Checkmark / Starburst Badge */}
+              {/* Starburst Checkmark */}
               <g transform="translate(102, 30)">
                 <circle cx="0" cy="0" r="14" fill="#10b981" filter="url(#forgeGlow)" opacity="0.95" />
                 <path d="M -5.5 0 L -1.5 4 L 6 -3.5" fill="none" stroke="#ffffff" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" />
-                {/* Golden shimmer rays */}
                 <line x1="0" y1="-18" x2="0" y2="-23" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" />
                 <line x1="15" y1="-10" x2="20" y2="-13" stroke="#34d399" strokeWidth="2" strokeLinecap="round" />
                 <line x1="15" y1="10" x2="20" y2="13" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" />
@@ -379,33 +429,37 @@ function ForgeAnvilVisual({ win }: { win: LiveWin }) {
         </svg>
       </div>
 
-      {/* Big, Jargon-Free Centerpiece Telemetry */}
-      <div className="min-w-0 flex-1 pl-1 text-left sm:pl-3">
-        {!isRegistered ? (
-          <div className="space-y-1">
-            <div className="flex items-center gap-2 font-mono text-[13px] font-bold tracking-wide text-amber-300">
-              <span className="relative flex h-2.5 w-2.5">
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
-                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-amber-400" />
-              </span>
-              <span>⚒️ BUILDING CUSTOM TOOL...</span>
+      {/* Status banner underneath anvil */}
+      {!isRegistered ? (
+        <div className="space-y-1 text-center">
+          <div className="flex items-center justify-center gap-1.5 font-mono text-[11px] font-bold tracking-wide text-amber-300">
+            <span className="relative flex h-2 w-2">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-400" />
+            </span>
+            <span>HAMMERING PYTHON AST</span>
+          </div>
+          <div className="text-[10px] text-purple-200/90 leading-tight">
+            Synthesizing pure-stdlib tool in sandbox
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-1.5 text-center">
+          <div className="rounded-md border border-emerald-500/70 bg-emerald-950/70 p-1.5 shadow-[0_0_16px_rgba(16,185,129,0.35)]">
+            <div className="flex items-center justify-center gap-1 font-mono text-[10.5px] font-bold text-emerald-300">
+              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+              <span>✅ 3/3 SANDBOX TESTS PASSED</span>
             </div>
-            <div className="text-[12px] leading-snug text-purple-200">
-              Agent needed a penalty calculator → hammering Python code in sandbox
+            <div className="text-[9.5px] font-mono text-emerald-200/80">
+              7-LAYER SEALED · {testRatio}
             </div>
           </div>
-        ) : (
-          <div className="space-y-1">
-            <div className="flex items-center gap-2 font-mono text-[13px] font-bold tracking-wide text-emerald-300">
-              <Sparkles className="h-4 w-4 text-amber-300 animate-pulse" />
-              <span>{`✅ TOOL FORGED! (${testRatio})`}</span>
-            </div>
-            <div className="text-[12px] leading-snug text-emerald-100 font-medium">
-              Pulling into Agent Toolbox ↙
-            </div>
+          <div className="text-[10.5px] font-medium text-emerald-300 flex items-center justify-center gap-1">
+            <Sparkles className="h-3 w-3 text-amber-300 animate-pulse" />
+            <span>Pulling into Agent Toolbox ↙</span>
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -462,6 +516,21 @@ function LiveWindow({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Track code/stage signature to detect when forge transitions from spec to verified Python code
+  const prevSigRef = useRef<string>("");
+  useEffect(() => {
+    const isRealPython = win.code.includes("def ") && win.code.length > 80;
+    const sig = `${win.id}:${win.forgeStage ?? ""}:${win.code.length}`;
+    if (prevSigRef.current && prevSigRef.current !== sig) {
+      if (win.kind === "forge" && (win.forgeStage === "verified" || isRealPython)) {
+        dockingRef.current = false;
+        setProgress(0);
+        setPhase("typing");
+      }
+    }
+    prevSigRef.current = sig;
+  }, [win.id, win.forgeStage, win.code, win.kind]);
+
   // Stage 1 — origin pop: spring out of the active pipeline stage badge.
   useLayoutEffect(() => {
     if (win.skipAutoPop && !win.manual) return;
@@ -490,10 +559,15 @@ function LiveWindow({
     let raf = 0;
     let last = performance.now();
     let p = progress;
+    const isForgeTyping = win.kind === "forge" && win.code.includes("def ");
+    const typeDur = isForgeTyping
+      ? Math.max(1100, paceRef.current.forgeTypeMs ?? 1500)
+      : paceRef.current.type;
+
     const tick = (now: number) => {
       const dt = now - last;
       last = now;
-      if (!pinnedRef.current) p = Math.min(1, p + dt / paceRef.current.type);
+      if (!pinnedRef.current) p = Math.min(1, p + dt / typeDur);
       setProgress(p);
       if (p >= 1) setPhase("hold");
       else raf = requestAnimationFrame(tick);
@@ -501,15 +575,31 @@ function LiveWindow({
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase]);
+  }, [phase, win.kind, win.code]);
+
+  // Rhythmic Anvil Clangs on striking during forge typing (3 strikes at ~0.22, ~0.52, and ~0.82)
+  const lastClangStrikeRef = useRef(0);
+  useEffect(() => {
+    if (phase === "typing" && win.kind === "forge") {
+      const currentStrike = progress >= 0.82 ? 3 : progress >= 0.52 ? 2 : progress >= 0.22 ? 1 : 0;
+      if (currentStrike > lastClangStrikeRef.current) {
+        lastClangStrikeRef.current = currentStrike;
+        soundFx.playForgeAnvilClang();
+      }
+    } else if (phase === "pop" || progress === 0) {
+      lastClangStrikeRef.current = 0;
+    }
+  }, [progress, phase, win.kind]);
 
   // Stage 3 — hold, then genie-dock into the destination card (unless pinned).
   useEffect(() => {
     if (phase !== "hold" || win.pinned) return;
-    const t = window.setTimeout(() => dock(), paceRef.current.hold);
+    const isForge = win.kind === "forge";
+    const holdDuration = isForge ? (paceRef.current.forgeHoldMs ?? 1300) : paceRef.current.hold;
+    const t = window.setTimeout(() => dock(), holdDuration);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, win.pinned]);
+  }, [phase, win.pinned, win.kind]);
 
   // Keep the active line in view while typing.
   useEffect(() => {
@@ -522,9 +612,13 @@ function LiveWindow({
     dockingRef.current = true;
     setPhase("docking");
     const el = scope.current;
+    if (!el) {
+      onDocked(win.id, win.target);
+      return;
+    }
     const r = el.getBoundingClientRect();
     const target = anchorCenter(win.target);
-    const dur = paceRef.current.dock / 1000;
+    const dur = win.kind === "forge" ? 0.48 : (paceRef.current.dock / 1000);
     if (target) {
       const dx = target.x - (r.left + r.width / 2);
       const dy = target.y - (r.top + r.height / 2);
@@ -599,7 +693,10 @@ function LiveWindow({
             ? "var(--shadow-float), 0 0 0 1.5px #A855F7, 0 0 54px -6px rgba(168, 85, 247, 0.45)"
             : `var(--shadow-float), 0 0 0 1.5px color-mix(in oklab, ${meta.hex} 65%, transparent), 0 0 54px -8px color-mix(in oklab, ${meta.hex} 60%, transparent)`,
         }}
-        className="relative w-[min(660px,calc(100vw-2rem))] overflow-hidden rounded-xl bg-raised"
+        className={cx(
+          "relative overflow-hidden rounded-xl bg-raised transition-all duration-300",
+          isForge ? "w-[min(820px,calc(100vw-2rem))]" : "w-[min(660px,calc(100vw-2rem))]"
+        )}
       >
         {/* High-contrast projector archetype banner (<0.5s recognition) */}
         <div
@@ -707,42 +804,96 @@ function LiveWindow({
           </div>
         )}
 
-        {/* Dedicated Blacksmith Hammer striking Anvil Visual for The Forge */}
-        {isForge && <ForgeAnvilVisual win={win} />}
-
-        {/* Code body */}
-        <div className="relative bg-code">
-          {typing && (
-            <div aria-hidden className={cx("pointer-events-none absolute inset-x-0 top-0 h-14 bg-gradient-to-b to-transparent opacity-50 scanline", tone.soft)} />
-          )}
-          <div
-            ref={bodyRef}
-            className="scroll-thin overflow-y-auto max-h-[190px] py-3 font-mono text-[13px] leading-[1.8]"
-          >
-            {lines.map((line, i) => {
-              const active = i === lines.length - 1 && typing;
-              const displayLine = line.replace(/\bpk_col\b/g, "record_id");
-              return (
-                <div key={i} className={cx("relative flex pr-4", active && tone.soft)}>
-                  <span className={cx("absolute inset-y-0 left-0 w-[3px]", active ? tone.dot : "bg-transparent")} />
-                  <span className={cx("w-11 shrink-0 select-none pr-3 text-right tabular", active ? tone.text : "text-ink-3")}>
-                    {i + 1}
-                  </span>
-                  <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-ink">
-                    {renderAsXml ? highlightXmlLine(displayLine) : highlightLine(displayLine, win.lang)}
-                    {active && <span className={cx("ml-px inline-block h-[1.05em] w-[0.6em] translate-y-[2px] cursor-blink", tone.dot)} />}
-                  </span>
-                </div>
-              );
-            })}
-            {typing && lines.length < allLines && (
-              <div className="flex pr-4 opacity-30">
-                <span className="w-11 shrink-0 pr-3 text-right text-ink-3 tabular">{lines.length + 1}</span>
-                <span className="text-ink-3">…</span>
+        {/* Hero Dual-Pane Split Layout for The Forge vs Standard Single Pane */}
+        {isForge ? (
+          <div className="grid grid-cols-1 md:grid-cols-[65%_35%] border-b border-line">
+            {/* Left/Main Pane: IDE Code Editor (65%) */}
+            <div className="relative flex flex-col bg-code border-b md:border-b-0 md:border-r border-line">
+              <div className="flex items-center justify-between border-b border-line/60 bg-sunken/60 px-3 py-1 font-mono text-[11px] text-ink-3">
+                <span className="flex items-center gap-1.5 text-purple-300 font-semibold truncate">
+                  <FileCode2 className="h-3.5 w-3.5 text-purple-400 shrink-0" />
+                  tools/{win.toolName || "compute_supplier_claim"}.py
+                </span>
+                <span className="text-[10px] text-ink-3 shrink-0">{pct}%</span>
               </div>
-            )}
+              {typing && (
+                <div aria-hidden className={cx("pointer-events-none absolute inset-x-0 top-7 h-12 bg-gradient-to-b to-transparent opacity-50 scanline", tone.soft)} />
+              )}
+              <div
+                ref={bodyRef}
+                className="scroll-thin overflow-y-auto max-h-[220px] py-2.5 font-mono text-[12.5px] leading-[1.7]"
+              >
+                {lines.map((line, i) => {
+                  const active = i === lines.length - 1 && typing;
+                  return (
+                    <div key={i} className={cx("relative flex pr-4", active && tone.soft)}>
+                      <span className={cx("absolute inset-y-0 left-0 w-[3px]", active ? tone.dot : "bg-transparent")} />
+                      <span className={cx("w-9 shrink-0 select-none pr-2.5 text-right tabular text-[11px]", active ? tone.text : "text-ink-3")}>
+                        {i + 1}
+                      </span>
+                      <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-ink">
+                        {highlightLine(line, win.lang)}
+                        {active && <span className={cx("ml-px inline-block h-[1.05em] w-[0.6em] translate-y-[2px] cursor-blink", tone.dot)} />}
+                      </span>
+                    </div>
+                  );
+                })}
+                {typing && lines.length < allLines && (
+                  <div className="flex pr-4 opacity-30">
+                    <span className="w-9 shrink-0 pr-2.5 text-right text-ink-3 tabular text-[11px]">{lines.length + 1}</span>
+                    <span className="text-ink-3">…</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Right Pane: Animated Smithy Anvil & Hammer SVG (35%) */}
+            <div className="flex flex-col justify-between bg-surface/90 p-2.5">
+              <ForgeAnvilRightPane win={win} progress={progress} typing={typing} />
+            </div>
           </div>
-        </div>
+        ) : (
+          <>
+            {/* Visual Live Database Table Grid when dbMutation is present */}
+            {win.dbMutation && (
+              <DatabaseRowMorphVisual mutation={win.dbMutation} progress={progress} typing={typing} />
+            )}
+
+            {/* Code body */}
+            <div className="relative bg-code">
+              {typing && (
+                <div aria-hidden className={cx("pointer-events-none absolute inset-x-0 top-0 h-14 bg-gradient-to-b to-transparent opacity-50 scanline", tone.soft)} />
+              )}
+              <div
+                ref={bodyRef}
+                className={cx("scroll-thin overflow-y-auto py-3 font-mono text-[13px] leading-[1.8]", win.dbMutation ? "max-h-[120px]" : "max-h-[190px]")}
+              >
+                {lines.map((line, i) => {
+                  const active = i === lines.length - 1 && typing;
+                  const displayLine = line.replace(/\bpk_col\b/g, "record_id");
+                  return (
+                    <div key={i} className={cx("relative flex pr-4", active && tone.soft)}>
+                      <span className={cx("absolute inset-y-0 left-0 w-[3px]", active ? tone.dot : "bg-transparent")} />
+                      <span className={cx("w-11 shrink-0 select-none pr-3 text-right tabular", active ? tone.text : "text-ink-3")}>
+                        {i + 1}
+                      </span>
+                      <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-ink">
+                        {renderAsXml ? highlightXmlLine(displayLine) : highlightLine(displayLine, win.lang)}
+                        {active && <span className={cx("ml-px inline-block h-[1.05em] w-[0.6em] translate-y-[2px] cursor-blink", tone.dot)} />}
+                      </span>
+                    </div>
+                  );
+                })}
+                {typing && lines.length < allLines && (
+                  <div className="flex pr-4 opacity-30">
+                    <span className="w-11 shrink-0 pr-3 text-right text-ink-3 tabular">{lines.length + 1}</span>
+                    <span className="text-ink-3">…</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          </>
+        )}
 
         {/* Assertions */}
         <div className="flex flex-wrap items-center gap-1.5 border-t border-line bg-surface px-3 py-2">

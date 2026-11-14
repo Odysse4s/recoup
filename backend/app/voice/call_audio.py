@@ -237,6 +237,7 @@ def synthesize_grok_tts(text: str, voice: str | None = None) -> bytes | None:
 
 _TURN_AUDIO_LRU_MAX = 64
 _turn_audio_lru: OrderedDict[str, bytes] = OrderedDict()
+_MEM_TTS_CACHE: OrderedDict[str, bytes] = _turn_audio_lru
 
 
 def _lru_get(cache_key: str) -> bytes | None:
@@ -253,9 +254,51 @@ def _lru_put(cache_key: str, audio_bytes: bytes) -> None:
         _turn_audio_lru.popitem(last=False)
 
 
+STAGE_CALL_PREWARM_LINES: tuple[str, ...] = (
+    "Hey! Kappa's delivery is short 22 hubs—they owe us 587 euros. Should I demand the full refund, or take replacement hubs?",
+    "Full refund gets us 587 euros cash back today and freezes their invoice. Or they ship 22 free hubs tomorrow plus a 202 euro credit. Which one?",
+    "Sixteen missing hubs, six broken, unit overbilling on invoice 7781, plus a two-day late penalty—totaling 587 euros and 30 cents. Refund or replacements?",
+    "Everything's staged—I'll freeze invoice 7781, file the Greek AADE tax credit, and email Kappa the moment you say go. Refund or replacements?",
+    "On it—freezing invoice 7781, filing the 587 euro AADE tax credit, and emailing Kappa right now! All done. Need anything else?",
+    "Got it—locking in 22 free replacement hubs for tomorrow morning plus the 202 euro credit, and emailing Kappa now! Anything else?",
+    "Awesome—everything's applied and undo-protected. Talk soon!",
+    "No problem—I'll keep everything safely paused until you're back at your desk. Talk soon!",
+)
+
+
+def prewarm_stage_call_tts() -> int:
+    """Pre-warm in-memory and disk TTS caches for the 8 core stage consult lines.
+
+    Skips network calls under pytest or when voice providers are offline/disabled/missing keys.
+    Returns the count of pre-warmed audio entries.
+    """
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return 0
+    provider = os.getenv("VOICE_PROVIDER", "").strip().lower()
+    if provider in ("none", "offline", "disabled"):
+        return 0
+    has_keys = bool(
+        os.getenv("FAL_KEY", "").strip()
+        or os.getenv("ELEVENLABS_API_KEY", "").strip()
+        or os.getenv("WONDERFUL_API_KEY", "").strip()
+    )
+    if not has_keys:
+        return 0
+
+    count = 0
+    for line in STAGE_CALL_PREWARM_LINES:
+        with contextlib.suppress(Exception):
+            res = synthesize_call_turn("agent", line)
+            if res:
+                count += 1
+    return count
+
+
 def synthesize_call_turn(
-    speaker: Literal["agent", "counterparty"],
-    text: str,
+    speaker_or_text: Literal["agent", "counterparty"] | str = "agent",
+    text: str = "",
+    *,
+    speaker: Literal["agent", "counterparty"] | str | None = None,
 ) -> bytes | None:
     """Synthesize a vendor negotiation turn using distinct voices per speaker role.
 
@@ -263,7 +306,17 @@ def synthesize_call_turn(
     before even touching disk, so they come back in well under 100ms instead of paying
     a disk read on every turn.
     """
-    cleaned = _SPEAKER_TAG_PREFIX_RE.sub("", (text or "").strip()).strip()
+    if speaker is not None:
+        role_raw = speaker
+        final_text = text or (speaker_or_text if speaker_or_text not in ("agent", "counterparty") else "")
+    elif speaker_or_text in ("agent", "counterparty"):
+        role_raw = speaker_or_text
+        final_text = text
+    else:
+        role_raw = "agent"
+        final_text = speaker_or_text
+
+    cleaned = _SPEAKER_TAG_PREFIX_RE.sub("", (final_text or "").strip()).strip()
     if not cleaned:
         return None
 
@@ -271,7 +324,7 @@ def synthesize_call_turn(
     if provider_pref in ("none", "offline", "fake", "disabled"):
         return None
 
-    role: Literal["agent", "counterparty"] = "counterparty" if speaker == "counterparty" else "agent"
+    role: Literal["agent", "counterparty"] = "counterparty" if role_raw == "counterparty" else "agent"
     voice = _resolve_speaker_voice(role)
     cache_key = hashlib.sha256(f"{role}:{voice}:{cleaned}".encode()).hexdigest()
 

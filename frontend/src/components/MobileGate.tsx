@@ -37,11 +37,15 @@ import { soundFx } from "../lib/sound";
 import type { Theme } from "../lib/theme";
 import type { OperatorChoice, OperatorConsultState, OperatorConsultTurn } from "../lib/types";
 import {
+  acquirePersistentMicStream,
   getPrimedAudioElement,
   getSharedAudioContext,
   getWarmMicStream,
   hasSpeechRecognition,
+  isMobileCallManagingAudio,
+  mutePersistentMicStream,
   pickRecorderMimeType,
+  setMobileCallOwnsAudio,
   speakCallTurn,
   stopSpeaking,
   unlockAudioSession,
@@ -55,7 +59,7 @@ import { VoiceOrb } from "./VoiceOrb";
 
 const DEFAULT_CLAIM_ID = "CLM-D-1042";
 const DEFAULT_OPENING_QUESTION =
-  "Hey! Shipment D-1042 is missing 22 hubs—they owe us 587 euros. Want to see the proof on your screen?";
+  "Hey! Kappa's delivery is short 22 hubs—they owe us 587 euros. Should I demand the full refund, or take replacement hubs?";
 
 let cachedRingtoneUrl: string | null = null;
 function getDualToneRingtoneUrl(): string {
@@ -117,12 +121,26 @@ function AudioUnlockBanner({ onUnlock }: { onUnlock: () => void }) {
     >
       <span className="flex items-center gap-2">
         <Volume2 className="h-4 w-4 shrink-0 animate-bounce" />
-        <span>🔔 Tap Anywhere Once to Arm iPhone Ringtone &amp; Speaker</span>
+        <span>🔔 Tap Once to Arm Ringtone &amp; Mic</span>
       </span>
       <span className="shrink-0 rounded-full bg-signal px-2 py-0.5 text-[10.5px] font-bold text-white shadow-sm">
         Arm Audio
       </span>
     </button>
+  );
+}
+
+function AudioArmedBadge() {
+  return (
+    <div className="flex flex-col border-b border-ok/30 bg-ok/10 px-5 py-2 text-[12px] text-ok">
+      <div className="flex items-center gap-2 font-semibold">
+        <CheckCircle2 className="h-4 w-4 shrink-0 text-ok" />
+        <span>✓ Ringtone &amp; Mic Armed (Zero Prompts Ready)</span>
+      </div>
+      <div className="mt-0.5 text-[11px] text-ink-3">
+        Safari tip: tap aA → Website Settings → Microphone → Allow once to persist across refreshes
+      </div>
+    </div>
   );
 }
 
@@ -305,6 +323,7 @@ function OperatorEscalationCall({
   onUnlockAudio,
   onSetLocalCompletion,
   onDismissCompleted,
+  onEndWithoutDecision,
 }: {
   sessionKey: string;
   consult: OperatorConsultState | null;
@@ -315,6 +334,7 @@ function OperatorEscalationCall({
   onUnlockAudio: () => void;
   onSetLocalCompletion: (c: LocalCompletion | null) => void;
   onDismissCompleted: () => void;
+  onEndWithoutDecision: () => void;
 }) {
   const [secs, setSecs] = useState(0);
   const [answered, setAnswered] = useState(() => {
@@ -329,6 +349,7 @@ function OperatorEscalationCall({
   const [actionToast, setActionToast] = useState<string | null>(null);
   const [localTurns, setLocalTurns] = useState<OperatorConsultTurn[]>([]);
   const [warmStream, setWarmStream] = useState<MediaStream | null>(null);
+  const [committedChoice, setCommittedChoice] = useState<OperatorChoice | null>(null);
 
   const actionToastTimerRef = useRef<number | null>(null);
   const spokenOpeningKeyRef = useRef<string | null>(null);
@@ -351,12 +372,13 @@ function OperatorEscalationCall({
 
   const callKey = sessionKey;
 
+  const committedChoiceInCall = committedChoice || consult?.selectedChoice || null;
+
   const openingText = useMemo(() => {
     const firstAgentTurn = consult?.turns.find((t) => t.speaker === "agent")?.text;
-    if (firstAgentTurn) return firstAgentTurn;
-    if (approval?.spoken_summary?.trim()) return approval.spoken_summary.trim();
+    if (firstAgentTurn && !firstAgentTurn.toLowerCase().includes("screen")) return firstAgentTurn;
     return DEFAULT_OPENING_QUESTION;
-  }, [approval?.spoken_summary, consult?.turns]);
+  }, [consult?.turns]);
 
   const mergedTurns = useMemo<OperatorConsultTurn[]>(() => {
     const sseTurns = consult?.turns ?? [];
@@ -432,6 +454,16 @@ function OperatorEscalationCall({
     []
   );
 
+  // Keep mobileCallOwnsAudio active throughout answered call
+  useEffect(() => {
+    if (answered && !resolvedEnd) {
+      setMobileCallOwnsAudio(true);
+    }
+    return () => {
+      setMobileCallOwnsAudio(false);
+    };
+  }, [answered, resolvedEnd]);
+
   // Call timer starts when call is answered
   useEffect(() => {
     if (!answered || resolvedEnd) return;
@@ -439,13 +471,14 @@ function OperatorEscalationCall({
     return () => window.clearInterval(t);
   }, [answered, resolvedEnd]);
 
-  // Teardown warm media stream when call ends or unmounts
+  // Teardown warm media stream when call ends or unmounts (never call t.stop())
   useEffect(() => {
     return () => {
       if (actionToastTimerRef.current) window.clearTimeout(actionToastTimerRef.current);
-      warmStream?.getTracks().forEach((tr) => tr.stop());
+      mutePersistentMicStream();
+      setMobileCallOwnsAudio(false);
     };
-  }, [warmStream]);
+  }, []);
 
   // Ringtone & vibration loop while call is incoming/ringing and unanswered
   useEffect(() => {
@@ -495,19 +528,25 @@ function OperatorEscalationCall({
     if (spokenEndKeyRef.current === key) return;
     spokenEndKeyRef.current = key;
     buzz([30, 50, 30]);
-    warmStream?.getTracks().forEach((t) => t.stop());
+    mutePersistentMicStream();
     setWarmStream(null);
+    setMobileCallOwnsAudio(false);
     if (r.voiceOn) {
       const lastAgent = [...(consult.turns ?? [])].reverse().find((t) => t.speaker === "agent");
       const textToSpeak =
         lastAgent && lastAgent.text !== openingText ? lastAgent.text : consult.end.summary;
       speakAgentLine(textToSpeak, false);
     }
-  }, [consult?.callId, consult?.end, consult?.turns, openingText, r.voiceOn, speakAgentLine, warmStream]);
+  }, [consult?.callId, consult?.end, consult?.turns, openingText, r.voiceOn, speakAgentLine]);
 
   // Core handler for API responses from /api/call/user-respond
   const processRespondResponse = useCallback(
-    (data: UserRespondApiBody, fallbackChoice: OperatorChoice | null, fallbackUserText: string) => {
+    (
+      data: UserRespondApiBody,
+      fallbackChoice: OperatorChoice | null,
+      fallbackUserText: string,
+      isPhysicalButtonTap = false
+    ) => {
       // 1. Live Voice-to-Desktop Action Toast
       if (data.ui_action) {
         const act = data.ui_action;
@@ -519,6 +558,10 @@ function OperatorEscalationCall({
             ? `Switched Desktop to ${act.table || "SQLite"} table`
             : "Desktop HUD Synchronized");
         showActionToast(`✓ ${label} on Desktop`);
+      }
+
+      if (data.choice === "refund" || data.choice === "redelivery") {
+        setCommittedChoice(data.choice as OperatorChoice);
       }
 
       const userLine = data.transcript?.trim() || fallbackUserText;
@@ -539,7 +582,7 @@ function OperatorEscalationCall({
           data.reply_text?.trim() ||
           data.reply?.trim() ||
           data.spoken_summary?.trim() ||
-          "I've updated your desktop screen. You can say 'enforce refund' or 'accept delivery' whenever you're ready.";
+          "Kappa owes 587 euros cash back, or 22 free replacements tomorrow. Which should I take?";
 
         setLocalTurns((prev) => [
           ...prev,
@@ -550,11 +593,42 @@ function OperatorEscalationCall({
         return;
       }
 
-      // Final Turn: Call ends! Apply ERP commit and transition to Call Completed screen.
+      // Final Turn: Check if a choice was actually committed during this call
+      const isCommitted = Boolean(
+        data.choice === "refund" ||
+        data.choice === "redelivery" ||
+        committedChoiceInCall ||
+        (data as { outcome?: string }).outcome === "accepted" ||
+        (fallbackChoice !== null && fallbackChoice !== undefined)
+      );
+
+      if (!isCommitted) {
+        // Early hangup / call ended without committing a choice!
+        mutePersistentMicStream();
+        setWarmStream(null);
+        setMobileCallOwnsAudio(false);
+
+        const replyText = data.reply_text?.trim() || data.confirmation_text?.trim();
+        if (isPhysicalButtonTap) {
+          stopSpeaking();
+          onEndWithoutDecision();
+        } else if (replyText) {
+          speakAgentLine(replyText, true);
+          window.setTimeout(() => {
+            onEndWithoutDecision();
+          }, 1400);
+        } else {
+          onEndWithoutDecision();
+        }
+        return;
+      }
+
+      // Choice committed: apply ERP commit and transition to Call Completed screen
       const resolvedChoice: OperatorChoice =
         data.choice === "redelivery" || data.choice === "refund"
           ? (data.choice as OperatorChoice)
-          : (data.transcript ? parseChoiceFromText(data.transcript) : null) ??
+          : committedChoiceInCall ??
+            (data.transcript ? parseChoiceFromText(data.transcript) : null) ??
             fallbackChoice ??
             "refund";
 
@@ -580,8 +654,9 @@ function OperatorEscalationCall({
       });
 
       buzz([40, 60, 40]);
-      warmStream?.getTracks().forEach((t) => t.stop());
+      mutePersistentMicStream();
       setWarmStream(null);
+      setMobileCallOwnsAudio(false);
 
       if (reqId && (r.mode === "demo" || data.resolved === false)) {
         r.decide(reqId, data.approved ?? true);
@@ -589,7 +664,7 @@ function OperatorEscalationCall({
 
       speakAgentLine(confirmation, true);
     },
-    [callKey, claimId, onSetLocalCompletion, r, reqId, showActionToast, speakAgentLine, warmStream]
+    [callKey, claimId, committedChoiceInCall, onEndWithoutDecision, onSetLocalCompletion, r, reqId, showActionToast, speakAgentLine]
   );
 
   // Dispatch audio recorded by Auto-VAD to /api/call/user-respond
@@ -626,11 +701,11 @@ function OperatorEscalationCall({
               keep_call_open: false,
               call_status: "ended",
               choice: "refund",
-              transcript: "Enforce refund and stage AADE 5.1",
+              transcript: "Demand the 587 euro refund",
               confirmation_text: defaultConfirmationFor("refund", claimId),
             },
             "refund",
-            "Enforce refund"
+            "Demand the 587 euro refund"
           );
         }
       } catch (err) {
@@ -642,11 +717,11 @@ function OperatorEscalationCall({
               keep_call_open: false,
               call_status: "ended",
               choice: "refund",
-              transcript: "Enforce refund",
+              transcript: "Demand the 587 euro refund",
               confirmation_text: defaultConfirmationFor("refund", claimId),
             },
             "refund",
-            "Enforce refund"
+            "Demand the 587 euro refund"
           );
         }
       } finally {
@@ -672,11 +747,14 @@ function OperatorEscalationCall({
     soundFx.playUiClick();
     buzz([50, 80]);
 
-    // 1. Unlock iOS Audio & SpeechSynthesis into play-and-record so mic stays 100% active
+    // 1. Mobile call owns audio
+    setMobileCallOwnsAudio(true);
+
+    // 2. Unlock iOS Audio & SpeechSynthesis into play-and-record so mic stays 100% active
     unlockAudioSession("play-and-record");
     onUnlockAudio();
 
-    // 2. Play Recoup's opening question immediately, synchronously within this tap gesture -
+    // 3. Play Recoup's opening question immediately, synchronously within this tap gesture -
     //    onEnd transitions automatically into listening! This must fire BEFORE any `await`
     //    below: delaying it behind a mic-permission prompt or a slow network round trip can
     //    lose the browser's user-activation window (iOS Safari especially), which is why
@@ -684,13 +762,13 @@ function OperatorEscalationCall({
     speakAgentLine(openingText, true);
     setAnswered(true);
 
-    // 3. Open warm mic MediaStream once (can proceed while the opening line is speaking).
-    const stream = await getWarmMicStream();
+    // 4. Open warm mic MediaStream once (can proceed while the opening line is speaking).
+    const stream = await acquirePersistentMicStream();
     if (stream) {
       setWarmStream(stream);
     }
 
-    // 4. Ensure server consult is active and notify desktop immediately via pickup. Neither
+    // 5. Ensure server consult is active and notify desktop immediately via pickup. Neither
     //    of these needs to block the opening line, so they run after it's already started.
     try {
       if (!consult?.active) {
@@ -714,13 +792,14 @@ function OperatorEscalationCall({
     }
   }, [claimId, consult?.active, consult?.callId, onUnlockAudio, openingText, reqId, speakAgentLine]);
 
-  // Red End Call Button Handler: tells server to hang up, transitions to completed summary
+  // Red End Call Button Handler: tells server to hang up, transitions cleanly
   const handleEndCall = useCallback(async () => {
     soundFx.playUiClick();
     buzz(50);
     stopSpeaking();
-    warmStream?.getTracks().forEach((t) => t.stop());
+    mutePersistentMicStream();
     setWarmStream(null);
+    setMobileCallOwnsAudio(false);
 
     try {
       const res = await fetch("/api/call/user-respond", {
@@ -738,15 +817,26 @@ function OperatorEscalationCall({
 
       if (res.ok) {
         const body = (await res.json()) as UserRespondApiBody;
-        processRespondResponse({ ...body, keep_call_open: false, call_status: "ended" }, null, "hang up");
+        processRespondResponse(
+          { ...body, keep_call_open: false, call_status: "ended" },
+          null,
+          "hang up",
+          true // isPhysicalButtonTap = true
+        );
         return;
       }
     } catch (err) {
       console.warn("End call API failed", err);
     }
 
-    // Offline / fallback summary
-    const fallbackChoice = consult?.selectedChoice ?? "refund";
+    // Offline / fallback when no choice was committed during call:
+    if (!committedChoiceInCall) {
+      onEndWithoutDecision();
+      return;
+    }
+
+    // Offline fallback if choice was committed earlier
+    const fallbackChoice = committedChoiceInCall;
     const summary = defaultConfirmationFor(fallbackChoice, claimId);
     setLocalTurns((prev) => [
       ...prev,
@@ -759,7 +849,16 @@ function OperatorEscalationCall({
       summary,
       claimId,
     });
-  }, [callKey, claimId, consult?.callId, consult?.selectedChoice, onSetLocalCompletion, processRespondResponse, reqId, warmStream]);
+  }, [
+    callKey,
+    claimId,
+    committedChoiceInCall,
+    consult?.callId,
+    onEndWithoutDecision,
+    onSetLocalCompletion,
+    processRespondResponse,
+    reqId,
+  ]);
 
   // 1-Tap Quick Trigger Backup (Pills & Sheet)
   const submitQuickTrigger = useCallback(
@@ -961,6 +1060,8 @@ function OperatorEscalationCall({
                 onClick={() => {
                   soundFx.playUiClick();
                   stopSpeaking();
+                  mutePersistentMicStream();
+                  setMobileCallOwnsAudio(false);
                   r.decide(reqId, false);
                 }}
                 className="mt-1 flex items-center gap-1.5 py-1 text-[13px] font-medium text-white/50 transition-colors hover:text-white/80"
@@ -1417,38 +1518,13 @@ function OperatorEscalationCall({
               </p>
 
               <div className="space-y-2.5">
-                {/* 1. Show AADE Tax Form on PC */}
+                {/* 1. What are my options? */}
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() =>
                     submitQuickTrigger({
-                      transcript: "Show the AADE tax form on my screen",
-                      ui_command: "open_aade",
-                    })
-                  }
-                  className="flex w-full items-center justify-between rounded-2xl border border-line bg-surface/90 px-4 py-3 text-left transition-colors hover:border-signal/50 hover:bg-surface active:scale-[0.99]"
-                >
-                  <span className="flex items-center gap-3">
-                    <FileCode2 className="h-5 w-5 text-signal" />
-                    <div>
-                      <div className="text-[13.5px] font-semibold text-ink">Show AADE Tax Form</div>
-                      <div className="text-[11.5px] text-ink-3">
-                        📄 “Show the AADE tax form on my screen”
-                      </div>
-                    </div>
-                  </span>
-                  <Chip tone="signal">open_aade</Chip>
-                </button>
-
-                {/* 2. Compare Refund vs Replacement on PC */}
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={() =>
-                    submitQuickTrigger({
-                      transcript: "Compare refund vs replacement on screen",
-                      ui_command: "compare_options",
+                      transcript: "What are my options?",
                     })
                   }
                   className="flex w-full items-center justify-between rounded-2xl border border-line bg-surface/90 px-4 py-3 text-left transition-colors hover:border-signal/50 hover:bg-surface active:scale-[0.99]"
@@ -1456,22 +1532,45 @@ function OperatorEscalationCall({
                   <span className="flex items-center gap-3">
                     <Database className="h-5 w-5 text-signal" />
                     <div>
-                      <div className="text-[13.5px] font-semibold text-ink">Compare Options</div>
+                      <div className="text-[13.5px] font-semibold text-ink">What are my options?</div>
                       <div className="text-[11.5px] text-ink-3">
-                        ⚖️ “Compare refund vs replacement on screen”
+                        ⚖️ “What are my options?”
                       </div>
                     </div>
                   </span>
-                  <Chip tone="signal">compare</Chip>
+                  <Chip tone="signal">options</Chip>
                 </button>
 
-                {/* 3. Take €587 Refund & Send Email */}
+                {/* 2. Why do they owe 587 euros? */}
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() =>
                     submitQuickTrigger({
-                      transcript: "Take the €587 refund and send the email",
+                      transcript: "Why do they owe 587 euros?",
+                    })
+                  }
+                  className="flex w-full items-center justify-between rounded-2xl border border-line bg-surface/90 px-4 py-3 text-left transition-colors hover:border-signal/50 hover:bg-surface active:scale-[0.99]"
+                >
+                  <span className="flex items-center gap-3">
+                    <FileCode2 className="h-5 w-5 text-signal" />
+                    <div>
+                      <div className="text-[13.5px] font-semibold text-ink">Why do they owe €587?</div>
+                      <div className="text-[11.5px] text-ink-3">
+                        🧮 “Why do they owe 587 euros?”
+                      </div>
+                    </div>
+                  </span>
+                  <Chip tone="signal">audit proof</Chip>
+                </button>
+
+                {/* 3. Demand the €587 refund */}
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() =>
+                    submitQuickTrigger({
+                      transcript: "Demand the 587 euro refund",
                       choice: "refund",
                     })
                   }
@@ -1481,10 +1580,10 @@ function OperatorEscalationCall({
                     <FileCheck2 className="h-5 w-5 text-ok" />
                     <div>
                       <div className="text-[13.5px] font-semibold text-ink">
-                        Take €587 Refund
+                        Demand the €587 refund
                       </div>
                       <div className="text-[11.5px] text-ink-3">
-                        ✅ “Take the €587 refund &amp; send the email”
+                        ✅ “Demand the 587 euro refund”
                       </div>
                     </div>
                   </span>
@@ -1493,13 +1592,13 @@ function OperatorEscalationCall({
                   </Chip>
                 </button>
 
-                {/* 4. Thanks, hang up */}
+                {/* 4. Hang up for now */}
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() =>
                     submitQuickTrigger({
-                      transcript: "Thanks, hang up",
+                      transcript: "Hang up for now",
                       hangup: true,
                     })
                   }
@@ -1509,10 +1608,10 @@ function OperatorEscalationCall({
                     <PhoneOff className="h-5 w-5 text-danger" />
                     <div>
                       <div className="text-[13.5px] font-semibold text-ink">
-                        End Call
+                        Hang up for now
                       </div>
                       <div className="text-[11.5px] text-ink-3">
-                        👋 “Thanks, hang up”
+                        👋 “Hang up for now”
                       </div>
                     </div>
                   </span>
@@ -1531,16 +1630,20 @@ function GateHome({
   r,
   theme,
   audioUnlocked,
+  pausedCallDecision,
   onUnlockAudio,
   onToggleTheme,
   onExit,
+  onCallRecoupBack,
 }: {
   r: RecoupRuntime;
   theme: Theme;
   audioUnlocked: boolean;
+  pausedCallDecision?: boolean;
   onUnlockAudio: () => void;
   onToggleTheme: () => void;
   onExit: () => void;
+  onCallRecoupBack?: () => void;
 }) {
   const recent = r.events.slice(-4).reverse();
   const click = (fn: () => void) => () => {
@@ -1550,7 +1653,7 @@ function GateHome({
   return (
     <div className="flex h-full flex-col">
       <StatusBar />
-      {!audioUnlocked && <AudioUnlockBanner onUnlock={onUnlockAudio} />}
+      {audioUnlocked ? <AudioArmedBadge /> : <AudioUnlockBanner onUnlock={onUnlockAudio} />}
       <div className="flex items-center justify-between px-5 pb-3 pt-2">
         <div className="flex items-center gap-2.5">
           <RecoupMark className="h-8 w-8" />
@@ -1580,8 +1683,40 @@ function GateHome({
       </div>
 
       <div className="scroll-thin flex-1 space-y-3 overflow-y-auto px-5 pb-4">
+        {/* Paused Decision Waiting Card (early hangup recovery) */}
+        {pausedCallDecision && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="rounded-3xl border border-amber-500/40 bg-amber-500/10 p-4 shadow-card"
+          >
+            <div className="flex items-center justify-between">
+              <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-amber-400">
+                Paused · Decision Pending
+              </span>
+              <Chip tone="warn">€587.30 at Stake</Chip>
+            </div>
+            <div className="mt-2 text-[15px] font-semibold leading-snug text-ink">
+              Call Ended — Decide on Desktop or Tap to Call Back
+            </div>
+            <p className="mt-1 text-[12.5px] leading-relaxed text-ink-2">
+              Shipment D-1042 decision remains pending. AP hold on INV-7781 is still active.
+            </p>
+            <div className="mt-3">
+              <button
+                type="button"
+                onClick={click(() => onCallRecoupBack?.())}
+                className={cx(btn("signal", "lg"), "h-12 w-full rounded-2xl text-[14px] font-semibold shadow-md")}
+              >
+                <PhoneCall className="h-4 w-4" />
+                📞 Call Recoup Back
+              </button>
+            </div>
+          </motion.div>
+        )}
+
         {/* Tier-1 Push Notification Card: Voice Call Waiting */}
-        {r.pendingApproval && r.pendingApproval.channel === "voice_call" && (
+        {!pausedCallDecision && r.pendingApproval && r.pendingApproval.channel === "voice_call" && (
           <motion.div
             initial={{ opacity: 0, y: -8 }}
             animate={{ opacity: 1, y: 0 }}
@@ -1790,40 +1925,32 @@ export function MobileGate({
   const [dismissedCallKey, setDismissedCallKey] = useState<string | null>(null);
   const [localCompletion, setLocalCompletion] = useState<LocalCompletion | null>(null);
   const [activeCallId, setActiveCallId] = useState<string | null>(null);
+  const [pausedCallDecision, setPausedCallDecision] = useState(false);
   const [audioUnlocked, setAudioUnlocked] = useState(() => {
     if (typeof window === "undefined") return false;
     const ctx = getSharedAudioContext();
     return ctx?.state === "running";
   });
 
-  const unlockAudio = useCallback(() => {
+  const unlockAudio = useCallback(async () => {
     soundFx.playUiClick();
     soundFx.playStageTick(0);
-    const ctx = unlockAudioSession();
-    if (ctx) {
-      if (ctx.state === "running") {
-        setAudioUnlocked(true);
-      } else {
-        ctx.resume().then(() => {
-          if (ctx.state === "running") setAudioUnlocked(true);
-        }).catch(() => {});
+    unlockAudioSession("play-and-record");
+    try {
+      const stream = await acquirePersistentMicStream();
+      if (stream) {
+        mutePersistentMicStream();
       }
+    } catch {
+      // ignore
     }
+    setAudioUnlocked(true);
   }, []);
 
   useEffect(() => {
     if (audioUnlocked) return;
     const handleGesture = () => {
-      const ctx = unlockAudioSession();
-      if (ctx) {
-        if (ctx.state === "running") {
-          setAudioUnlocked(true);
-        } else {
-          ctx.resume().then(() => {
-            if (ctx.state === "running") setAudioUnlocked(true);
-          }).catch(() => {});
-        }
-      }
+      unlockAudio();
     };
     window.addEventListener("touchstart", handleGesture, { passive: true, once: true });
     window.addEventListener("click", handleGesture, { passive: true, once: true });
@@ -1831,7 +1958,7 @@ export function MobileGate({
       window.removeEventListener("touchstart", handleGesture);
       window.removeEventListener("click", handleGesture);
     };
-  }, [audioUnlocked]);
+  }, [audioUnlocked, unlockAudio]);
 
   useEffect(() => {
     const fit = () => {
@@ -1861,6 +1988,7 @@ export function MobileGate({
       setLocalCompletion(null);
       setActiveCallId(null);
       setDismissedCallKey(null);
+      setPausedCallDecision(false);
     }
   }, [r.events.length]);
 
@@ -1872,6 +2000,36 @@ export function MobileGate({
 
   const currentSessionKey =
     consult?.callId ?? activeCallId ?? r.pendingApproval?.req_id ?? localCompletion?.sessionKey ?? "session-d-1042";
+
+  const handleEndWithoutDecision = useCallback(() => {
+    setLocalCompletion(null);
+    setActiveCallId(null);
+    setDismissedCallKey(currentSessionKey);
+    setPausedCallDecision(true);
+    mutePersistentMicStream();
+    setMobileCallOwnsAudio(false);
+  }, [currentSessionKey]);
+
+  const handleCallRecoupBack = useCallback(async () => {
+    soundFx.playUiClick();
+    buzz([40, 60]);
+    setPausedCallDecision(false);
+    setDismissedCallKey(null);
+    unlockAudioSession("play-and-record");
+    try {
+      await fetch("/api/call/user-consult", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          req_id: r.pendingApproval?.req_id,
+          claim_id: DEFAULT_CLAIM_ID,
+        }),
+      });
+    } catch {
+      // offline
+    }
+    setActiveCallId(`CONSULT-${DEFAULT_CLAIM_ID}`);
+  }, [r.pendingApproval?.req_id]);
 
   // Keep live call UI rendering as long as operatorConsult is active or local call is active,
   // even after pendingApproval becomes null upon stage commit!
@@ -1892,9 +2050,11 @@ export function MobileGate({
         r={r}
         theme={theme}
         audioUnlocked={audioUnlocked}
+        pausedCallDecision={pausedCallDecision}
         onUnlockAudio={unlockAudio}
         onToggleTheme={onToggleTheme}
         onExit={onExit}
+        onCallRecoupBack={handleCallRecoupBack}
       />
       <AnimatePresence>
         {showEscalationScreen && (
@@ -1912,6 +2072,7 @@ export function MobileGate({
               setActiveCallId(null);
               setDismissedCallKey(currentSessionKey);
             }}
+            onEndWithoutDecision={handleEndWithoutDecision}
           />
         )}
       </AnimatePresence>

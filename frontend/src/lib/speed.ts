@@ -13,6 +13,8 @@ export interface PaceProfile {
   /** Pacing duration aliases */
   typeMs?: number;
   holdMs?: number;
+  forgeTypeMs?: number;
+  forgeHoldMs?: number;
 }
 
 export const PACE: Record<Speed, PaceProfile> = {
@@ -26,6 +28,8 @@ export const PACE: Record<Speed, PaceProfile> = {
     rewind: 2600,
     typeMs: 1300,
     holdMs: 1900,
+    forgeTypeMs: 2400,
+    forgeHoldMs: 1800,
   },
   "1x": {
     label: "1x",
@@ -37,6 +41,8 @@ export const PACE: Record<Speed, PaceProfile> = {
     rewind: 1600,
     typeMs: 650,
     holdMs: 950,
+    forgeTypeMs: 1500,
+    forgeHoldMs: 1300,
   },
   "2x": {
     label: "2x",
@@ -48,6 +54,8 @@ export const PACE: Record<Speed, PaceProfile> = {
     rewind: 1000,
     typeMs: 325,
     holdMs: 475,
+    forgeTypeMs: 900,
+    forgeHoldMs: 800,
   },
   turbo: {
     label: "Turbo",
@@ -59,5 +67,7 @@ export const PACE: Record<Speed, PaceProfile> = {
     rewind: 600,
     typeMs: 180,
     holdMs: 220,
+    forgeTypeMs: 400,
+    forgeHoldMs: 300,
   },
 };

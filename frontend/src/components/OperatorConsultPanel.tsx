@@ -91,13 +91,24 @@ export function OperatorConsultPanel({
 
   const activeReqId = pendingApproval?.req_id ?? consult?.reqId ?? null;
 
+  const hasCommitted = Boolean(
+    consult?.selectedChoice === "refund" ||
+      consult?.selectedChoice === "redelivery" ||
+      Boolean(committedClaimId) ||
+      consult?.end?.outcome === "accepted"
+  );
+
   // Check if call ended without decision while pendingApproval is still active
   const callEndedWithoutDecision = Boolean(
     pendingApproval &&
+      !hasCommitted &&
       consult &&
       (
-        (consult.end && (consult.end.outcome === "escalated" || consult.end.outcome === "no_answer" || !consult.active)) ||
-        (!consult.active && !consult.ringing && consult.turns.length > 0 && !consult.selectedChoice)
+        consult.end?.outcome === "escalated" ||
+        consult.end?.outcome === "no_answer" ||
+        consult.callStatus === "ended" ||
+        extConsult?.callStatus === "ended" ||
+        (!consult.active && !consult.ringing && consult.turns.length > 0)
       )
   );
 
@@ -105,8 +116,10 @@ export function OperatorConsultPanel({
   const isRinging = Boolean(
     !callEndedWithoutDecision &&
       !consult?.end &&
+      consult?.callStatus !== "ended" &&
       extConsult?.callStatus !== "ended" &&
       consult?.ringing &&
+      consult?.callStatus !== "connected" &&
       extConsult?.callStatus !== "connected" &&
       consult.turns.length <= 1
   );
@@ -114,19 +127,29 @@ export function OperatorConsultPanel({
   const isConnected = Boolean(
     !callEndedWithoutDecision &&
       !consult?.end &&
+      consult?.callStatus !== "ended" &&
       extConsult?.callStatus !== "ended" &&
       consult &&
-      (extConsult?.callStatus === "connected" ||
+      (consult.callStatus === "connected" ||
+        extConsult?.callStatus === "connected" ||
         consult.turns.some((t) => t.speaker === "user") ||
         (!consult.ringing && consult.active))
   );
 
   const callLive = isRinging || isConnected;
+
+  const isExecutedLive = Boolean(
+    (consult?.selectedChoice === "refund" || consult?.selectedChoice === "redelivery" || Boolean(committedClaimId)) &&
+      (consult?.active || isConnected || isRinging)
+  );
+
   const callCompleted = Boolean(
     !callEndedWithoutDecision &&
+      !isExecutedLive &&
       ((!pendingApproval && committedClaimId) ||
-        (!pendingApproval && consult?.selectedChoice) ||
-        (!pendingApproval && consult?.end?.outcome === "accepted"))
+        (!pendingApproval && consult?.selectedChoice && !consult?.active) ||
+        (!pendingApproval && consult?.end?.outcome === "accepted") ||
+        (hasCommitted && consult?.end?.outcome === "accepted"))
   );
 
   const isHighStakesApproval = Boolean(
@@ -206,7 +229,20 @@ export function OperatorConsultPanel({
     onEscalateToPhone(reqId, claimId);
   }, [claimId, countdownActive, countdownPaused, onEscalateToPhone, pendingApproval, remainingMs]);
 
-  const turnsCount = consult?.turns.length ?? 0;
+  const sanitizedTurns = useMemo(() => {
+    if (!consult?.turns) return [];
+    return consult.turns.map((turn) => {
+      if (turn.speaker === "agent" && !hasCommitted && /saved with one-click undo/i.test(turn.text)) {
+        return {
+          ...turn,
+          text: "No problem—I'll keep everything safely paused until you're back at your desk. Talk soon!",
+        };
+      }
+      return turn;
+    });
+  }, [consult?.turns, hasCommitted]);
+
+  const turnsCount = sanitizedTurns.length;
   useEffect(() => {
     if (transcriptRef.current && turnsCount > 0) {
       transcriptRef.current.scrollTo({ top: transcriptRef.current.scrollHeight, behavior: "smooth" });
@@ -217,7 +253,9 @@ export function OperatorConsultPanel({
 
   const resolvedChoice = inferChoice(consult, committedClaimId);
 
-  const panelTitle = callEndedWithoutDecision
+  const panelTitle = isExecutedLive
+    ? `On Call with You · ${callDurationStr}`
+    : callEndedWithoutDecision
     ? "Decision Gate · Awaiting PC Decision"
     : isConnected
     ? `On Call with You · ${callDurationStr}`
@@ -239,7 +277,9 @@ export function OperatorConsultPanel({
       <Panel
         title={panelTitle}
         icon={
-          callEndedWithoutDecision ? (
+          isExecutedLive ? (
+            <Smartphone className="text-ok" />
+          ) : callEndedWithoutDecision ? (
             <Smartphone className="text-warn" />
           ) : isConnected ? (
             <Smartphone className="text-ok" />
@@ -250,7 +290,11 @@ export function OperatorConsultPanel({
           )
         }
         meta={
-          callEndedWithoutDecision ? (
+          isExecutedLive ? (
+            <Chip tone="ok" className="font-mono text-[10px] font-bold ring-1 ring-ok/60 shadow-[0_0_12px_rgba(16,185,129,0.35)]">
+              <Dot tone="ok" live /> ✓ EXECUTED LIVE VIA IPHONE VOICE · UNDO READY
+            </Chip>
+          ) : callEndedWithoutDecision ? (
             <Chip tone="warn" className="font-mono text-[10px]">
               <Dot tone="warn" live /> AWAITING PC DECISION
             </Chip>
@@ -264,7 +308,7 @@ export function OperatorConsultPanel({
             </Chip>
           ) : callCompleted ? (
             <Chip tone="ok" className="font-mono text-[10px]">
-              RESOLVED
+              RESOLVED · UNDO READY
             </Chip>
           ) : (
             <Chip tone="danger" className="font-mono text-[10px]">
@@ -280,7 +324,9 @@ export function OperatorConsultPanel({
           ) : null
         }
         pulseTone={
-          callCompleted
+          isExecutedLive
+            ? "ok"
+            : callCompleted
             ? "ok"
             : callEndedWithoutDecision
             ? "warn"
@@ -293,11 +339,29 @@ export function OperatorConsultPanel({
       >
         <div className="space-y-2 p-2.5">
           {/* 1. 1-Line Live Call Banner */}
-          {callEndedWithoutDecision ? (
+          {isExecutedLive ? (
+            <div className="flex h-7 items-center justify-between rounded-lg border border-ok/70 bg-ok/15 px-2.5 text-[11.5px] shadow-[0_0_12px_rgba(16,185,129,0.25)]">
+              <div className="flex min-w-0 items-center gap-1.5 font-bold text-ok">
+                <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-ok" />
+                <span className="truncate">
+                  ✓ EXECUTED LIVE VIA IPHONE VOICE · UNDO READY:{" "}
+                  <span className="font-semibold text-ink">
+                    {resolvedChoice === "redelivery"
+                      ? "22 Replacement Hubs + €202.30 Credit + AADE 9.3"
+                      : "€587.30 Refund + AADE 5.1 + Kappa Emailed"}
+                  </span>
+                </span>
+              </div>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <VoiceOrb variant="bars" tone="ok" className="h-3 w-8" />
+                <span className="font-mono text-[10px] font-semibold text-ok">{callDurationStr}</span>
+              </div>
+            </div>
+          ) : callEndedWithoutDecision ? (
             <div className="flex h-7 items-center justify-between rounded-lg border border-warn/45 bg-warn/15 px-2.5 text-[11px] text-warn">
               <div className="flex min-w-0 items-center gap-1.5 font-semibold text-warn">
                 <Smartphone className="h-3.5 w-3.5 shrink-0 text-warn" />
-                <span className="truncate">Call Ended Without Decision — Click an Option Below on PC (or Call Again)</span>
+                <span className="truncate">Paused — Call Ended Without Decision (Choose Below or Call Again)</span>
               </div>
               <div className="flex shrink-0 items-center gap-1">
                 <button
@@ -388,7 +452,7 @@ export function OperatorConsultPanel({
           </div>
 
           {/* 3. 2 Big Clear Choice Buttons Side-by-Side (whenever unresolved) */}
-          {(!callCompleted || pendingApproval) && (
+          {(!callCompleted && !isExecutedLive) && (
             <div className="space-y-1">
               <div className="grid grid-cols-2 gap-2">
                 {/* Button 1: ✅ Refund €587.30 */}
@@ -459,13 +523,13 @@ export function OperatorConsultPanel({
           )}
 
           {/* 4. Compact Live Phone Chat (max-h-[120px] overflow-y-auto scroll-thin) */}
-          {consult && (consult.active || consult.ringing || consult.turns.length > 0 || consult.end) && (
+          {consult && (consult.active || consult.ringing || sanitizedTurns.length > 0 || consult.end) && (
             <div
               ref={transcriptRef}
               className="scroll-thin max-h-[120px] space-y-1.5 overflow-y-auto rounded-lg border border-line bg-sunken/40 p-2"
               aria-live="polite"
             >
-              {consult.turns.length === 0 && (consult.ringing || consult.active) && (
+              {sanitizedTurns.length === 0 && (consult.ringing || consult.active) && (
                 <div className="flex items-center justify-center gap-1.5 py-2 font-mono text-[11px] text-ink-2">
                   <Dot tone="signal" live />
                   <span>Ringing your iPhone… Hands-free Grok Voice ready</span>
@@ -473,12 +537,12 @@ export function OperatorConsultPanel({
               )}
 
               <AnimatePresence initial={false}>
-                {consult.turns.map((turn, idx) => {
+                {sanitizedTurns.map((turn, idx) => {
                   const isUser = turn.speaker === "user";
                   const isActiveAgentTurn =
                     !isUser &&
                     (consult.activeSpeaker === "agent" || speaking) &&
-                    idx === consult.turns.length - 1;
+                    idx === sanitizedTurns.length - 1;
                   return (
                     <motion.div
                       key={`${consult.callId}-turn-${idx}`}

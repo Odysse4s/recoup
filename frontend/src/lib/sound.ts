@@ -551,6 +551,7 @@ export const soundFx = {
   playWindowPop: engine.playWindowPop,
   playWindowDock: engine.playWindowDock,
   playForgeStart: engine.playForgeStart,
+  playForgeAnvilClang: engine.playForgeStart,
   playForgePass: engine.playForgePass,
   playRiskGateAlert: engine.playRiskGateAlert,
   playIncomingCall: engine.playIncomingCall,

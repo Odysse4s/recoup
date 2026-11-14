@@ -179,6 +179,10 @@ def _record_direct_voice_cost(text: str) -> float:
 async def lifespan(_app: FastAPI):
     global SHUTDOWN_EVENT
     SHUTDOWN_EVENT = asyncio.Event()
+    if "PYTEST_CURRENT_TEST" not in os.environ:
+        pw_fn = _get_call_audio_member("prewarm_stage_call_tts")
+        if callable(pw_fn):
+            asyncio.create_task(_offload_blocking(pw_fn))
     try:
         yield
     finally:
@@ -233,11 +237,14 @@ def _read_ws_files(root_dir: Path, db_path: Path) -> dict[str, str]:
 
 @app.get("/api/health")
 def health():
+    mem_cache = _get_call_audio_member("_MEM_TTS_CACHE", {})
     return {
         "ok": True,
+        "status": "healthy",
         "brand": brand()["brand_name"],
         "tools": list(REGISTRY),
         "fingerprint": fingerprint_env(REAL)[:12],
+        "tts_mem_cache_size": len(mem_cache) if hasattr(mem_cache, "__len__") else 0,
     }
 
 
@@ -480,6 +487,15 @@ class DemoRunRequest(BaseModel):
     anticipate_after: bool = True
 
 
+DEFAULT_CONSULT_OPENING_TEXT = (
+    "Hey! Kappa's delivery is short 22 hubs—they owe us 587 euros. Should I demand the full refund, or take replacement hubs?"
+)
+
+
+def _consult_summary() -> str:
+    return DEFAULT_CONSULT_OPENING_TEXT
+
+
 FORGED_SUPPLIER_CLAIM_CODE = '''"""Forged tool: compute_supplier_claim."""
 def compute_supplier_claim(args: dict) -> dict:
     overcharge = float(args.get("overcharge", 168.00))
@@ -503,6 +519,11 @@ async def _run_stage_demo(
     anticipate_after: bool,
     rehearsal_env: Env,
 ) -> None:
+    if "PYTEST_CURRENT_TEST" not in os.environ:
+        pw_fn = _get_call_audio_member("prewarm_stage_call_tts")
+        if callable(pw_fn):
+            asyncio.create_task(_offload_blocking(pw_fn))
+
     async def _pace():
         if pace_ms > 0:
             await asyncio.sleep(pace_ms / 1000.0)
@@ -823,10 +844,7 @@ async def _run_stage_demo(
             args=email_args,
             diff_preview=previews.get(call_e.id, f"EMAIL to={email_args['to']} subject={email_args['subject']!r}"),
             risk_reason="Claim CLM-D-1042 is EUR 587.30 (>= EUR 250 threshold) & sends external vendor email",
-            spoken_summary=(
-                "Check delivery D-1042 from Kappa Office Systems — "
-                "22 hubs arrived missing or broken and invoice INV-7781 is overcharged"
-            ),
+            spoken_summary=DEFAULT_CONSULT_OPENING_TEXT,
             channel="voice_call",
             report=report,
         )
@@ -1023,6 +1041,10 @@ async def demo_run(req: DemoRunRequest | None = None):
     ACTIVE_CALL = None
 
     run_id = f"demo_{uuid.uuid4().hex[:6]}"
+    if "PYTEST_CURRENT_TEST" not in os.environ:
+        pw_fn = _get_call_audio_member("prewarm_stage_call_tts")
+        if callable(pw_fn):
+            asyncio.create_task(_offload_blocking(pw_fn))
     rehearsal_env = make_rehearsal_env(REAL)
     STAGE_DEMO_TASK = asyncio.create_task(
         _run_stage_demo(
@@ -2769,9 +2791,7 @@ async def start_user_consult_call(request: Request):
 
     call_id = f"CONSULT-{claim_id}"
     run_id = f"consult_{uuid.uuid4().hex[:6]}"
-    opening_text = (
-        "Hey! Delivery D-1042 has 22 bad hubs—Kappa owes us 587 euros. Want me to pull it up on your screen?"
-    )
+    opening_text = DEFAULT_CONSULT_OPENING_TEXT
 
     channel = str(body.get("channel") or "voice_call")
     if channel not in ("notification", "voice_call"):
@@ -2875,27 +2895,27 @@ class UserRespondBody(BaseModel):
 
 
 _HANGUP_INTENT_RE = re.compile(
-    r"\b(hang\s*up|bye|goodbye|no\s+thanks|nothing\s+else|that'?s\s+all|that\s+is\s+all|we'?re\s+good|we\s+are\s+good|all\s+good|close)\b",
+    r"\b(hang\s*up|bye|goodbye|no\s+thanks|nothing\s+else|that'?s\s+all|that\s+is\s+all|we'?re\s+good|we\s+are\s+good|all\s+good|close|call\s+(?:you\s+)?back|decide\s+later|not\s+now)\b",
     re.IGNORECASE,
 )
 _COMPARE_INTENT_RE = re.compile(
-    r"\b(compare|what\s+if|difference|vs|versus|why|ledger|database|table|options)\b",
+    r"\b(options|what\s+are\s+(?:my|the|our)\s+options|compare|break\s+it\s+down|difference|explain|what\s+if|vs|versus|database|ledger|table)\b",
     re.IGNORECASE,
 )
-_EMAIL_INTENT_RE = re.compile(
-    r"\b(email|mail|letter|claim|draft)\b",
+_WHY_INTENT_RE = re.compile(
+    r"\b(why\s+(?:587|do\s+they\s+owe|they\s+owe)|how\s+did\s+you\s+calculate|how\s+was\s+this\s+calculated|proof|missing|broken)\b",
     re.IGNORECASE,
 )
-_AADE_INTENT_RE = re.compile(
-    r"\b(proof|yes|yeah|yep|sure|pull\s+it\s+up|show|aade|mydata|xml|tax|form|screen)\b",
+_STAGED_INFO_RE = re.compile(
+    r"\b(tax|taxes|aade|mydata|xml|email|mail|letter|invoice|staged)\b",
     re.IGNORECASE,
 )
 _COMMIT_REFUND_RE = re.compile(
-    r"\b(refund|587|enforce|send|approve|take|credit|freeze|hold|option\s+b)\b",
+    r"\b(refund|cash\s+back|first\s+option|approve|demand|go\s+ahead\s+and\s+refund|full\s+refund|take\s+(?:the\s+)?refund|demand\s+(?:the\s+)?refund|enforce|option\s+b)\b",
     re.IGNORECASE,
 )
 _COMMIT_REDELIVERY_RE = re.compile(
-    r"\b(replacement|replacements|replace|redeliver|redelivery|re-deliver|re-delivery|202|hubs|option\s+a)\b",
+    r"\b(replace|replacement|replacements|redeliver|redelivery|re-deliver|re-delivery|22\s+units|22\s+hubs|tomorrow|second\s+option|take\s+(?:the\s+)?replacement|take\s+(?:the\s+)?replacements|202|option\s+a)\b",
     re.IGNORECASE,
 )
 
@@ -3011,21 +3031,36 @@ async def handle_user_consult_response(request: Request):
                 "call_status": "connected",
                 "ignored_noise": True,
                 "choice": None,
+                "outcome": None,
                 "transcript": "",
             }
 
-    # Intent 1: Hang Up Intent FIRST (explicit hangup flag without commit choice or matching hangup phrasing)
+    # Intent 1: Hang Up Intent FIRST
+    has_committed = bool(ACTIVE_CALL and ACTIVE_CALL.get("selected_choice") in ("refund", "redelivery"))
+    is_escalated_choice = explicit_choice == "escalated"
     has_commit_words = bool(
         explicit_choice in ("refund", "redelivery")
         or _COMMIT_REFUND_RE.search(lowered)
+        or (re.search(r"\b587\b", lowered) and not _WHY_INTENT_RE.search(lowered))
         or _COMMIT_REDELIVERY_RE.search(lowered)
     )
     is_hangup_text = bool(_HANGUP_INTENT_RE.search(lowered)) if lowered else False
-    is_pure_hangup = (hangup and not has_commit_words) or (is_hangup_text and not has_commit_words)
+    is_pure_hangup = is_escalated_choice or ((hangup and not has_commit_words) or (is_hangup_text and not has_commit_words))
+
     if is_pure_hangup:
-        has_committed = bool(ACTIVE_CALL and ACTIVE_CALL.get("selected_choice") in ("refund", "redelivery"))
-        outcome: Literal["accepted", "escalated"] = "accepted" if has_committed else "escalated"
-        agreed_amount = ACTIVE_CALL.get("agreed_amount") if (has_committed and ACTIVE_CALL) else None
+        if is_escalated_choice:
+            has_committed = False
+
+        if has_committed:
+            outcome: Literal["accepted", "escalated"] = "accepted"
+            agreed_amount = ACTIVE_CALL.get("agreed_amount") if ACTIVE_CALL else None
+            hangup_reply = "Awesome—everything's applied and undo-protected. Talk soon!"
+            summary_text = "Call closed by operator."
+        else:
+            outcome = "escalated"
+            agreed_amount = None
+            hangup_reply = "No problem—I'll keep everything safely paused until you're back at your desk. Talk soon!"
+            summary_text = "Consult call ended without decision; escalated."
 
         if transcript:
             user_turn = CallTurnPayload(
@@ -3044,7 +3079,6 @@ async def handle_user_consult_response(request: Request):
                 cost_eur=_voice_micro_cost(transcript) if stt_ran else 0.0,
             )
 
-        hangup_reply = "Got it—everything's saved with one-click undo. Talk soon!"
         agent_turn = CallTurnPayload(
             call_id=call_id,
             speaker="agent",
@@ -3066,7 +3100,7 @@ async def handle_user_consult_response(request: Request):
             call_id=call_id,
             outcome=outcome,
             agreed_amount=agreed_amount,
-            summary="Call closed by operator." if has_committed else "Consult call ended without decision; escalated.",
+            summary=summary_text,
         )
         BUS.emit(
             run_id,
@@ -3096,7 +3130,8 @@ async def handle_user_consult_response(request: Request):
             "call_id": call_id,
             "keep_call_open": False,
             "call_status": "ended",
-            "choice": ACTIVE_CALL.get("selected_choice") if ACTIVE_CALL else None,
+            "choice": ACTIVE_CALL.get("selected_choice") if has_committed else None,
+            "outcome": outcome,
             "transcript": transcript,
             "reply_text": hangup_reply,
             "confirmation_text": hangup_reply,
@@ -3104,90 +3139,177 @@ async def handle_user_consult_response(request: Request):
             "ui_action": None,
         }
 
-    # Intent 2: Compare / ledger / why (checked BEFORE commit keywords)
-    is_compare_intent = (
-        explicit_choice not in ("refund", "redelivery")
-        and (
-            ui_command == "open_db"
+    # Questions & UI Exploration (only if not an explicit button commit)
+    if explicit_choice not in ("refund", "redelivery"):
+        # Intent 2: Compare / options / break it down
+        is_compare_intent = (
+            ui_command in ("open_db", "compare_options")
             or bool(_COMPARE_INTENT_RE.search(lowered))
         )
-    )
-    if is_compare_intent:
-        ui_action = UiActionPayload(
-            action="switch_view",
-            view="db",
-            table="invoices",
-            label="Switched to invoices table on Desktop",
-        ).model_dump(exclude_none=True)
-        if not transcript:
-            transcript = "Compare refund versus replacement on my screen."
+        if is_compare_intent:
+            ui_action = UiActionPayload(
+                action="switch_view",
+                view="db",
+                table="invoices",
+                label="Comparing options in Ledger",
+            ).model_dump(exclude_none=True)
+            if not transcript:
+                transcript = "What are my options?"
 
-        user_turn = CallTurnPayload(
-            call_id=call_id,
-            speaker="user",
-            text=transcript,
-            keep_call_open=True,
-            call_status="connected",
-        )
-        BUS.emit(
-            run_id,
-            EventType.CALL_TURN,
-            user_turn.model_dump(),
-            step=2,
-            thought=f"Operator: {transcript}",
-            cost_eur=_voice_micro_cost(transcript) if stt_ran else 0.0,
-        )
+            user_turn = CallTurnPayload(
+                call_id=call_id,
+                speaker="user",
+                text=transcript,
+                keep_call_open=True,
+                call_status="connected",
+            )
+            BUS.emit(
+                run_id,
+                EventType.CALL_TURN,
+                user_turn.model_dump(),
+                step=2,
+                thought=f"Operator: {transcript}",
+                cost_eur=_voice_micro_cost(transcript) if stt_ran else 0.0,
+            )
 
-        reply_text = "Switched your screen to the invoice table: 587 euros cash back today, or 22 free replacements tomorrow."
-        agent_turn = CallTurnPayload(
-            call_id=call_id,
-            speaker="agent",
-            text=reply_text,
-            audio_url="/api/voice/turn-audio",
-            keep_call_open=True,
-            call_status="connected",
-            ui_action=ui_action,
-        )
-        BUS.emit(
-            run_id,
-            EventType.CALL_TURN,
-            agent_turn.model_dump(),
-            step=3,
-            thought=f"Recoup Agent: {reply_text}",
-            cost_eur=_voice_micro_cost(reply_text),
-        )
+            reply_text = (
+                "Full refund gets us 587 euros cash back today and freezes their invoice. "
+                "Or they ship 22 free hubs tomorrow plus a 202 euro credit. Which one?"
+            )
+            agent_turn = CallTurnPayload(
+                call_id=call_id,
+                speaker="agent",
+                text=reply_text,
+                audio_url="/api/voice/turn-audio",
+                keep_call_open=True,
+                call_status="connected",
+                ui_action=ui_action,
+            )
+            BUS.emit(
+                run_id,
+                EventType.CALL_TURN,
+                agent_turn.model_dump(),
+                step=3,
+                thought=f"Recoup Agent: {reply_text}",
+                cost_eur=_voice_micro_cost(reply_text),
+            )
 
-        ACTIVE_CALL["active"] = True
-        ACTIVE_CALL["ringing"] = False
-        ACTIVE_CALL["call_status"] = "connected"
-        ACTIVE_CALL["last_ui_action"] = ui_action
-        call_turns = ACTIVE_CALL.setdefault("turns", [])
-        call_turns.append({"speaker": "user", "text": transcript, "audio_url": None, "ts": time.time()})
-        call_turns.append(
-            {
-                "speaker": "agent",
-                "text": reply_text,
-                "audio_url": "/api/voice/turn-audio",
-                "ts": time.time(),
+            ACTIVE_CALL["active"] = True
+            ACTIVE_CALL["ringing"] = False
+            ACTIVE_CALL["call_status"] = "connected"
+            ACTIVE_CALL["last_ui_action"] = ui_action
+            call_turns = ACTIVE_CALL.setdefault("turns", [])
+            call_turns.append({"speaker": "user", "text": transcript, "audio_url": None, "ts": time.time()})
+            call_turns.append(
+                {
+                    "speaker": "agent",
+                    "text": reply_text,
+                    "audio_url": "/api/voice/turn-audio",
+                    "ts": time.time(),
+                    "ui_action": ui_action,
+                }
+            )
+
+            return {
+                "ok": True,
+                "call_id": call_id,
+                "keep_call_open": True,
+                "call_status": "connected",
+                "choice": None,
+                "outcome": None,
+                "transcript": transcript,
+                "reply_text": reply_text,
+                "confirmation_text": reply_text,
+                "agreed_amount": None,
+                "aade_xml_path": f"aade/mydata_{claim_id}.xml",
                 "ui_action": ui_action,
             }
+
+        # Intent 3: Why 587 / Proof / Missing / Broken
+        is_why_intent = (
+            ui_command == "open_receiving_note"
+            or bool(_WHY_INTENT_RE.search(lowered))
+            or (bool(re.search(r"\bwhy\b", lowered)) and "option" not in lowered)
         )
+        if is_why_intent:
+            ui_action = UiActionPayload(
+                action="open_file",
+                path="deliveries/D-1042_receiving_note.md",
+                label="Opening delivery receiving note",
+            ).model_dump(exclude_none=True)
+            if not transcript:
+                transcript = "Why do they owe 587?"
 
-        return {
-            "ok": True,
-            "call_id": call_id,
-            "keep_call_open": True,
-            "call_status": "connected",
-            "choice": None,
-            "transcript": transcript,
-            "reply_text": reply_text,
-            "confirmation_text": reply_text,
-            "agreed_amount": None,
-            "aade_xml_path": f"aade/mydata_{claim_id}.xml",
-            "ui_action": ui_action,
-        }
+            user_turn = CallTurnPayload(
+                call_id=call_id,
+                speaker="user",
+                text=transcript,
+                keep_call_open=True,
+                call_status="connected",
+            )
+            BUS.emit(
+                run_id,
+                EventType.CALL_TURN,
+                user_turn.model_dump(),
+                step=2,
+                thought=f"Operator: {transcript}",
+                cost_eur=_voice_micro_cost(transcript) if stt_ran else 0.0,
+            )
 
-    # Intent 3: Commit Refund or Replacement (check BEFORE show email/show aade when commit words are present)
+            reply_text = (
+                "Sixteen missing hubs, six broken, unit overbilling on invoice 7781, "
+                "plus a two-day late penalty—totaling 587 euros and 30 cents. Refund or replacements?"
+            )
+            agent_turn = CallTurnPayload(
+                call_id=call_id,
+                speaker="agent",
+                text=reply_text,
+                audio_url="/api/voice/turn-audio",
+                keep_call_open=True,
+                call_status="connected",
+                ui_action=ui_action,
+            )
+            BUS.emit(
+                run_id,
+                EventType.CALL_TURN,
+                agent_turn.model_dump(),
+                step=3,
+                thought=f"Recoup Agent: {reply_text}",
+                cost_eur=_voice_micro_cost(reply_text),
+            )
+
+            ACTIVE_CALL["active"] = True
+            ACTIVE_CALL["ringing"] = False
+            ACTIVE_CALL["call_status"] = "connected"
+            ACTIVE_CALL["last_ui_action"] = ui_action
+            call_turns = ACTIVE_CALL.setdefault("turns", [])
+            call_turns.append({"speaker": "user", "text": transcript, "audio_url": None, "ts": time.time()})
+            call_turns.append(
+                {
+                    "speaker": "agent",
+                    "text": reply_text,
+                    "audio_url": "/api/voice/turn-audio",
+                    "ts": time.time(),
+                    "ui_action": ui_action,
+                }
+            )
+
+            return {
+                "ok": True,
+                "call_id": call_id,
+                "keep_call_open": True,
+                "call_status": "connected",
+                "choice": None,
+                "outcome": None,
+                "transcript": transcript,
+                "reply_text": reply_text,
+                "confirmation_text": reply_text,
+                "agreed_amount": None,
+                "aade_xml_path": f"aade/mydata_{claim_id}.xml",
+                "ui_action": ui_action,
+            }
+
+    # Intent 4: Commit Refund or Replacement (check BEFORE show email/show aade when commit words are present)
     custom_hook = _get_call_audio_member("parse_user_resolution_intent")
     hook_result = custom_hook(transcript) if callable(custom_hook) else None
 
@@ -3196,10 +3318,18 @@ async def handle_user_consult_response(request: Request):
         choice = hook_result["choice"]
     elif explicit_choice in ("refund", "redelivery"):
         choice = explicit_choice  # type: ignore[assignment]
-    elif _COMMIT_REDELIVERY_RE.search(lowered):
-        choice = "redelivery"
-    elif _COMMIT_REFUND_RE.search(lowered):
-        choice = "refund"
+    else:
+        is_not_compare_question = not bool(
+            re.search(r"\b(compare|what\s+are\s+(?:my|the|our)\s+options|short\s+22\s+hubs)\b", lowered)
+        )
+        if is_not_compare_question and (
+            _COMMIT_REDELIVERY_RE.search(lowered) or bool(re.search(r"\b202\b", lowered))
+        ):
+            choice = "redelivery"
+        elif _COMMIT_REFUND_RE.search(lowered) or (
+            bool(re.search(r"\b587\b", lowered)) and not _WHY_INTENT_RE.search(lowered)
+        ):
+            choice = "refund"
 
     if choice is not None:
         if not transcript:
@@ -3332,6 +3462,8 @@ async def handle_user_consult_response(request: Request):
         ui_action = UiActionPayload(
             action="commit_resolution",
             choice=choice,
+            view="db",
+            table="claims",
             label=(
                 "Committed €587.30 Refund + AADE 5.1"
                 if choice == "refund"
@@ -3341,14 +3473,16 @@ async def handle_user_consult_response(request: Request):
 
         if choice == "refund":
             confirmation_text = (
-                "Done! Froze invoice 7781 and emailed Kappa for the 587 euro refund. Need anything else before we hang up?"
+                "On it—freezing invoice 7781, filing the 587 euro AADE tax credit, "
+                "and emailing Kappa right now! All done. Need anything else?"
             )
             summary_text = (
                 f"Enforced EUR 587.30 refund hold on {claim_id} and staged AADE myDATA 5.1 credit note."
             )
         else:
             confirmation_text = (
-                "Done! Booked 22 replacement hubs for tomorrow plus the 202 euro credit. Anything else before we hang up?"
+                "Got it—locking in 22 free replacement hubs for tomorrow morning "
+                "plus the 202 euro credit, and emailing Kappa now! Anything else?"
             )
             summary_text = (
                 f"Scheduled next-day replacement for 22 hubs on {claim_id} + EUR 202.30 credit (AADE myDATA 9.3)."
@@ -3370,6 +3504,19 @@ async def handle_user_consult_response(request: Request):
             step=3,
             thought=f"Recoup Agent: {confirmation_text}",
             cost_eur=_voice_micro_cost(confirmation_text),
+        )
+
+        BUS.emit(
+            run_id,
+            EventType.RUN_DONE,
+            {
+                "outcome": "committed",
+                "choice": choice,
+                "claim_id": claim_id,
+                "agreed_amount": agreed_amount,
+                "summary": summary_text,
+            },
+            thought=f"Live operator consult commit: {summary_text}",
         )
 
         if hangup:
@@ -3394,6 +3541,7 @@ async def handle_user_consult_response(request: Request):
         ACTIVE_CALL["call_status"] = call_status
         ACTIVE_CALL["last_ui_action"] = ui_action
         ACTIVE_CALL["selected_choice"] = choice
+        ACTIVE_CALL["has_committed"] = True
         ACTIVE_CALL["agreed_amount"] = agreed_amount
         ACTIVE_CALL["aade_xml_path"] = aade_xml_path
 
@@ -3425,30 +3573,43 @@ async def handle_user_consult_response(request: Request):
             "reply_text": confirmation_text,
             "confirmation_text": confirmation_text,
             "choice": choice,
+            "outcome": "accepted",
             "agreed_amount": agreed_amount,
             "aade_xml_path": aade_xml_path,
             "transcript": transcript,
         }
 
-    # Intent 4: Show email / claim draft
-    is_email_intent = (
-        ui_command == "open_email"
-        or bool(_EMAIL_INTENT_RE.search(lowered))
-    )
-    if is_email_intent:
-        claim_path = f"claims/{claim_id}.md"
-        claim_file = WS / claim_path
-        content = claim_file.read_text(encoding="utf-8") if claim_file.exists() else (
-            f"# Claim {claim_id}\n\nDraft email to accounts@kappaoffice.example regarding delivery D-1042."
-        )
-        ui_action = UiActionPayload(
-            action="open_file",
-            path=claim_path,
-            content=content,
-            label=f"Opened {claim_path} on Desktop",
-        ).model_dump(exclude_none=True)
+    # Intent 5: Taxes / AADE / XML / Email / Invoice (staged info)
+    is_staged_info_intent = (
+        ui_command in ("open_aade", "open_email")
+        or bool(_STAGED_INFO_RE.search(lowered))
+    ) and not bool(re.search(r"\b(freeze\s+invoice|demand\s+the\s+refund|full\s+refund|lock\s+in)\b", lowered))
+
+    if is_staged_info_intent:
+        if ui_command == "open_email" or bool(re.search(r"\b(email|mail|letter)\b", lowered)):
+            claim_path = f"claims/{claim_id}.md"
+            claim_file = WS / claim_path
+            content = claim_file.read_text(encoding="utf-8") if claim_file.exists() else (
+                f"# Claim {claim_id}\n\nDraft email to accounts@kappaoffice.example regarding delivery D-1042."
+            )
+            ui_action = UiActionPayload(
+                action="open_file",
+                path=claim_path,
+                content=content,
+                label=f"Opened {claim_path} on Desktop",
+            ).model_dump(exclude_none=True)
+        else:
+            preview_xml = _build_aade_mydata_xml(claim_id, "refund")
+            aade_xml_path = f"aade/mydata_{claim_id}.xml"
+            ui_action = UiActionPayload(
+                action="open_file",
+                path=aade_xml_path,
+                content=preview_xml,
+                label=f"Opened {aade_xml_path} on Desktop",
+            ).model_dump(exclude_none=True)
+
         if not transcript:
-            transcript = "Show me the supplier email draft on my screen."
+            transcript = "What about taxes and email?"
 
         user_turn = CallTurnPayload(
             call_id=call_id,
@@ -3466,7 +3627,10 @@ async def handle_user_consult_response(request: Request):
             cost_eur=_voice_micro_cost(transcript) if stt_ran else 0.0,
         )
 
-        reply_text = "Pulled up the supplier email draft on your screen. Say the word and I'll send it."
+        reply_text = (
+            "Everything's staged—I'll freeze invoice 7781, file the Greek AADE tax credit, "
+            "and email Kappa the moment you say go. Refund or replacements?"
+        )
         agent_turn = CallTurnPayload(
             call_id=call_id,
             speaker="agent",
@@ -3507,98 +3671,18 @@ async def handle_user_consult_response(request: Request):
             "keep_call_open": True,
             "call_status": "connected",
             "choice": None,
+            "outcome": None,
             "transcript": transcript,
             "reply_text": reply_text,
             "confirmation_text": reply_text,
             "agreed_amount": None,
-            "ui_action": ui_action,
-        }
-
-    # Intent 5: Show AADE / file / proof
-    is_aade_intent = (
-        ui_command == "open_aade"
-        or bool(_AADE_INTENT_RE.search(lowered))
-    )
-    if is_aade_intent:
-        preview_xml = _build_aade_mydata_xml(claim_id, "refund")
-        aade_xml_path = f"aade/mydata_{claim_id}.xml"
-        ui_action = UiActionPayload(
-            action="open_file",
-            path=aade_xml_path,
-            content=preview_xml,
-            label=f"Opened {aade_xml_path} on Desktop",
-        ).model_dump(exclude_none=True)
-        if not transcript:
-            transcript = "Pull up the AADE tax credit filing on my screen."
-
-        user_turn = CallTurnPayload(
-            call_id=call_id,
-            speaker="user",
-            text=transcript,
-            keep_call_open=True,
-            call_status="connected",
-        )
-        BUS.emit(
-            run_id,
-            EventType.CALL_TURN,
-            user_turn.model_dump(),
-            step=2,
-            thought=f"Operator: {transcript}",
-            cost_eur=_voice_micro_cost(transcript) if stt_ran else 0.0,
-        )
-
-        reply_text = "Just popped the AADE tax credit on your monitor. Want the 587 euro refund or replacement hubs?"
-        agent_turn = CallTurnPayload(
-            call_id=call_id,
-            speaker="agent",
-            text=reply_text,
-            audio_url="/api/voice/turn-audio",
-            keep_call_open=True,
-            call_status="connected",
-            ui_action=ui_action,
-        )
-        BUS.emit(
-            run_id,
-            EventType.CALL_TURN,
-            agent_turn.model_dump(),
-            step=3,
-            thought=f"Recoup Agent: {reply_text}",
-            cost_eur=_voice_micro_cost(reply_text),
-        )
-
-        ACTIVE_CALL["active"] = True
-        ACTIVE_CALL["ringing"] = False
-        ACTIVE_CALL["call_status"] = "connected"
-        ACTIVE_CALL["last_ui_action"] = ui_action
-        call_turns = ACTIVE_CALL.setdefault("turns", [])
-        call_turns.append({"speaker": "user", "text": transcript, "audio_url": None, "ts": time.time()})
-        call_turns.append(
-            {
-                "speaker": "agent",
-                "text": reply_text,
-                "audio_url": "/api/voice/turn-audio",
-                "ts": time.time(),
-                "ui_action": ui_action,
-            }
-        )
-
-        return {
-            "ok": True,
-            "call_id": call_id,
-            "keep_call_open": True,
-            "call_status": "connected",
-            "choice": None,
-            "transcript": transcript,
-            "reply_text": reply_text,
-            "confirmation_text": reply_text,
-            "agreed_amount": None,
-            "aade_xml_path": aade_xml_path,
+            "aade_xml_path": f"aade/mydata_{claim_id}.xml",
             "ui_action": ui_action,
         }
 
     # Intent 6: Fallback / unclear turn
     fallback_reply = (
-        "I can show the AADE tax form, compare options on screen, or lock in the 587 euro refund."
+        "I can break down the 587 euro calculation, compare your options, or lock in the refund right now. What would you prefer?"
     )
     user_turn_f = CallTurnPayload(
         call_id=call_id,
@@ -3653,9 +3737,13 @@ async def handle_user_consult_response(request: Request):
         "keep_call_open": True,
         "call_status": "connected",
         "choice": None,
+        "outcome": None,
         "transcript": transcript,
         "reply_text": fallback_reply,
         "confirmation_text": fallback_reply,
         "agreed_amount": None,
         "ui_action": None,
     }
+
+
+_start_user_consult = start_user_consult_call

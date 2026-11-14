@@ -102,6 +102,19 @@ export interface LiveWin {
   securitySeal?: string[];
   /** Suppresses automatic popup during automated runs while still allowing manual click inspection. */
   skipAutoPop?: boolean;
+  /** Forge lifecycle stage for cinematic re-trigger */
+  forgeStage?: "spec" | "verified" | "rejected";
+  /** Structured visual database row mutation for animated table morph */
+  dbMutation?: {
+    table: string;
+    pk: string;
+    summaryCols: { label: string; value: string }[];
+    beforeStatus?: string;
+    afterStatus: string;
+    amount?: string;
+    isInsert?: boolean;
+    mode: "STAGE IN CLONE" | "LIVE ERP COMMIT";
+  };
 }
 
 export type OperatorChoice = "refund" | "redelivery";

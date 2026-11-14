@@ -38,6 +38,7 @@ export function forgeSpecWindow(spec: ForgeSpecPayload): LiveWin {
   return {
     id: `forge-live-${spec.name}`,
     kind: "forge",
+    forgeStage: "spec",
     categoryBadge: "STEP 3 · THE FORGE",
     securitySeal: [...SANDBOX_SECURITY_SEAL],
     title: "⚒️ Forging Custom Penalty Calculator",
@@ -77,6 +78,7 @@ export function forgeWindow(ft: ForgeTestPayload, latencyMs?: number): LiveWin {
     latencyMs,
     id: `forge-${ft.name}-${ft.attempt}-${Date.now()}`,
     kind: "forge",
+    forgeStage: ft.registered ? "verified" : "rejected",
     categoryBadge: ft.registered
       ? "STEP 3 · THE FORGE · TOOL REGISTERED"
       : "STEP 3 · THE FORGE",
@@ -299,9 +301,49 @@ export function toolWindow(
       sql = `DELETE FROM ${table}\nWHERE ${String(a.where_col ?? "id")} = ${sqlVal(a.where_val)};`;
     }
     const isClaimTable = table === "claims";
+    const isInvoiceTable = table === "invoices";
     const title = isClaimTable
       ? "🛑 Recording Disputed Claim in SQLite Clone"
       : "🛑 Freezing Overcharged Invoice in SQLite";
+
+    const row = (a.row ?? {}) as Record<string, unknown>;
+    const pkCol = String(a.pk_col ?? (name === "delete_rows" ? String(a.where_col ?? "id") : "id"));
+    const pkVal = String(
+      (name === "delete_rows" ? a.where_val : row[pkCol]) ??
+        (isClaimTable ? "CLM-D-1042" : isInvoiceTable ? "INV-7781" : "REC-01")
+    );
+
+    const summaryCols = isClaimTable
+      ? [
+          { label: "Invoice Ref", value: String(row.invoice_id ?? "INV-7781") },
+          { label: "Discrepancy", value: "22 missing units" },
+          { label: "SLA Penalty", value: "€125.00" },
+        ]
+      : isInvoiceTable
+      ? [
+          { label: "Supplier", value: String(row.supplier_id ?? "SUP-KAPPA") },
+          { label: "Delivery", value: "D-1042" },
+          { label: "Payment Hold", value: "Dispute Clause 4.2" },
+        ]
+      : Object.entries(row)
+          .filter(([k]) => k !== pkCol)
+          .slice(0, 3)
+          .map(([k, v]) => ({ label: k, value: String(v) }));
+
+    const beforeStatus = isClaimTable ? "unfiled" : isInvoiceTable ? "unpaid" : "active";
+    const afterStatus = isClaimTable ? "+ INSERT ROW · PENDING" : isInvoiceTable ? "🛑 DISPUTED / FROZEN" : "STAGED";
+    const amount = isClaimTable ? "€587.30" : isInvoiceTable ? "€2,268.00" : undefined;
+
+    const dbMutation: LiveWin["dbMutation"] = {
+      table,
+      pk: pkVal,
+      summaryCols,
+      beforeStatus,
+      afterStatus,
+      amount,
+      isInsert: isClaimTable,
+      mode: "STAGE IN CLONE",
+    };
 
     return {
       ...base,
@@ -319,6 +361,7 @@ export function toolWindow(
         { label: "pre-image captured", ok: true },
       ],
       target: "db",
+      dbMutation,
       telemetry: {
         facts:
           name === "upsert_row"
@@ -519,4 +562,143 @@ export function outboxWindow(item: Record<string, unknown>, index: number): Live
     manual: true,
     instant: true,
   };
+}
+
+export function buildCommitWindows(choice: "refund" | "redelivery"): LiveWin[] {
+  const isRefund = choice === "refund";
+  const now = Date.now();
+
+  const win1: LiveWin = {
+    id: `commit-sqlite-${choice}-${now}`,
+    kind: "sqlite",
+    target: "db",
+    categoryBadge: "LIVE ERP DB COMMIT · APPLIED",
+    title: isRefund
+      ? "✅ LIVE ERP COMMIT: INV-7781 FROZEN + CLM-D-1042 (€587.30)"
+      : "✅ LIVE ERP COMMIT: 22 HUBS RE-DELIVERY + CLM-D-1042 (€202.30)",
+    path: "erp_production.db › claims, invoices",
+    liveLabel: "COMMITTING TRANSACTIONS TO LIVE ERP…",
+    doneLabel: "COMMITTED TO PRODUCTION",
+    code: [
+      "-- RECOUP AUTOMATED RUNTIME: PRODUCTION DATABASE COMMIT",
+      "BEGIN TRANSACTION;",
+      "UPDATE invoices",
+      "   SET status = 'disputed_frozen',",
+      "       hold_reason = 'Receiving discrepancy note D-1042 (22 damaged hubs)'",
+      " WHERE id = 'INV-7781';",
+      "",
+      isRefund
+        ? "INSERT INTO claims (id, invoice_id, supplier_id, claim_type, amount_eur, status, settled_at)\nVALUES ('CLM-D-1042', 'INV-7781', 'SUP-KAPPA', 'refund', 587.30, 'COMMITTED', datetime('now'));"
+        : "INSERT INTO claims (id, invoice_id, supplier_id, claim_type, amount_eur, replacement_units, status)\nVALUES ('CLM-D-1042', 'INV-7781', 'SUP-KAPPA', 'redelivery', 202.30, 22, 'COMMITTED');",
+      "",
+      "COMMIT TRANSACTION;",
+      "-- 2 ROWS AFFECTED · ZERO LOCKING ANOMALIES · AUDIT LOG SIGNED",
+    ].join("\n"),
+    lang: "sql",
+    assertions: [
+      { label: "Production DB transaction committed", ok: true },
+      { label: isRefund ? "INV-7781 status → frozen" : "Replacement units 22 → queued", ok: true },
+      { label: isRefund ? "CLM-D-1042 €587.30 claim posted" : "CLM-D-1042 €202.30 fee credit posted", ok: true },
+    ],
+    dbMutation: {
+      table: "claims",
+      pk: "CLM-D-1042",
+      summaryCols: [
+        { label: "Invoice Ref", value: "INV-7781" },
+        { label: "Supplier", value: "SUP-KAPPA (Acme)" },
+        { label: "Resolution", value: isRefund ? "Cash Refund €587.30" : "22 Hubs Replacement + €202.30" },
+      ],
+      beforeStatus: "staged_hold",
+      afterStatus: isRefund ? "🛑 FROZEN · €587.30 REFUND" : "📦 22 UNITS + €202.30 CREDIT",
+      amount: isRefund ? "€587.30" : "€202.30",
+      isInsert: false,
+      mode: "LIVE ERP COMMIT",
+    },
+    origin: "stage:commit",
+    pinned: false,
+    instant: false,
+    telemetry: {
+      facts: ["erp_production.db", "2 rows updated", isRefund ? "€587.30 recovery" : "22 replacement hubs", "audit trail signed"],
+      steps: ["open production transaction", "verify pre-images", "commit SQLite mutations", "notify finance ERP"],
+    },
+  };
+
+  const win2: LiveWin = {
+    id: `commit-outbound-${choice}-${now + 1}`,
+    kind: "editor",
+    target: "diff",
+    categoryBadge: "OUTBOUND DISPATCH · EXECUTED",
+    title: isRefund
+      ? "📨 SENT: AADE myDATA 5.1 Tax Credit XML + Email to Kappa"
+      : "📨 SENT: AADE myDATA 9.3 Note + Replacement Dispatch Email",
+    path: "aade/mydata_CLM-D-1042.xml",
+    liveLabel: "TRANSMITTING AADE TAX XML & SUPPLIER DISPATCH…",
+    doneLabel: "TRANSMISSION CONFIRMED",
+    code: isRefund
+      ? [
+          `<?xml version="1.0" encoding="UTF-8"?>`,
+          `<InvoicesDoc xmlns="http://www.aade.gr/myDATA/invoice/v1.0">`,
+          `  <invoice>`,
+          `    <uid>REC-2024-CLM-D-1042-REFUND</uid>`,
+          `    <invoiceHeader>`,
+          `      <invoiceType>5.1</invoiceType> <!-- Credit Note / Supplier Dispute -->`,
+          `      <issueDate>2024-11-14</issueDate>`,
+          `      <currency>EUR</currency>`,
+          `    </invoiceHeader>`,
+          `    <invoiceDetails>`,
+          `      <lineNumber>1</lineNumber>`,
+          `      <netValue>462.30</netValue>`,
+          `      <vatCategory>1</vatCategory>`,
+          `      <vatAmount>110.95</vatAmount>`,
+          `      <delayPenaltyValue>125.00</delayPenaltyValue>`,
+          `      <totalValue>587.30</totalValue>`,
+        `    </invoiceDetails>`,
+        `  </invoice>`,
+        `</InvoicesDoc>`,
+        ``,
+        `----------------------------------------------------------------------`,
+        `DISPATCH EMAIL TRANSMITTED TO: billing@kappa-industrial.gr`,
+        `SUBJECT: Formal Dispute Notice & Refund Claim CLM-D-1042 (PO-8821 / INV-7781)`,
+        `STATUS: 250 2.0.0 OK Message accepted for delivery by mailhub.kappa.gr`,
+      ].join("\n")
+    : [
+        `<?xml version="1.0" encoding="UTF-8"?>`,
+        `<InvoicesDoc xmlns="http://www.aade.gr/myDATA/invoice/v1.0">`,
+        `  <invoice>`,
+        `    <uid>REC-2024-CLM-D-1042-REDELIVERY</uid>`,
+        `    <invoiceHeader>`,
+        `      <invoiceType>9.3</invoiceType> <!-- Delivery Note / Replacement Intake -->`,
+        `      <issueDate>2024-11-14</issueDate>`,
+        `      <currency>EUR</currency>`,
+        `    </invoiceHeader>`,
+        `    <invoiceDetails>`,
+        `      <lineNumber>1</lineNumber>`,
+        `      <sku>SKU-HUB-22</sku>`,
+        `      <quantity>22</quantity>`,
+        `      <slaLatePenaltyFee>202.30</slaLatePenaltyFee>`,
+        `    </invoiceDetails>`,
+        `  </invoice>`,
+        `</InvoicesDoc>`,
+        ``,
+        `----------------------------------------------------------------------`,
+        `DISPATCH EMAIL TRANSMITTED TO: logistics@kappa-industrial.gr`,
+        `SUBJECT: Re-delivery Authorization Notice CLM-D-1042: 22 SKU-HUB-22 by Tomorrow`,
+        `STATUS: 250 2.0.0 OK Message accepted for delivery by mailhub.kappa.gr`,
+      ].join("\n"),
+    lang: "text",
+    assertions: [
+      { label: "Greek AADE myDATA submission verified (MARK: 4000089211)", ok: true },
+      { label: "Outbound supplier notification dispatched via SMTP TLS", ok: true },
+      { label: "Audit hash signed to workspace history", ok: true },
+    ],
+    origin: "stage:commit",
+    pinned: false,
+    instant: false,
+    telemetry: {
+      facts: ["AADE myDATA API 200 OK", "MARK: 4000089211", "SMTP TLS verified", "250 OK accepted"],
+      steps: ["serialize XML document", "sign with tax certificates", "post to AADE endpoint", "deliver email dispatch"],
+    },
+  };
+
+  return [win1, win2];
 }
