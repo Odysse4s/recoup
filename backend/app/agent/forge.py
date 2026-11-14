@@ -1,6 +1,7 @@
 """TDD synthesis and self-repair engine for sandboxed enterprise audit tools."""
 from __future__ import annotations
 
+import ast
 import json
 import re
 from collections.abc import Callable
@@ -14,9 +15,11 @@ _FALLBACK_ALLOWED_IMPORTS: tuple[str, ...] = (
     "csv",
     "datetime",
     "decimal",
+    "functools",
     "itertools",
     "json",
     "math",
+    "operator",
     "re",
     "statistics",
     "typing",
@@ -55,21 +58,25 @@ else:
     except ImportError:
         LLMProvider = Any
 
-_ALLOWED_IMPORTS_STR = ", ".join(ALLOWED_IMPORTS)
+_PROMPT_ALLOWED_IMPORTS = ", ".join(
+    mod for mod in ALLOWED_IMPORTS if not mod.startswith(("__", "urllib"))
+)
 
 SPEC_SYSTEM = (
     "You are Recoup's TDD tool architect for enterprise vendor audits, procurement contracts, "
-    "and accounts payable reconciliation. Given a missing tool name and goal context, return "
-    "STRICT JSON (no markdown fences, no commentary) matching ForgeSpecPayload:\n"
+    "tiered rebates, multi-currency FX reconciliation, and SLA credit governance. Given a missing "
+    "tool name and goal context, return STRICT JSON (no markdown fences, no commentary) matching "
+    "ForgeSpecPayload:\n"
     '{"name": "<snake_case_tool_name>", "purpose": "<concise description>", '
     '"input_schema": {"type": "object", "properties": {...}, "required": [...]}, '
     '"output_schema": {"type": "object", "properties": {...}}, '
     '"examples": [{"in": {...}, "out": {...}}, ...]}\n'
     "Rules:\n"
     "1. Strip any `MISSING:` prefix from `name`.\n"
-    "2. Provide 3 deterministic TDD unit test `examples` covering: (a) standard discrepancy/breach, "
-    "(b) clean zero-discrepancy baseline, and (c) boundary or cap enforcement.\n"
-    "3. Double-check every arithmetic value in `out` and round monetary outputs to 2 decimal places.\n"
+    "2. Provide 3 deterministic TDD unit test `examples` covering: (a) standard multi-clause "
+    "discrepancy/breach, (b) clean zero-discrepancy baseline, and (c) cap, tolerance, or bracket boundary.\n"
+    "3. Verify every arithmetic step in `out` (tiered brackets, FX conversion to EUR, bps/percentage caps) "
+    "and round monetary outputs to 2 decimal places (`float`).\n"
     "4. For `compute_supplier_claim`, use exact inputs "
     "`qty_billed`, `qty_received`, `qty_damaged`, `billed_unit_price`, `contract_unit_price`, "
     "`days_late`, `late_penalty_pct_per_day`, `max_penalty_pct` and exact outputs "
@@ -83,19 +90,22 @@ SPEC_SYSTEM = (
 )
 
 CODE_SYSTEM = (
-    "You are Recoup's deterministic Python tool synthesizer for enterprise SLA, contract, and "
-    "accounts payable calculators. Write ONLY pure Python source code (no markdown fences, no prose) "
-    "defining `def <name>(args: dict) -> dict:`.\n"
-    f"Allowed standard-library imports ONLY: {_ALLOWED_IMPORTS_STR}.\n"
+    "You are Recoup's deterministic Python tool synthesizer for enterprise SLA, tiered rebate, "
+    "multi-currency FX, and accounts payable calculators. Write ONLY pure Python source code "
+    "(no markdown fences, no prose) defining `def <name>(args: dict) -> dict:`.\n"
+    f"Allowed standard-library imports ONLY: {_PROMPT_ALLOWED_IMPORTS}.\n"
     "Strict sandbox rules:\n"
-    "- Never import os, sys, subprocess, pathlib, socket, httpx, urllib, or third-party modules.\n"
+    "- Never import os, sys, subprocess, pathlib, socket, httpx, requests, or third-party modules.\n"
     "- Never call open, exec, eval, compile, __import__, getattr, setattr, delattr, globals, locals, "
-    "vars, input, or breakpoint, and never access dunder (`__...__`) attributes.\n"
-    "- Read inputs defensively via `args.get(...)` with safe numeric coercion (`int`/`float`) and "
+    "vars, input, or breakpoint, and never define or access dunder (`__...__`) names or attributes.\n"
+    "- Read inputs defensively via `args.get(...)` with safe coercion (`int`/`float`/`str`) and "
     "non-negative clamping (`max(0, ...)` / `max(0.0, ...)`).\n"
-    "- Enforce percentage/amount caps with `min(..., max_cap)` and round all monetary return fields "
-    "with `round(val, 2)` so every TDD example matches cleanly."
+    "- For multi-clause formulas (tiered volume brackets, FX rate conversion, SLA basis-point credits), "
+    "use `decimal.Decimal` with `ROUND_HALF_UP` or `round(val, 2)`, enforce caps via `min(..., max_cap)`, "
+    "and return plain JSON-serializable `float`/`int`/`bool`/`str` values matching the TDD examples."
 )
+
+_TOP_LEVEL_CODE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s*(?::\s*[^=]+)?=")
 
 
 def _extract_json_payload(raw: str) -> dict[str, Any]:
@@ -209,6 +219,10 @@ def _normalize_spec_dict(data: dict[str, Any], fallback_name: str = "") -> dict[
     return normalized
 
 
+def _has_python_defs(tree: ast.Module) -> bool:
+    return any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) for node in tree.body)
+
+
 def _extract_python_code(raw: str) -> str:
     """Extract pure Python code from a fenced or unfenced LLM completion."""
     text = (raw or "").strip()
@@ -231,20 +245,44 @@ def _extract_python_code(raw: str) -> str:
             raise ValueError("Empty Python code payload inside markdown fence.")
         return candidates[0]
 
+    # Fast path: unfenced valid Python module with top-level constants/imports + function definition
+    try:
+        parsed_whole = ast.parse(text)
+        if _has_python_defs(parsed_whole):
+            return text
+    except SyntaxError:
+        pass
+
     lines = text.splitlines()
     start_idx: int | None = None
     for i, line in enumerate(lines):
         stripped = line.strip()
-        if stripped.startswith(("import ", "from ", "def ", "class ")):
+        if stripped.startswith(("import ", "from ", "def ", "class ")) or _TOP_LEVEL_CODE_RE.match(stripped):
             start_idx = i
             break
 
     if start_idx is None:
         raise ValueError("No identifiable Python code found in LLM response.")
 
-    candidate = "\n".join(lines[start_idx:]).strip()
+    candidate_lines = lines[start_idx:]
+    candidate = "\n".join(candidate_lines).strip()
     if not candidate:
         raise ValueError("Python code payload is empty after identifying the starting code block.")
+
+    # Trim trailing conversational prose lines if doing so recovers a valid Python AST
+    try:
+        ast.parse(candidate)
+    except SyntaxError:
+        for end_idx in range(len(candidate_lines) - 1, 0, -1):
+            sub = "\n".join(candidate_lines[:end_idx]).strip()
+            if not sub:
+                break
+            try:
+                tree = ast.parse(sub)
+                if _has_python_defs(tree):
+                    return sub
+            except SyntaxError:
+                continue
 
     return candidate
 
