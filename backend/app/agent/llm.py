@@ -739,6 +739,20 @@ class OpenAICompatProvider:
         return resp
 
 
+class OumiProvider(OpenAICompatProvider):
+    """Oumi Iris policy decision model adapter (OpenAI-compatible endpoint with SHA-256 disk cache)."""
+
+    def __init__(
+        self,
+        model: str | None = None,
+        base_url: str | None = None,
+        api_key_env: str = "OUMI_API_KEY",
+    ) -> None:
+        resolved_model = model or os.getenv("OUMI_MODEL", "oumi-iris-decision")
+        resolved_url = base_url or os.getenv("OUMI_BASE_URL", "https://api.oumi.ai/v1")
+        super().__init__(model=resolved_model, base_url=resolved_url, api_key_env=api_key_env)
+
+
 def format_assistant_turn(resp: LLMResponse) -> dict[str, Any]:
     """Build an Anthropic-compatible assistant message containing text + tool_use blocks."""
     blocks: list[dict[str, Any]] = []
@@ -788,6 +802,8 @@ def get_provider() -> LLMProvider:
             base_url=os.getenv("OPENAI_BASE_URL", "https://api.x.ai/v1"),
             api_key_env="XAI_API_KEY",
         )
+    if kind == "oumi":
+        return OumiProvider()
     if kind == "openai":
         model = os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL") or "gpt-4o-mini"
         if model.startswith("claude-"):
