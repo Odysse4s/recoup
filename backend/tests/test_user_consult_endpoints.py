@@ -90,8 +90,9 @@ def test_user_consult_emits_call_start_and_opening_turn(isolated_consult_server)
     assert data["mode"] == "user_consult"
     assert data["claim_id"] == "CLM-D-1042"
     assert data["claim_amount"] == pytest.approx(587.30)
-    assert "587 euros and 30 cents" in data["opening_text"]
-    assert "AADE" in data["opening_text"]
+    assert "Hey! Delivery D-1042 has 22 bad hubs" in data["opening_text"]
+    assert "587 euros" in data["opening_text"]
+    assert "screen" in data["opening_text"]
 
     starts = [e for e in BUS.history if e.type == EventType.CALL_START]
     turns = [e for e in BUS.history if e.type == EventType.CALL_TURN]
@@ -137,7 +138,10 @@ def test_user_respond_refund_creates_aade_51_xml_updates_db_and_undoes_cleanly(i
 
     resp = client.post(
         "/api/call/user-respond",
-        json={"transcript": "Enforce the 587 refund hold and stage the AADE myDATA filing now."},
+        json={
+            "transcript": "Enforce the 587 refund hold and stage the AADE myDATA filing now.",
+            "hangup": True,
+        },
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -146,7 +150,8 @@ def test_user_respond_refund_creates_aade_51_xml_updates_db_and_undoes_cleanly(i
     assert body["choice"] == "refund"
     assert body["agreed_amount"] == pytest.approx(587.30)
     assert body["aade_xml_path"] == "aade/mydata_CLM-D-1042.xml"
-    assert "5.1" in body["confirmation_text"]
+    assert "Froze invoice 7781" in body["confirmation_text"]
+    assert "587 euro refund" in body["confirmation_text"]
 
     xml_file = ws / "aade" / "mydata_CLM-D-1042.xml"
     assert xml_file.exists()
@@ -374,7 +379,7 @@ async def test_state_lifecycle_pending_approval_active_call_and_latest_offer(iso
     assert len(ac["turns"]) == 1
 
     # 4. Resolved call & offer
-    r_resp = client.post("/api/call/user-respond", json={"req_id": "req_tier1", "choice": "refund"})
+    r_resp = client.post("/api/call/user-respond", json={"req_id": "req_tier1", "choice": "refund", "hangup": True})
     assert r_resp.status_code == 200
     s3 = client.get("/api/state").json()
     assert s3["pending_approval"] is None
@@ -708,7 +713,7 @@ async def test_multi_turn_conversational_desktop_ui_control(isolated_consult_ser
     assert not gate_fut.done()
     assert not any(e.type == EventType.CALL_END for e in BUS.history)
 
-    # Turn 3: "Enforce the refund"
+    # Turn 3: "Enforce the refund" (commits resolution and auto-resolves gate, keeps line open)
     t3_resp = client.post(
         "/api/call/user-respond",
         json={"transcript": "Enforce the refund", "req_id": "req_multi_turn"},
@@ -716,14 +721,28 @@ async def test_multi_turn_conversational_desktop_ui_control(isolated_consult_ser
     assert t3_resp.status_code == 200
     b3 = t3_resp.json()
     assert b3["ok"] is True
-    assert b3["keep_call_open"] is False
-    assert b3["call_status"] == "ended"
+    assert b3["keep_call_open"] is True
+    assert b3["call_status"] == "connected"
     assert b3["choice"] == "refund"
     assert b3["ui_action"]["action"] == "commit_resolution"
     assert b3["agreed_amount"] == pytest.approx(587.30)
     assert gate_fut.done() and gate_fut.result() is True
     assert "req_multi_turn" not in PENDING
     assert (ws / "aade" / "mydata_CLM-D-1042.xml").exists()
+    assert not any(e.type == EventType.CALL_END for e in BUS.history)
+    assert client.get("/api/state").json()["active_call"]["call_status"] == "connected"
+
+    # Turn 4: "no thanks, bye" (hangup intent closes call and emits CALL_END)
+    t4_resp = client.post(
+        "/api/call/user-respond",
+        json={"transcript": "no thanks, bye", "req_id": "req_multi_turn"},
+    )
+    assert t4_resp.status_code == 200
+    b4 = t4_resp.json()
+    assert b4["ok"] is True
+    assert b4["keep_call_open"] is False
+    assert b4["call_status"] == "ended"
+    assert "one-click undo" in b4["reply_text"]
     assert any(e.type == EventType.CALL_END for e in BUS.history)
     assert client.get("/api/state").json()["active_call"]["call_status"] == "ended"
 
@@ -802,6 +821,110 @@ async def test_live_audio_stt_noise_and_open_question_do_not_prematurely_hang_up
     assert b_q["choice"] is None
     assert "587 euros" in b_q["reply_text"]
     assert not gate_fut.done()
+
+
+def test_user_respond_explicit_hangup_and_redelivery_flows(isolated_consult_server):
+    client, _, _, _ = isolated_consult_server
+
+    # 1. Start consult call
+    c_resp = client.post("/api/call/user-consult", json={"claim_id": "CLM-D-1042"})
+    assert c_resp.status_code == 200
+
+    # 2. Operator picks redelivery (keep_call_open=True, call_status="connected")
+    r_redeliv = client.post(
+        "/api/call/user-respond",
+        json={"choice": "redelivery", "claim_id": "CLM-D-1042", "hangup": False},
+    )
+    assert r_redeliv.status_code == 200
+    b_red = r_redeliv.json()
+    assert b_red["ok"] is True
+    assert b_red["choice"] == "redelivery"
+    assert b_red["agreed_amount"] == pytest.approx(202.30)
+    assert b_red["keep_call_open"] is True
+    assert b_red["call_status"] == "connected"
+    assert "22 replacement hubs" in b_red["reply_text"]
+    assert not any(e.type == EventType.CALL_END for e in BUS.history)
+
+    # 3. Explicit hangup closes the active call and emits CALL_END
+    r_hangup = client.post(
+        "/api/call/user-respond",
+        json={"hangup": True, "claim_id": "CLM-D-1042"},
+    )
+    assert r_hangup.status_code == 200
+    b_hang = r_hangup.json()
+    assert b_hang["ok"] is True
+    assert b_hang["keep_call_open"] is False
+    assert b_hang["call_status"] == "ended"
+    assert "one-click undo" in b_hang["reply_text"]
+    assert any(e.type == EventType.CALL_END for e in BUS.history)
+
+
+def test_voice_realtime_websocket_offline_fallback(isolated_consult_server):
+    client, _, _, _ = isolated_consult_server
+    with client.websocket_connect("/api/voice/realtime?claim_id=CLM-D-1042") as ws:
+        data = ws.receive_json()
+        assert data["type"] == "recoup.fallback"
+        assert data["reason"] == "offline_or_unconfigured"
+        assert data["fallback_available"] is True
+        assert data["outcome"]["claim_id"] == "CLM-D-1042"
+
+
+def test_voice_realtime_websocket_invalid_voice_rejected(isolated_consult_server):
+    client, _, _, _ = isolated_consult_server
+    with client.websocket_connect("/api/voice/realtime?voice=nonexistent_voice_xyz") as ws:
+        err = ws.receive_json()
+        assert err["type"] == "recoup.error"
+        assert "Unsupported Grok realtime voice" in err["message"]
+
+
+def test_voice_realtime_stage_endpoint_classification(isolated_consult_server):
+    client, _, _, _ = isolated_consult_server
+
+    # 1. Refund classification
+    resp_ref = client.post(
+        "/api/voice/realtime/stage",
+        json={
+            "claim_id": "CLM-D-1042",
+            "turns": [{"speaker": "human", "text": "Let's take the 587.30 euro refund credit note."}],
+        },
+    )
+    assert resp_ref.status_code == 200
+    body_ref = resp_ref.json()
+    assert body_ref["ok"] is True
+    assert body_ref["staged"] is True
+    assert body_ref["outcome"]["decision"] == "refund"
+    assert body_ref["outcome"]["refund_amount_eur"] == pytest.approx(587.30)
+    assert body_ref["outcome"]["requires_risk_gate"] is True
+    assert body_ref["outcome"]["erp_authorized"] is False
+
+    # 2. Redelivery classification
+    resp_red = client.post(
+        "/api/voice/realtime/stage",
+        json={
+            "claim_id": "CLM-D-1042",
+            "turns": [{"speaker": "human", "text": "Please ship the 22 replacement hubs tomorrow."}],
+        },
+    )
+    assert resp_red.status_code == 200
+    body_red = resp_red.json()
+    assert body_red["ok"] is True
+    assert body_red["staged"] is True
+    assert body_red["outcome"]["decision"] == "redelivery"
+    assert body_red["outcome"]["replacement_units"] == 22
+
+    # 3. Unclear / undecided classification
+    resp_unc = client.post(
+        "/api/voice/realtime/stage",
+        json={
+            "claim_id": "CLM-D-1042",
+            "turns": [{"speaker": "human", "text": "I'm not sure yet, let me check with accounting."}],
+        },
+    )
+    assert resp_unc.status_code == 200
+    body_unc = resp_unc.json()
+    assert body_unc["ok"] is True
+    assert body_unc["staged"] is False
+    assert body_unc["outcome"]["decision"] == "unclear"
 
 
 

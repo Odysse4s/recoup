@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowUpRight, Braces, CheckCircle2, Circle, Layers, Loader2, ShieldCheck, XCircle } from "lucide-react";
+import { ArrowUpRight, Braces, CheckCircle2, Circle, Layers, Loader2, ShieldCheck, Sparkles, XCircle } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import type { ForgeSpecPayload, ForgeTestPayload, PlanPayload, VerifyPayload } from "../contracts";
 import { anchorRef } from "../lib/anchors";
 import type { Preset } from "../lib/types";
@@ -158,11 +159,50 @@ export function ForgeVault({
   brandName?: string;
 }) {
   const synthesizing = forgeSpec && !tools.some((t) => t.name === forgeSpec.name);
+  const prevCountRef = useRef(tools.length);
+  const [showNewBadge, setShowNewBadge] = useState(false);
+  const badgeTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (tools.length > prevCountRef.current) {
+      setShowNewBadge(true);
+      if (badgeTimerRef.current) window.clearTimeout(badgeTimerRef.current);
+      badgeTimerRef.current = window.setTimeout(() => {
+        setShowNewBadge(false);
+      }, 4500);
+    }
+    prevCountRef.current = tools.length;
+  }, [tools.length]);
+
+  useEffect(() => {
+    return () => {
+      if (badgeTimerRef.current) window.clearTimeout(badgeTimerRef.current);
+    };
+  }, []);
+
   return (
     <Panel
-      title="Sandboxed Python Tools"
+      title="⚒️ Agent Toolbox (Forged Live)"
       icon={<Braces />}
-      meta={<Chip tone="forge">7-Layer Sandbox</Chip>}
+      meta={
+        <div className="flex items-center gap-1.5">
+          <AnimatePresence>
+            {showNewBadge && (
+              <motion.span
+                initial={{ scale: 0.6, opacity: 0, y: -2 }}
+                animate={{ scale: [1, 1.12, 1], opacity: 1, y: 0 }}
+                exit={{ scale: 0.8, opacity: 0 }}
+                transition={{ duration: 0.35 }}
+                className="inline-flex h-5 items-center gap-1 rounded-md border border-emerald-400 bg-emerald-500/20 px-2 font-mono text-[10px] font-bold tracking-wider text-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.5)]"
+              >
+                <Sparkles className="h-3 w-3 animate-spin text-amber-300" />
+                +1 NEW TOOL ADDED
+              </motion.span>
+            )}
+          </AnimatePresence>
+          <Chip tone="forge">7-Layer Sandbox</Chip>
+        </div>
+      }
       anchor={anchorRef("vault")}
       pulseKey={pulseKey}
       pulseTone="forge"
@@ -170,6 +210,28 @@ export function ForgeVault({
       bodyClassName="p-3"
     >
       <div className="space-y-2.5">
+        {/* +1 NEW TOOL ADDED banner flash */}
+        <AnimatePresence>
+          {showNewBadge && (
+            <motion.div
+              initial={{ opacity: 0, height: 0, scale: 0.95 }}
+              animate={{ opacity: 1, height: "auto", scale: 1 }}
+              exit={{ opacity: 0, height: 0, scale: 0.95 }}
+              transition={{ duration: 0.3 }}
+              className="overflow-hidden rounded-lg border border-emerald-500/50 bg-gradient-to-r from-emerald-950/70 via-slate-900 to-purple-950/70 p-2.5 text-emerald-300 shadow-[0_0_18px_rgba(16,185,129,0.3)]"
+            >
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-1.5 font-mono text-[11px] font-bold text-emerald-300">
+                  <span className="inline-block animate-bounce">⚒️</span> +1 NEW TOOL ADDED TO TOOLBOX
+                </span>
+                <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 font-mono text-[9.5px] font-bold text-emerald-200">
+                  READY FOR EXECUTION
+                </span>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* 7-Layer Sandbox Security Seal */}
         <div
           aria-label="7-Layer Sandbox Security Seal"

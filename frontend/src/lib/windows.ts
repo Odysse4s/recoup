@@ -1,4 +1,4 @@
-import type { ForgeTestPayload } from "../contracts";
+import type { ForgeSpecPayload, ForgeTestPayload } from "../contracts";
 import type { LiveWin } from "./types";
 
 const sqlVal = (v: unknown) =>
@@ -11,14 +11,77 @@ export const SANDBOX_SECURITY_SEAL = [
   "AST + SHA-256 PINNED",
 ] as const;
 
+export function forgeSpecWindow(spec: ForgeSpecPayload): LiveWin {
+  const schemaProps = (spec.input_schema?.properties ?? spec.input_schema ?? {}) as Record<string, unknown>;
+  const paramNames = Object.keys(schemaProps);
+  const paramList = paramNames.length > 0 ? paramNames.join(", ") : "args";
+
+  const code = [
+    `"""`,
+    `⚒️ THE FORGE: Auto-synthesizing pure-stdlib Python tool`,
+    `Purpose: ${spec.purpose}`,
+    `Security: Subprocess sandbox (RLIMIT CPU=2s, FSIZE=0, zero network/env)`,
+    `"""`,
+    ``,
+    `def ${spec.name}(${paramList}):`,
+    `    """`,
+    `    ${spec.purpose}`,
+    `    `,
+    `    Inputs: ${JSON.stringify(spec.input_schema)}`,
+    `    Outputs: ${JSON.stringify(spec.output_schema)}`,
+    `    TDD Suite: ${spec.examples.length} specification test cases`,
+    `    """`,
+    `    # Synthesizing pure-stdlib implementation & running sandboxed TDD...`,
+    `    raise NotImplementedError("Forging in sandbox...")`,
+  ].join("\n");
+
+  return {
+    id: `forge-live-${spec.name}`,
+    kind: "forge",
+    categoryBadge: "⚒️ THE FORGE · SYNTHESIZING CUSTOM PYTHON TOOL",
+    securitySeal: [...SANDBOX_SECURITY_SEAL],
+    title: `⚒️ Forging ${spec.name}.py`,
+    path: `forged_tools/${spec.name}.py`,
+    liveLabel: "HAMMERING AST & UNIT TESTS…",
+    doneLabel: "",
+    code,
+    lang: "python",
+    assertions: [
+      { label: "AST static guard (pending)", ok: true },
+      ...spec.examples.map((_, i) => ({ label: `TDD example #${i + 1} (queued)`, ok: true })),
+    ],
+    target: "vault",
+    origin: "stage:forge",
+    pinned: true,
+    toolName: spec.name,
+    telemetry: {
+      facts: [
+        "AST security check: pending AST analysis",
+        "subprocess python -I",
+        "RLIMIT_CPU 2s · FSIZE=0",
+        `TDD suite: ${spec.examples.length} tests queued`,
+      ],
+      steps: [
+        "synthesize pure stdlib AST",
+        "guard imports & dunders",
+        "spawn python -I",
+        `run ${spec.examples.length} unit tests`,
+        "register in vault",
+      ],
+    },
+  };
+}
+
 export function forgeWindow(ft: ForgeTestPayload, latencyMs?: number): LiveWin {
   return {
     latencyMs,
     id: `forge-${ft.name}-${ft.attempt}-${Date.now()}`,
     kind: "forge",
-    categoryBadge: "SANDBOX · FORGING PYTHON TOOL",
+    categoryBadge: ft.registered
+      ? "⚒️ THE FORGE · TOOL REGISTERED IN TOOLBOX"
+      : "⚒️ THE FORGE · RUNNING SANDBOX TDD",
     securitySeal: [...SANDBOX_SECURITY_SEAL],
-    title: "Forge TDD Compiler",
+    title: ft.registered ? `⚒️ Forged & Verified: ${ft.name}.py` : `⚒️ Forging ${ft.name}.py`,
     path: `forged_tools/${ft.name}.py`,
     liveLabel: "RUNNING SANDBOX AST…",
     doneLabel: ft.registered ? "REGISTERED" : "REJECTED",
@@ -31,7 +94,7 @@ export function forgeWindow(ft: ForgeTestPayload, latencyMs?: number): LiveWin {
     target: "vault",
     origin: "stage:forge",
     pinned: false,
-    toolName: ft.registered ? ft.name : undefined,
+    toolName: ft.name,
     telemetry: {
       facts: [
         `AST security check: ${ft.ast_errors.length} violation${ft.ast_errors.length === 1 ? "" : "s"}`,
@@ -78,7 +141,7 @@ export function toolWindow(
       ...base,
       kind: "editor",
       categoryBadge: "WORKSPACE · WRITING STAGED FILE",
-      title: "Staged File Editor",
+      title: "📝 Automated Chore: Drafting Claim & Greek AADE Tax Credit",
       path: `staged://${path}`,
       liveLabel: "STAGING FILE…",
       doneLabel: "STAGED FOR REVIEW",
@@ -127,7 +190,7 @@ export function toolWindow(
       ...base,
       kind: "sqlite",
       categoryBadge: "ERP & AADE · STAGING DB MUTATION",
-      title: "SQLite Rehearsal Inspector",
+      title: "🛑 Automated Chore: Freezing Overcharged Invoice in SQLite",
       path: `rehearsal.db › ${table}`,
       liveLabel: "EXECUTING ON REHEARSAL DB…",
       doneLabel: "ROWS STAGED",
@@ -156,11 +219,20 @@ export function toolWindow(
 
   const external = name === "send_email" || name === "place_call" || name === "trigger_webhook";
   const argLines = Object.entries(a).map(([k, v]) => `  ${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`);
+  const execTitle =
+    name === "send_email"
+      ? "📧 Automated Chore: Prepared Supplier Claim Email (Held Safely)"
+      : name === "place_call"
+      ? "📞 Automated Chore: Settlement Call Intercepted (Held Safely)"
+      : name === "trigger_webhook"
+      ? "🌐 Automated Chore: Webhook Intercepted (Held Safely)"
+      : `⚡ Automated Chore: Rehearsal Exec (${name})`;
+
   return {
     ...base,
     kind: "exec",
     categoryBadge: "WORKSPACE · WRITING STAGED FILE",
-    title: external ? "Outbox Interceptor" : "Rehearsal Exec Console",
+    title: execTitle,
     path: `${name}()`,
     liveLabel: external ? "INTERCEPTING SIDE-EFFECT…" : "EXECUTING IN SANDBOX…",
     doneLabel: external ? "HELD IN DRY-RUN OUTBOX" : "VERIFIED OUTPUT",
@@ -301,7 +373,11 @@ export function outboxWindow(item: Record<string, unknown>, index: number): Live
     id: `outbox-${index}-${Date.now()}`,
     kind: "exec",
     categoryBadge: "WORKSPACE · WRITING STAGED FILE",
-    title: "Outbox Payload Inspector",
+    title: isMail
+      ? "📧 Automated Chore: Prepared Supplier Claim Email (Held Safely)"
+      : isCall
+      ? "📞 Automated Chore: Settlement Call Intercepted (Held Safely)"
+      : "Outbox Payload Inspector",
     path: isMail
       ? `send_email → ${String(item.to ?? "")}`
       : isCall

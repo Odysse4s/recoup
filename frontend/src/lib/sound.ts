@@ -324,14 +324,100 @@ class SoundEngine {
     });
   };
 
+  playForgeStart = () => {
+    this.play("forge_start", 250, (ctx, t) => {
+      // Two rhythmic blacksmith hammer-on-anvil strikes (t=0 and t=0.22s)
+      const strikes = [
+        { at: 0, pan: -0.2, gainMul: 1.0 },
+        { at: 0.22, pan: 0.2, gainMul: 1.15 },
+      ];
+      const partials = [
+        { freq: 790, peak: 0.46, decay: 0.38 },
+        { freq: 1185, peak: 0.36, decay: 0.35 },
+        { freq: 1760, peak: 0.24, decay: 0.30 },
+        { freq: 2540, peak: 0.16, decay: 0.25 },
+      ];
+
+      strikes.forEach(({ at, pan, gainMul }) => {
+        // Sharp bandpass transient impact (2600Hz, Q=4.5)
+        this.noise(ctx, t, {
+          at,
+          peak: 0.22 * gainMul,
+          attack: 0.003,
+          decay: 0.045,
+          pan,
+          filter: { type: "bandpass", q: 4.5, sweep: [[2600, 0]] },
+        });
+
+        // Inharmonic metallic bell partials
+        partials.forEach((p) => {
+          this.tone(ctx, t, {
+            freq: p.freq,
+            at,
+            type: "sine",
+            peak: p.peak * gainMul,
+            attack: 0.004,
+            decay: p.decay,
+            pan,
+          });
+          this.tone(ctx, t, {
+            freq: p.freq,
+            at,
+            type: "triangle",
+            peak: p.peak * 0.25 * gainMul,
+            attack: 0.004,
+            decay: p.decay * 0.7,
+            pan,
+            detune: 5,
+          });
+        });
+      });
+    });
+  };
+
   playForgePass = () => {
-    this.play("forge", 400, (ctx, t) => {
-      [349.23, 440.0, 523.25, 783.99].forEach((f, i) => {
-        const at = i * 0.045;
-        const pan = -0.35 + i * 0.23;
-        this.tone(ctx, t, { freq: f, at, peak: 0.36, attack: 0.006, decay: 0.28 + i * 0.04, pan });
-        this.tone(ctx, t, { freq: f * 2, at, peak: 0.07, attack: 0.006, decay: 0.18, pan, detune: 4 });
-        this.tone(ctx, t, { freq: f, at, type: "triangle", peak: 0.08, attack: 0.008, decay: 0.3, pan, detune: -6 });
+    this.play("forge_pass", 350, (ctx, t) => {
+      // Decisive final metallic anvil ring
+      const partials = [
+        { freq: 790, peak: 0.52, decay: 0.44 },
+        { freq: 1185, peak: 0.40, decay: 0.42 },
+        { freq: 1760, peak: 0.28, decay: 0.38 },
+        { freq: 2540, peak: 0.20, decay: 0.35 },
+      ];
+      // Bright octave shimmer
+      const shimmer = [
+        { freq: 1580, peak: 0.18, decay: 0.40, detune: 6 },
+        { freq: 3520, peak: 0.12, decay: 0.32, detune: -4 },
+      ];
+
+      // Sharp initial strike impact (2600Hz, Q=4.5)
+      this.noise(ctx, t, {
+        peak: 0.24,
+        attack: 0.003,
+        decay: 0.05,
+        filter: { type: "bandpass", q: 4.5, sweep: [[2600, 0]] },
+      });
+
+      // Anvil ring partials
+      partials.forEach((p, i) => {
+        const pan = -0.3 + i * 0.2;
+        this.tone(ctx, t, { freq: p.freq, peak: p.peak, attack: 0.004, decay: p.decay, pan });
+        this.tone(ctx, t, { freq: p.freq, type: "triangle", peak: p.peak * 0.22, attack: 0.004, decay: p.decay * 0.65, pan, detune: 4 });
+      });
+
+      // Octave shimmer
+      shimmer.forEach((s) => {
+        this.tone(ctx, t, { freq: s.freq, peak: s.peak, attack: 0.004, decay: s.decay, detune: s.detune });
+      });
+
+      // High-passed pink-noise hot steam / spark quench sizzle (0.25s, highpass 2400Hz -> 5200Hz sweep)
+      this.noise(ctx, t, {
+        at: 0.04,
+        peak: 0.18,
+        attack: 0.008,
+        decay: 0.25,
+        pan: 0.1,
+        filter: { type: "highpass", q: 1.2, sweep: [[2400, 0], [5200, 0.25]] },
       });
     });
   };
@@ -464,6 +550,7 @@ export const soundFx = {
   playKeyTick: engine.playKeyTick,
   playWindowPop: engine.playWindowPop,
   playWindowDock: engine.playWindowDock,
+  playForgeStart: engine.playForgeStart,
   playForgePass: engine.playForgePass,
   playRiskGateAlert: engine.playRiskGateAlert,
   playIncomingCall: engine.playIncomingCall,

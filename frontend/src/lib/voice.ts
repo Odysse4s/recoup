@@ -63,11 +63,40 @@ export function getVoiceProviderLabel(provider: VoiceProvider): string {
    ------------------------------------------------------------------------ */
 
 let sharedAudioContext: AudioContext | null = null;
+let sharedMediaElement: HTMLAudioElement | null = null;
+let activeSourceNode: AudioBufferSourceNode | null = null;
+
+export function getPrimedAudioElement(): HTMLAudioElement | null {
+  if (typeof window === "undefined") return null;
+  if (!sharedMediaElement) {
+    try {
+      const el = new Audio();
+      el.src = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA";
+      el.volume = 0.01;
+      el.setAttribute("playsinline", "true");
+      (el as unknown as { "webkit-playsinline"?: string })["webkit-playsinline"] = "true";
+      sharedMediaElement = el;
+    } catch {
+      // ignore
+    }
+  }
+  return sharedMediaElement;
+}
 
 export function unlockAudioSession(): AudioContext | null {
   if (typeof window === "undefined") return null;
 
-  // 1. Web Audio Context
+  // 1. Configure iOS 17/18 audioSession type to 'playback' for media speaker routing
+  try {
+    const nav = navigator as unknown as { audioSession?: { type: string } };
+    if (nav?.audioSession) {
+      nav.audioSession.type = "playback";
+    }
+  } catch {
+    // Ignore audioSession configuration error
+  }
+
+  // 2. Web Audio Context
   try {
     const w = window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext };
     const AudioCtor = w.AudioContext || w.webkitAudioContext;
@@ -83,19 +112,19 @@ export function unlockAudioSession(): AudioContext | null {
     // Ignore audio context errors
   }
 
-  // 2. Prime silent <audio> element to unlock iOS media playback
+  // 3. Prime silent <audio> element to unlock iOS media playback
   try {
-    const silentAudio = new Audio();
-    silentAudio.src = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA";
-    silentAudio.volume = 0.01;
-    silentAudio.play().then(() => {
-      silentAudio.pause();
-    }).catch(() => {});
+    const el = getPrimedAudioElement();
+    if (el) {
+      el.play().then(() => {
+        el.pause();
+      }).catch(() => {});
+    }
   } catch {
     // Ignore silent audio prime error
   }
 
-  // 3. Unlock SpeechSynthesis
+  // 4. Unlock SpeechSynthesis
   try {
     if (typeof window !== "undefined" && window.speechSynthesis) {
       const u = new SpeechSynthesisUtterance(" ");
@@ -110,7 +139,13 @@ export function unlockAudioSession(): AudioContext | null {
 }
 
 export function getSharedAudioContext(): AudioContext | null {
-  return sharedAudioContext || unlockAudioSession();
+  if (sharedAudioContext) {
+    if (sharedAudioContext.state === "suspended") {
+      sharedAudioContext.resume().catch(() => {});
+    }
+    return sharedAudioContext;
+  }
+  return unlockAudioSession();
 }
 
 export async function getWarmMicStream(): Promise<MediaStream | null> {
@@ -180,7 +215,7 @@ function pickVoice(): SpeechSynthesisVoice | undefined {
   );
 }
 
-async function tryRemoteTurnAudio(text: string): Promise<HTMLAudioElement | null> {
+async function fetchRemoteTurnAudio(text: string): Promise<ArrayBuffer | null> {
   try {
     const res = await fetch("/api/voice/turn-audio", {
       method: "POST",
@@ -191,14 +226,13 @@ async function tryRemoteTurnAudio(text: string): Promise<HTMLAudioElement | null
     if (!res.ok || res.status === 204 || !type.startsWith("audio")) {
       return null;
     }
-    const blob = await res.blob();
-    return new Audio(URL.createObjectURL(blob));
+    return await res.arrayBuffer();
   } catch {
     return null;
   }
 }
 
-async function tryRemote(text: string, kind: string): Promise<HTMLAudioElement | null> {
+async function fetchRemoteBriefing(text: string, kind: string): Promise<ArrayBuffer | null> {
   if (Date.now() < remoteRetryAfter) return null;
   try {
     const res = await fetch("/api/voice/briefing", {
@@ -211,8 +245,7 @@ async function tryRemote(text: string, kind: string): Promise<HTMLAudioElement |
       return null;
     }
     remoteRetryAfter = 0;
-    const blob = await res.blob();
-    return new Audio(URL.createObjectURL(blob));
+    return await res.arrayBuffer();
   } catch {
     remoteRetryAfter = Date.now() + 5000;
     return null;
@@ -228,45 +261,144 @@ export interface SpeechHooks {
 function speakOnce(text: string, kind: string, hooks: SpeechHooks) {
   return new Promise<void>((resolve) => {
     let finished = false;
-    let audio: HTMLAudioElement | null = null;
+    let localSource: AudioBufferSourceNode | null = null;
     let analyser: AnalyserNode | null = null;
+    let rafId: number | null = null;
+    let blobUrlToRevoke: string | null = null;
+
     const done = () => {
       if (finished) return;
       finished = true;
       if (cancelCurrent === done) cancelCurrent = null;
-      if (audio) {
-        audio.onplay = audio.ontimeupdate = audio.onended = audio.onerror = null;
-        if (currentAudio === audio) currentAudio = null;
-        if (audio.src.startsWith("blob:")) URL.revokeObjectURL(audio.src);
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
       }
-      analyser?.disconnect();
+      if (localSource) {
+        try {
+          localSource.stop();
+          localSource.disconnect();
+        } catch {}
+        if (activeSourceNode === localSource) activeSourceNode = null;
+        localSource = null;
+      }
+      if (sharedMediaElement && currentAudio === sharedMediaElement) {
+        try {
+          sharedMediaElement.pause();
+          sharedMediaElement.currentTime = 0;
+        } catch {}
+        sharedMediaElement.onplay = sharedMediaElement.ontimeupdate = sharedMediaElement.onended = sharedMediaElement.onerror = null;
+        currentAudio = null;
+      }
+      if (blobUrlToRevoke) {
+        URL.revokeObjectURL(blobUrlToRevoke);
+        blobUrlToRevoke = null;
+      }
+      if (analyser) {
+        try {
+          analyser.disconnect();
+        } catch {}
+        analyser = null;
+      }
       endSignal("speaking");
       hooks.onEnd();
       resolve();
     };
+
     cancelCurrent = done;
-    tryRemote(text, kind).then((remote) => {
-      if (finished) {
-        if (remote?.src.startsWith("blob:")) URL.revokeObjectURL(remote.src);
-        return;
+
+    fetchRemoteBriefing(text, kind).then(async (buf) => {
+      if (finished) return;
+
+      if (buf && buf.byteLength > 0) {
+        const ctx = getSharedAudioContext();
+        if (ctx) {
+          if (ctx.state === "suspended") {
+            await ctx.resume().catch(() => {});
+          }
+          if (finished) return;
+
+          let audioBuf: AudioBuffer | null = null;
+          try {
+            audioBuf = await ctx.decodeAudioData(buf.slice(0));
+          } catch (decodeErr) {
+            console.warn("decodeAudioData failed", decodeErr);
+          }
+
+          if (audioBuf && !finished) {
+            try {
+              const src = ctx.createBufferSource();
+              src.buffer = audioBuf;
+
+              const nodeAnalyser = ctx.createAnalyser();
+              nodeAnalyser.fftSize = 64;
+              nodeAnalyser.smoothingTimeConstant = 0.72;
+              src.connect(nodeAnalyser);
+              nodeAnalyser.connect(ctx.destination);
+              analyser = nodeAnalyser;
+
+              localSource = src;
+              activeSourceNode = src;
+
+              const duration = audioBuf.duration;
+              const startCtxTime = ctx.currentTime;
+
+              src.onended = () => {
+                done();
+              };
+
+              setSignal({ mode: "speaking", provider: "fal", analyser: nodeAnalyser });
+              hooks.onStart();
+
+              const updateProgress = () => {
+                if (finished) return;
+                const elapsed = ctx.currentTime - startCtxTime;
+                if (duration > 0) {
+                  hooks.onProgress?.(Math.min(1, elapsed / duration));
+                }
+                if (elapsed < duration) {
+                  rafId = requestAnimationFrame(updateProgress);
+                }
+              };
+              rafId = requestAnimationFrame(updateProgress);
+
+              src.start(0);
+              return;
+            } catch (playErr) {
+              console.warn("AudioBufferSourceNode play failed", playErr);
+            }
+          }
+        }
+
+        // Fallback: reuse sharedMediaElement
+        if (!finished) {
+          try {
+            const blob = new Blob([buf], { type: "audio/wav" });
+            const blobUrl = URL.createObjectURL(blob);
+            blobUrlToRevoke = blobUrl;
+            const el = getPrimedAudioElement() || new Audio();
+            currentAudio = el;
+            el.src = blobUrl;
+            analyser = soundFx.attachVoiceAnalyser(el);
+            el.onplay = () => {
+              setSignal({ mode: "speaking", provider: "fal", analyser });
+              hooks.onStart();
+            };
+            el.ontimeupdate = () => {
+              if (el.duration > 0) hooks.onProgress?.(el.currentTime / el.duration);
+            };
+            el.onended = done;
+            el.onerror = done;
+            await el.play();
+            return;
+          } catch (elErr) {
+            console.warn("sharedMediaElement fallback play failed", elErr);
+          }
+        }
       }
-      if (remote) {
-        const el = remote;
-        audio = el;
-        currentAudio = el;
-        analyser = soundFx.attachVoiceAnalyser(el);
-        el.onplay = () => {
-          setSignal({ mode: "speaking", provider: "fal", analyser });
-          hooks.onStart();
-        };
-        el.ontimeupdate = () => {
-          if (el.duration > 0) hooks.onProgress?.(el.currentTime / el.duration);
-        };
-        el.onended = done;
-        el.onerror = done;
-        el.play().catch(done);
-        return;
-      }
+
+      // Fallback: Web Speech Synthesis
+      if (finished) return;
       const synth = window.speechSynthesis;
       if (!synth) return done();
       const u = new SpeechSynthesisUtterance(text);
@@ -309,45 +441,144 @@ export function speakBriefing(text: string, kind: string, hooks: SpeechHooks, in
 function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
   return new Promise<void>((resolve) => {
     let finished = false;
-    let audio: HTMLAudioElement | null = null;
+    let localSource: AudioBufferSourceNode | null = null;
     let analyser: AnalyserNode | null = null;
+    let rafId: number | null = null;
+    let blobUrlToRevoke: string | null = null;
+
     const done = () => {
       if (finished) return;
       finished = true;
       if (cancelCurrent === done) cancelCurrent = null;
-      if (audio) {
-        audio.onplay = audio.ontimeupdate = audio.onended = audio.onerror = null;
-        if (currentAudio === audio) currentAudio = null;
-        if (audio.src.startsWith("blob:")) URL.revokeObjectURL(audio.src);
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
       }
-      analyser?.disconnect();
+      if (localSource) {
+        try {
+          localSource.stop();
+          localSource.disconnect();
+        } catch {}
+        if (activeSourceNode === localSource) activeSourceNode = null;
+        localSource = null;
+      }
+      if (sharedMediaElement && currentAudio === sharedMediaElement) {
+        try {
+          sharedMediaElement.pause();
+          sharedMediaElement.currentTime = 0;
+        } catch {}
+        sharedMediaElement.onplay = sharedMediaElement.ontimeupdate = sharedMediaElement.onended = sharedMediaElement.onerror = null;
+        currentAudio = null;
+      }
+      if (blobUrlToRevoke) {
+        URL.revokeObjectURL(blobUrlToRevoke);
+        blobUrlToRevoke = null;
+      }
+      if (analyser) {
+        try {
+          analyser.disconnect();
+        } catch {}
+        analyser = null;
+      }
       endSignal("speaking");
       hooks?.onEnd?.();
       resolve();
     };
+
     cancelCurrent = done;
-    tryRemoteTurnAudio(text).then((remote) => {
-      if (finished) {
-        if (remote?.src.startsWith("blob:")) URL.revokeObjectURL(remote.src);
-        return;
+
+    fetchRemoteTurnAudio(text).then(async (buf) => {
+      if (finished) return;
+
+      if (buf && buf.byteLength > 0) {
+        const ctx = getSharedAudioContext();
+        if (ctx) {
+          if (ctx.state === "suspended") {
+            await ctx.resume().catch(() => {});
+          }
+          if (finished) return;
+
+          let audioBuf: AudioBuffer | null = null;
+          try {
+            audioBuf = await ctx.decodeAudioData(buf.slice(0));
+          } catch (decodeErr) {
+            console.warn("decodeAudioData failed", decodeErr);
+          }
+
+          if (audioBuf && !finished) {
+            try {
+              const src = ctx.createBufferSource();
+              src.buffer = audioBuf;
+
+              const nodeAnalyser = ctx.createAnalyser();
+              nodeAnalyser.fftSize = 64;
+              nodeAnalyser.smoothingTimeConstant = 0.72;
+              src.connect(nodeAnalyser);
+              nodeAnalyser.connect(ctx.destination);
+              analyser = nodeAnalyser;
+
+              localSource = src;
+              activeSourceNode = src;
+
+              const duration = audioBuf.duration;
+              const startCtxTime = ctx.currentTime;
+
+              src.onended = () => {
+                done();
+              };
+
+              setSignal({ mode: "speaking", provider: "fal", analyser: nodeAnalyser });
+              hooks?.onStart?.();
+
+              const updateProgress = () => {
+                if (finished) return;
+                const elapsed = ctx.currentTime - startCtxTime;
+                if (duration > 0) {
+                  hooks?.onProgress?.(Math.min(1, elapsed / duration));
+                }
+                if (elapsed < duration) {
+                  rafId = requestAnimationFrame(updateProgress);
+                }
+              };
+              rafId = requestAnimationFrame(updateProgress);
+
+              src.start(0);
+              return;
+            } catch (playErr) {
+              console.warn("AudioBufferSourceNode play failed", playErr);
+            }
+          }
+        }
+
+        // Fallback: reuse sharedMediaElement
+        if (!finished) {
+          try {
+            const blob = new Blob([buf], { type: "audio/wav" });
+            const blobUrl = URL.createObjectURL(blob);
+            blobUrlToRevoke = blobUrl;
+            const el = getPrimedAudioElement() || new Audio();
+            currentAudio = el;
+            el.src = blobUrl;
+            analyser = soundFx.attachVoiceAnalyser(el);
+            el.onplay = () => {
+              setSignal({ mode: "speaking", provider: "fal", analyser });
+              hooks?.onStart?.();
+            };
+            el.ontimeupdate = () => {
+              if (el.duration > 0) hooks?.onProgress?.(el.currentTime / el.duration);
+            };
+            el.onended = done;
+            el.onerror = done;
+            await el.play();
+            return;
+          } catch (elErr) {
+            console.warn("sharedMediaElement fallback play failed", elErr);
+          }
+        }
       }
-      if (remote) {
-        const el = remote;
-        audio = el;
-        currentAudio = el;
-        analyser = soundFx.attachVoiceAnalyser(el);
-        el.onplay = () => {
-          setSignal({ mode: "speaking", provider: "fal", analyser });
-          hooks?.onStart?.();
-        };
-        el.ontimeupdate = () => {
-          if (el.duration > 0) hooks?.onProgress?.(el.currentTime / el.duration);
-        };
-        el.onended = done;
-        el.onerror = done;
-        el.play().catch(done);
-        return;
-      }
+
+      // Fallback: Web Speech Synthesis
+      if (finished) return;
       const synth = window.speechSynthesis;
       if (!synth) return done();
       const u = new SpeechSynthesisUtterance(text);
@@ -422,11 +653,26 @@ export function speakCallTurn(
 export function stopSpeaking() {
   generation += 1;
   window.speechSynthesis?.cancel();
+  if (activeSourceNode) {
+    try {
+      activeSourceNode.stop();
+      activeSourceNode.disconnect();
+    } catch {}
+    activeSourceNode = null;
+  }
+  if (sharedMediaElement) {
+    try {
+      sharedMediaElement.pause();
+      sharedMediaElement.currentTime = 0;
+    } catch {}
+  }
   if (currentAudio) {
-    currentAudio.pause();
+    try {
+      currentAudio.pause();
+    } catch {}
+    currentAudio = null;
   }
   cancelCurrent?.();
-  currentAudio = null;
   chain = Promise.resolve();
   endSignal("speaking");
 }

@@ -37,7 +37,7 @@ import {
 } from "../lib/types";
 import { usePersistentState } from "../lib/usePersistentState";
 import { speakBriefing, speakCallTurn, stopSpeaking } from "../lib/voice";
-import { diffWindow, fileWindow, forgeWindow, outboxWindow, toolWindow } from "../lib/windows";
+import { diffWindow, fileWindow, forgeSpecWindow, forgeWindow, outboxWindow, toolWindow } from "../lib/windows";
 import {
   buildDemoAadeXml,
   mockDecisionEvents,
@@ -145,6 +145,41 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   const speedRef = useRef(speed);
   speedRef.current = speed;
 
+  const deferredApprovalRef = useRef<ApprovalNeededPayload | null>(null);
+  const phoneCallActiveRef = useRef(false);
+  const phoneCooldownTimerRef = useRef<number | null>(null);
+
+  const markPhoneCallActive = useCallback(() => {
+    if (phoneCooldownTimerRef.current !== null) {
+      window.clearTimeout(phoneCooldownTimerRef.current);
+      phoneCooldownTimerRef.current = null;
+    }
+    phoneCallActiveRef.current = true;
+    if (windowsEnabledRef.current) {
+      stopSpeaking();
+      setSpeaking(false);
+    }
+  }, []);
+
+  const markPhoneCallEnded = useCallback(() => {
+    if (phoneCooldownTimerRef.current !== null) {
+      window.clearTimeout(phoneCooldownTimerRef.current);
+    }
+    phoneCooldownTimerRef.current = window.setTimeout(() => {
+      phoneCallActiveRef.current = false;
+      phoneCooldownTimerRef.current = null;
+    }, 8000);
+  }, []);
+
+  useEffect(() => {
+    const isConsultActive = Boolean(operatorConsult?.active || operatorConsult?.ringing);
+    if (isConsultActive) {
+      markPhoneCallActive();
+    } else if (operatorConsult?.end) {
+      markPhoneCallEnded();
+    }
+  }, [operatorConsult?.active, operatorConsult?.ringing, operatorConsult?.end, markPhoneCallActive, markPhoneCallEnded]);
+
   useEffect(() => {
     liveCountRef.current = windows.filter((w) => !w.pinned && !w.manual).length;
   }, [windows]);
@@ -178,6 +213,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     (text: string, kind: string, interrupt = false) => {
       setLastBriefing(text);
       if (!voiceRef.current) return;
+      if (windowsEnabledRef.current && phoneCallActiveRef.current) return;
       speakBriefing(text, kind, speechHooks(text), interrupt);
     },
     [speechHooks]
@@ -185,6 +221,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
 
   const replayBriefing = useCallback(() => {
     if (!lastBriefing) return;
+    if (windowsEnabledRef.current && phoneCallActiveRef.current) return;
     speakBriefing(lastBriefing, "replay", speechHooks(lastBriefing), true);
   }, [lastBriefing, speechHooks]);
 
@@ -255,17 +292,34 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         // Hydrate pending approval
         const nextPending = data.pending_approval ?? (data.pending_approvals?.length ? data.pending_approvals[0] : null);
         if (nextPending) {
-          if (queueRef.current.length > 0) {
-            while (queueRef.current.length > 0) {
-              const flushed = queueRef.current.shift();
-              if (flushed) applyRef.current(flushed);
+          if (!windowsEnabledRef.current) {
+            // On mobile: instant hydration so phone rings immediately
+            if (queueRef.current.length > 0) {
+              while (queueRef.current.length > 0) {
+                const flushed = queueRef.current.shift();
+                if (flushed) applyRef.current(flushed);
+              }
+              setQueued(0);
             }
-            setQueued(0);
+            setPendingApproval(nextPending);
+            setStage("gate");
+            setRunStatus((curr) => (curr === "running" || curr === "idle" ? "awaiting" : curr));
+          } else {
+            // On desktop: do NOT instant-flush if pacer queue still has live windows pacing out!
+            const hasPendingPacerEvents = queueRef.current.some((e) =>
+              ["forge_spec", "forge_test", "tool_call", "tool_done", "approval_needed"].includes(e.type)
+            );
+            if (hasPendingPacerEvents) {
+              deferredApprovalRef.current = nextPending;
+            } else {
+              deferredApprovalRef.current = null;
+              setPendingApproval(nextPending);
+              setStage("gate");
+              setRunStatus((curr) => (curr === "running" || curr === "idle" ? "awaiting" : curr));
+            }
           }
-          setPendingApproval(nextPending);
-          setStage("gate");
-          setRunStatus((curr) => (curr === "running" || curr === "idle" ? "awaiting" : curr));
         } else if (modeRef.current === "live") {
+          deferredApprovalRef.current = null;
           setPendingApproval(null);
         }
 
@@ -451,12 +505,14 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   }, []);
 
   const dockWindow = useCallback((id: string, target: DockTarget | null) => {
+    let existed = false;
     setWindows((ws) => {
       const w = ws.find((x) => x.id === id);
+      if (w) existed = true;
       if (w?.toolName && !w.manual) setLanding((l) => l.filter((n) => n !== w.toolName));
       return ws.filter((x) => x.id !== id);
     });
-    if (target) {
+    if (target && existed) {
       setPulses((p) => ({ ...p, [target]: p[target] + 1 }));
       soundFx.playWindowDock();
     }
@@ -595,7 +651,17 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     const line = narrate(ev, activeBrandName);
     if (line) setNarration(line);
     const b = briefingFor(ev, activeBrandName);
-    if (b) brief(b, ev.type, ev.type === "approval_needed");
+    if (b) {
+      const isVoiceCallApproval =
+        ev.type === "approval_needed" &&
+        ((ev.payload as unknown as ApprovalNeededPayload)?.channel === "voice_call" ||
+          phoneCallActiveRef.current);
+      if (windowsEnabledRef.current && (phoneCallActiveRef.current || isVoiceCallApproval)) {
+        setLastBriefing(b);
+      } else {
+        brief(b, ev.type, ev.type === "approval_needed");
+      }
+    }
 
     switch (ev.type) {
       case "rehearse_start":
@@ -618,11 +684,15 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         break;
       }
       case "call_start": {
-        if (windowsEnabledRef.current) {
-          stopSpeaking();
-          setSpeaking(false);
-        }
         const p = ev.payload as unknown as CallStartPayload;
+        const isUserConsult = p.mode === "user_consult" || p.channel === "voice_call" || !p.mode;
+        if (isUserConsult) {
+          markPhoneCallActive();
+          if (windowsEnabledRef.current) {
+            stopSpeaking();
+            setSpeaking(false);
+          }
+        }
         const callId = String(p.call_id ?? "CONSULT-CLM-D-1042");
         const isConnected = p.call_status === "connected";
         setOperatorConsult((prev) => ({
@@ -650,6 +720,11 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       }
       case "call_turn": {
         const turn = ev.payload as unknown as CallTurnPayload;
+        markPhoneCallActive();
+        if (windowsEnabledRef.current) {
+          stopSpeaking();
+          setSpeaking(false);
+        }
         const callId = String(turn.call_id ?? "");
         const inferredChoice: OperatorChoice | null =
           turn.speaker === "user"
@@ -706,7 +781,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           voiceRef.current &&
           turn.speaker === "agent" &&
           Boolean(turn.text) &&
-          (!windowsEnabledRef.current || modeRef.current === "demo");
+          !windowsEnabledRef.current;
 
         if (shouldAutoSpeakTurn && turn.text) {
           speakCallTurn("agent", turn.text, {
@@ -723,6 +798,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         break;
       }
       case "call_end": {
+        markPhoneCallEnded();
         const endPayload = ev.payload as unknown as CallEndPayload;
         const callId = String(endPayload.call_id ?? "");
         const consultClaimId = callId.replace(/^CONSULT-/, "").replace(/^CALL-/, "") || "CLM-D-1042";
@@ -761,18 +837,69 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         setPlan(ev.payload as unknown as PlanPayload);
         setStage("plan");
         break;
-      case "forge_spec":
-        setForgeSpec(ev.payload as unknown as ForgeSpecPayload);
+      case "forge_spec": {
+        const spec = ev.payload as unknown as ForgeSpecPayload;
+        setForgeSpec(spec);
         setForgeTest(null);
         setStage("forge");
+        soundFx.playForgeStart();
+        if (windowsEnabledRef.current && spec?.name) {
+          const liveId = `forge-live-${spec.name}`;
+          setWindows((ws) => ws.filter((w) => w.id !== liveId));
+          const specWin = forgeSpecWindow(spec);
+          spawnWindow({
+            ...specWin,
+            id: liveId,
+            pinned: true,
+          });
+        }
         break;
+      }
       case "forge_test": {
         const ft = ev.payload as unknown as ForgeTestPayload;
         setForgeTest(ft);
         setForgedCode((m) => ({ ...m, [ft.name]: ft }));
         setStage("forge");
         if (ft.ast_passed && ft.test_results.length > 0 && ft.test_results.every((r) => r.passed)) soundFx.playForgePass();
-        spawnWindow(forgeWindow(ft, ev.latency_ms || undefined));
+        if (windowsEnabledRef.current) {
+          const liveId = `forge-live-${ft.name}`;
+          const existingWin = windows.find((w) => w.id === liveId);
+          const fresh = forgeWindow(ft, ev.latency_ms || undefined);
+
+          if (existingWin) {
+            setWindows((ws) =>
+              ws.map((w) =>
+                w.id === liveId
+                  ? {
+                      ...w,
+                      ...fresh,
+                      id: liveId,
+                      pinned: false,
+                      doneLabel: ft.registered ? "REGISTERED" : "REJECTED",
+                      code: ft.code,
+                      assertions: fresh.assertions,
+                      toolName: fresh.toolName,
+                      telemetry: fresh.telemetry,
+                      latencyMs: ev.latency_ms || w.latencyMs,
+                    }
+                  : w
+              )
+            );
+            window.setTimeout(() => {
+              dockWindow(liveId, "vault");
+            }, 2200);
+          } else {
+            const winToSpawn = {
+              ...fresh,
+              id: liveId,
+              pinned: false,
+            };
+            spawnWindow(winToSpawn);
+            window.setTimeout(() => {
+              dockWindow(liveId, "vault");
+            }, 2200);
+          }
+        }
         break;
       }
       case "forge_registered":
@@ -825,6 +952,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         setStage("verify");
         break;
       case "approval_needed":
+        deferredApprovalRef.current = null;
         setPendingApproval(ev.payload as unknown as ApprovalNeededPayload);
         setStage("gate");
         setRunStatus("awaiting");
@@ -832,6 +960,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         else soundFx.playIncomingCall();
         break;
       case "approval_result": {
+        deferredApprovalRef.current = null;
         const ok = Boolean((ev.payload as { approved?: boolean }).approved);
         setPendingApproval(null);
         setStage(ok ? "commit" : "gate");
@@ -889,8 +1018,24 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   useEffect(() => {
     const timer = window.setInterval(() => {
       const next = queueRef.current[0];
-      if (!next) return;
-      if (next.type === "approval_needed" || next.type === "call_start") {
+      if (!next) {
+        if (deferredApprovalRef.current && windowsEnabledRef.current) {
+          const deferred = deferredApprovalRef.current;
+          deferredApprovalRef.current = null;
+          setPendingApproval(deferred);
+          setStage("gate");
+          setRunStatus((curr) => (curr === "running" || curr === "idle" ? "awaiting" : curr));
+        }
+        return;
+      }
+      if (next.type === "approval_needed") {
+        queueRef.current.shift();
+        setQueued(queueRef.current.length);
+        deferredApprovalRef.current = null;
+        applyRef.current(next);
+        return;
+      }
+      if (next.type === "call_start") {
         while (queueRef.current.length > 0) {
           const flushed = queueRef.current.shift();
           if (flushed) applyRef.current(flushed);
@@ -901,6 +1046,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       const callName = next.type === "tool_call" ? callOf(next)?.name ?? "" : "";
       const spawns =
         next.type === "forge_test" ||
+        next.type === "forge_spec" ||
         (next.type === "tool_call" && !["read_file", "query_db"].includes(callName));
       if (spawns && liveCountRef.current >= MAX_LIVE_WINDOWS) return;
       queueRef.current.shift();
@@ -933,10 +1079,14 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           // On desktop:
           if (parsed.type === "approval_result") {
             queueRef.current = queueRef.current.filter((q) => q.type !== "approval_needed");
+            deferredApprovalRef.current = null;
             applyRef.current(parsed);
-          } else if (parsed.type === "approval_needed" || parsed.type === "call_start") {
+          } else if (parsed.type === "approval_needed") {
+            // Do NOT instant-flush! Enqueue so prior tool/forge live windows pace out first!
+            enqueue([parsed]);
+          } else if (parsed.type === "call_start") {
             // Speed-drain any remaining queued rehearsal events so desktop catches up immediately,
-            // and apply approval_needed / call_start right away
+            // and apply call_start right away
             while (queueRef.current.length > 0) {
               const flushed = queueRef.current.shift();
               if (flushed) applyRef.current(flushed);
@@ -965,6 +1115,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
 
   // ---------------------------------------------------------------- actions
   const clearRun = () => {
+    deferredApprovalRef.current = null;
     restoreDemoBaseline(false);
     queueRef.current = [];
     setQueued(0);
@@ -1032,6 +1183,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   const runDemo = runStageDemo;
 
   const decide = async (reqId: string, approved: boolean) => {
+    deferredApprovalRef.current = null;
     setPendingApproval(null);
     setRunStatus(approved ? "committing" : "aborted");
     setStage(approved ? "commit" : "gate");
@@ -1308,6 +1460,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   };
 
   const escalateToPhone = async (reqIdArg?: string | null, claimIdArg?: string) => {
+    markPhoneCallActive();
     const reqId = reqIdArg ?? pendingApproval?.req_id ?? null;
     const claimsRows = wsStateRef.current?.tables?.claims ?? [];
     const latestClaim = claimsRows[claimsRows.length - 1];
@@ -1315,6 +1468,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     const claimAmount = Number(latestClaim?.amount ?? 587.3);
 
     stopSpeaking();
+    setSpeaking(false);
     setNarration(`Operator away from desk — ringing mobile phone to resolve \`${claimId}\`…`);
 
     if (modeRef.current === "demo" || (reqId && reqId.startsWith("req_demo"))) {
@@ -1424,6 +1578,11 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   };
 
   const pickupCall = useCallback(async () => {
+    markPhoneCallActive();
+    if (windowsEnabledRef.current) {
+      stopSpeaking();
+      setSpeaking(false);
+    }
     try {
       const res = await fetch("/api/call/pickup", {
         method: "POST",
@@ -1440,9 +1599,10 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         prev ? { ...prev, ringing: false, callStatus: "connected", connectedAt: prev.connectedAt ?? Date.now() } : prev
       );
     }
-  }, [operatorConsult?.callId]);
+  }, [markPhoneCallActive, operatorConsult?.callId]);
 
   const reset = async () => {
+    deferredApprovalRef.current = null;
     clearWorkspaceUi();
     setMode("live");
     try {

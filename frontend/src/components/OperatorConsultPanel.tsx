@@ -11,6 +11,7 @@ import {
   ShieldCheck,
   Smartphone,
   Volume2,
+  XCircle,
   Zap,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -262,102 +263,67 @@ export function OperatorConsultPanel({
         }
         pulseTone={callCompleted ? "ok" : isConnected ? "ok" : isRinging ? "signal" : "danger"}
       >
-        <div className="space-y-3 p-3.5">
-          {/* STATE A: Ringing iPhone Dramatic Hero Banner */}
+        <div className="space-y-2.5 p-3">
+          {/* Call Status Banners (Ringing, Connected, Live Action, Countdown) */}
           <AnimatePresence initial={false}>
             {isRinging && (
               <motion.div
                 key="banner-ringing"
-                initial={{ opacity: 0, y: -6, scale: 0.98 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, height: 0 }}
-                className="relative overflow-hidden rounded-xl border border-signal/50 bg-gradient-to-r from-signal/15 via-warn/15 to-signal/15 p-3.5 shadow-md"
+                className="flex items-center justify-between rounded-lg border border-signal/40 bg-signal/10 px-3 py-1.5 text-[11.5px]"
               >
-                <div className="flex flex-wrap items-center justify-between gap-2.5">
-                  <div className="flex items-center gap-2.5">
-                    <span className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-signal text-white">
-                      <span className="absolute inset-0 animate-ping rounded-lg bg-signal/60" />
-                      <Radio className="relative h-4 w-4" />
-                    </span>
-                    <div>
-                      <div className="flex items-center gap-2 font-mono text-[13px] font-bold tracking-wide text-ink">
-                        RINGING OPERATOR&apos;S iPHONE…
-                        <Dot tone="signal" live />
-                      </div>
-                      <div className="text-[12px] font-medium text-ink-2">
-                        Tap <strong className="font-semibold text-signal">Accept Call</strong> on iPhone for hands-free Grok Voice
-                      </div>
-                    </div>
-                  </div>
-                  <Chip tone="signal" className="font-mono text-[10.5px]">
-                    Hands-Free Grok Voice Ready · /mobile
-                  </Chip>
+                <div className="flex items-center gap-2">
+                  <Radio className="h-3.5 w-3.5 animate-pulse text-signal" />
+                  <span className="font-mono font-bold text-ink">RINGING OPERATOR&apos;S iPHONE…</span>
+                  <span className="text-ink-2">Tap Accept on iPhone for hands-free Grok Voice</span>
                 </div>
+                <Chip tone="signal" className="font-mono text-[9.5px]">/mobile</Chip>
               </motion.div>
             )}
           </AnimatePresence>
 
-          {/* STATE B: Connected iPhone Live Call Monitor Hero Banner */}
           <AnimatePresence initial={false}>
             {isConnected && (
               <motion.div
                 key="banner-connected"
-                initial={{ opacity: 0, y: -6, scale: 0.98 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, height: 0 }}
-                className="relative overflow-hidden rounded-xl border border-ok/50 bg-gradient-to-r from-ok/15 via-emerald-500/10 to-ok/15 p-3.5 shadow-md ring-1 ring-ok/30"
+                className="flex items-center justify-between rounded-lg border border-ok/40 bg-ok/10 px-3 py-1.5 text-[11.5px]"
               >
-                <div className="flex flex-wrap items-center justify-between gap-2.5">
-                  <div className="flex items-center gap-2.5">
-                    <span className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-ok text-white">
-                      <span className="absolute inset-0 animate-ping rounded-lg bg-ok/40" />
-                      <Smartphone className="relative h-4 w-4" />
-                    </span>
-                    <div>
-                      <div className="flex items-center gap-2 font-mono text-[13px] font-bold tracking-wide text-ok">
-                        LIVE GROK VOICE CALL CONNECTED · {callDurationStr}
-                        <Dot tone="ok" live />
-                      </div>
-                      <div className="text-[12px] font-medium text-ink-2">
-                        Two-way hands-free audio streaming · Desktop synchronized live
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <VoiceOrb variant="bars" tone="ok" className="h-4 w-16" />
-                    <Chip tone="ok" className="font-mono text-[10px] font-semibold">
-                      Hands-Free Auto-VAD
-                    </Chip>
-                  </div>
+                <div className="flex items-center gap-2">
+                  <Dot tone="ok" live />
+                  <span className="font-mono font-bold text-ok">LIVE GROK VOICE CONNECTED · {callDurationStr}</span>
+                  <span className="hidden text-ink-2 md:inline">Two-way audio streaming · Desktop synced</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <VoiceOrb variant="bars" tone="ok" className="h-3.5 w-12" />
+                  <Chip tone="ok" className="font-mono text-[9.5px]">Auto-VAD</Chip>
                 </div>
               </motion.div>
             )}
           </AnimatePresence>
 
-          {/* Bright Live Voice-Triggered Desktop Action Pill */}
           <AnimatePresence initial={false}>
             {extConsult?.lastUiAction && (
               <motion.div
                 key={`${extConsult.lastUiAction.action}-${extConsult.lastUiAction.ts}`}
-                initial={{ opacity: 0, scale: 0.98, y: -4 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, height: 0 }}
-                className="flex items-center gap-2.5 rounded-xl border border-signal/50 bg-signal/[0.12] px-3.5 py-2 text-[12.5px] font-semibold text-ink shadow-sm"
+                className="flex items-center gap-2 rounded-lg border border-signal/40 bg-signal/[0.08] px-3 py-1.5 text-[11.5px]"
               >
-                <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-signal text-white">
-                  <Zap className="h-3 w-3" />
+                <Zap className="h-3.5 w-3.5 text-signal" />
+                <span className="min-w-0 flex-1 truncate font-medium text-ink">
+                  Live Voice Action: <strong className="text-signal">{extConsult.lastUiAction.label}</strong>
                 </span>
-                <span className="min-w-0 flex-1 truncate">
-                  ⚡ Live Voice Action: <span className="font-bold text-signal">{extConsult.lastUiAction.label}</span>
-                </span>
-                <Chip tone="signal" className="shrink-0 font-mono text-[10px]">
-                  Desktop Synced
-                </Chip>
+                <Chip tone="signal" className="font-mono text-[9.5px]">Desktop Synced</Chip>
               </motion.div>
             )}
           </AnimatePresence>
 
-          {/* 3-Second Desktop Presence Countdown Banner */}
           <AnimatePresence initial={false}>
             {countdownActive && (
               <motion.div
@@ -365,146 +331,45 @@ export function OperatorConsultPanel({
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: "auto" }}
                 exit={{ opacity: 0, height: 0 }}
-                className="overflow-hidden rounded-xl border border-warn/40 bg-warn/[0.07] p-3"
+                className="overflow-hidden rounded-lg border border-warn/40 bg-warn/[0.06] p-2"
               >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <Chip tone={countdownPaused ? "ok" : "warn"}>
-                      <Dot tone={countdownPaused ? "ok" : "warn"} live={!countdownPaused} />
-                      {countdownPaused ? "Desktop Active" : "Auto-Escalate"}
-                    </Chip>
-                    <span className="text-[12px] font-semibold text-ink">
-                      {countdownPaused
-                        ? `Desktop presence confirmed — auto-call paused (${secondsLeft}s remaining)`
-                        : `Operator away from desk? Calling iPhone in ${secondsLeft}…`}
-                    </span>
-                  </div>
-
-                  <div className="flex shrink-0 items-center gap-1.5">
+                <div className="flex items-center justify-between gap-2 text-[11.5px]">
+                  <span className="font-medium text-ink">
+                    {countdownPaused ? `Desktop active (${secondsLeft}s paused)` : `Calling iPhone in ${secondsLeft}s…`}
+                  </span>
+                  <div className="flex items-center gap-1.5">
                     <button
                       type="button"
-                      aria-pressed={stayAtDesk}
                       onClick={() => {
                         soundFx.playUiClick();
                         setStayAtDesk((v) => !v);
                       }}
-                      className={cx(
-                        btn(stayAtDesk ? "ok" : "outline", "sm"),
-                        "h-7 px-2.5 text-[11.5px]"
-                      )}
+                      className={cx(btn(stayAtDesk ? "ok" : "outline", "sm"), "h-6 px-2 text-[10.5px]")}
                     >
-                      {stayAtDesk ? <MonitorCheck className="h-3.5 w-3.5" /> : <Hand className="h-3.5 w-3.5" />}
-                      I&apos;m at My Desk · Decide Here
+                      {stayAtDesk ? <MonitorCheck className="h-3 w-3" /> : <Hand className="h-3 w-3" />}
+                      At Desk
                     </button>
                     <button
                       type="button"
                       onClick={() => {
                         soundFx.playUiClick();
-                        if (pendingApproval?.req_id) {
-                          escalatedReqIdRef.current = pendingApproval.req_id;
-                        }
+                        if (pendingApproval?.req_id) escalatedReqIdRef.current = pendingApproval.req_id;
                         onEscalateToPhone(activeReqId, claimId);
                       }}
-                      className={cx(btn("signal", "sm"), "h-7 px-2.5 text-[11.5px] font-semibold shadow-sm")}
+                      className={cx(btn("signal", "sm"), "h-6 px-2 text-[10.5px] font-semibold")}
                     >
-                      <Smartphone className="h-3.5 w-3.5" />
-                      Call My iPhone Now
+                      <Smartphone className="h-3 w-3" />
+                      Call Now
                     </button>
                   </div>
-                </div>
-
-                <div className="mt-2.5 h-1.5 w-full overflow-hidden rounded-full bg-sunken">
-                  <div
-                    className={cx(
-                      "h-full rounded-full transition-[width] duration-100",
-                      countdownPaused ? "bg-ok" : "bg-warn"
-                    )}
-                    style={{ width: `${Math.max(0, Math.min(100, (remainingMs / COUNTDOWN_TOTAL_MS) * 100))}%` }}
-                  />
                 </div>
               </motion.div>
             )}
           </AnimatePresence>
 
-          {/* 3-Bullet Plain-English Executive Summary */}
-          <div className="space-y-2 rounded-xl border border-line bg-surface p-3">
-            <div className="flex items-center justify-between text-[11px] font-semibold uppercase tracking-wider text-ink-3">
-              <span>Executive Decision Brief</span>
-              <span className="font-mono text-[10px] text-ink-3">{claimId}</span>
-            </div>
-            <div className="grid grid-cols-1 gap-2 text-[12px] leading-snug">
-              <div className="flex items-start gap-2 rounded-lg border border-danger/25 bg-danger/[0.04] p-2 text-ink">
-                <span className="shrink-0 rounded bg-danger/15 px-1.5 py-0.5 font-mono text-[9.5px] font-bold uppercase text-danger">
-                  1. Problem Found
-                </span>
-                <span className="min-w-0 flex-1 font-medium">
-                  Ordered 120 hubs → 22 arrived missing/broken + invoice overcharged = <span className="font-semibold text-danger">€587.30 owed back</span>
-                </span>
-              </div>
-              <div className="flex items-start gap-2 rounded-lg border border-warn/25 bg-warn/[0.04] p-2 text-ink">
-                <span className="shrink-0 rounded bg-warn/15 px-1.5 py-0.5 font-mono text-[9.5px] font-bold uppercase text-warn">
-                  2. Staged in Safe Clone
-                </span>
-                <span className="min-w-0 flex-1 font-medium">
-                  Invoice INV-7781 frozen · Greek AADE myDATA €587.30 tax credit ready · Supplier email drafted
-                </span>
-              </div>
-              <div className="flex items-start gap-2 rounded-lg border border-ok/25 bg-ok/[0.04] p-2 text-ink">
-                <span className="shrink-0 rounded bg-ok/15 px-1.5 py-0.5 font-mono text-[9.5px] font-bold uppercase text-ok">
-                  3. Your Decision
-                </span>
-                <span className="min-w-0 flex-1 font-medium">
-                  <strong className="font-semibold text-ok">Enforce €587.30 Refund + AADE Tax Credit</strong> OR <strong className="font-semibold text-signal">Accept Free Replacement Delivery (22 Units Tomorrow)</strong>
-                </span>
-              </div>
-            </div>
-          </div>
-
-          {/* Clean Resolution Comparison Cards */}
-          <div className="grid grid-cols-1 gap-2.5 xl:grid-cols-2">
-            {/* Option A: Free Replacement Delivery (22 Units Tomorrow) */}
-            <button
-              type="button"
-              disabled={callLive && Boolean(consult?.selectedChoice)}
-              onClick={() => {
-                soundFx.playUiClick();
-                onSelectResolution("redelivery", activeReqId, claimId);
-              }}
-              className={cx(
-                "group flex flex-col justify-between rounded-xl border p-3 text-left transition-all",
-                resolvedChoice === "redelivery"
-                  ? "border-signal bg-signal/10 ring-2 ring-signal/25"
-                  : "border-line bg-sunken/60 hover:border-signal/50 hover:bg-surface"
-              )}
-            >
-              <div>
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-mono text-[10.5px] font-semibold uppercase tracking-wider text-ink-3">
-                    Option A · Physical Replacement
-                  </span>
-                  <Chip tone={resolvedChoice === "redelivery" ? "signal" : "neutral"}>
-                    {resolvedChoice === "redelivery" ? "Selected" : "AADE 9.3"}
-                  </Chip>
-                </div>
-                <div className="mt-1.5 flex items-start gap-2">
-                  <PackageCheck className="mt-0.5 h-4 w-4 shrink-0 text-signal" />
-                  <div className="text-[13.5px] font-semibold leading-snug text-ink">
-                    Accept Free Replacement Delivery (<span className="text-signal">22 Units Tomorrow</span>)
-                  </div>
-                </div>
-                <p className="mt-1.5 text-[11.5px] leading-relaxed text-ink-2">
-                  Next-day replacement of 22 missing/damaged hubs + Greek AADE <code className="font-mono text-[11px]">myDATA 9.3</code> discrepancy note + supplier email drafted to <code className="font-mono text-[11px]">accounts@kappaoffice.example</code>.
-                </p>
-              </div>
-              <div className="mt-2.5 flex items-center justify-between border-t border-line/70 pt-2 font-mono text-[13px] text-ink">
-                <span>22 hubs restocked · <span className="font-semibold text-signal">€202.30 credit</span></span>
-                <span className="font-semibold text-signal group-hover:underline">
-                  {resolvedChoice === "redelivery" ? "Committed" : "Choose Option A →"}
-                </span>
-              </div>
-            </button>
-
-            {/* Option B: Enforce €587.30 Refund + AADE Tax Credit (Recommended) */}
+          {/* PRIMARY DECISION BUTTONS (RIGHT AT THE TOP OF THE PANEL) */}
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {/* Button 1: ✅ Enforce €587.30 Refund */}
             <button
               type="button"
               disabled={callLive && Boolean(consult?.selectedChoice)}
@@ -513,55 +378,96 @@ export function OperatorConsultPanel({
                 onSelectResolution("refund", activeReqId, claimId);
               }}
               className={cx(
-                "group flex flex-col justify-between rounded-xl border p-3 text-left transition-all",
+                "group flex flex-col items-center justify-center gap-0.5 rounded-xl border p-2 text-center transition-all",
                 resolvedChoice === "refund"
-                  ? "border-ok bg-ok/12 ring-2 ring-ok/30"
-                  : "border-ok/45 bg-ok/[0.06] hover:border-ok hover:bg-ok/10"
+                  ? "border-ok bg-ok/15 text-ok ring-2 ring-ok/40"
+                  : "border-ok/45 bg-ok/[0.08] text-ink hover:border-ok hover:bg-ok/15"
               )}
             >
-              <div>
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-ok">
-                    Option B · Full Financial Recovery
-                  </span>
-                  <Chip tone="ok" solid={resolvedChoice === "refund"}>
-                    {resolvedChoice === "refund" ? "Selected · Recommended" : "Recommended · AADE 5.1"}
-                  </Chip>
-                </div>
-                <div className="mt-1.5 flex items-start gap-2">
-                  <FileCheck2 className="mt-0.5 h-4 w-4 shrink-0 text-ok" />
-                  <div className="text-[13.5px] font-semibold leading-snug text-ink">
-                    Enforce <span className="text-ok">€587.30</span> Refund + AADE Tax Credit
-                  </div>
-                </div>
-                <p className="mt-1.5 text-[11.5px] leading-relaxed text-ink-2">
-                  Freeze overcharged invoice <code className="font-mono text-[11px]">INV-7781</code> + stage Greek AADE <code className="font-mono text-[11px]">myDATA 5.1</code> credit note (€587.30 net + €140.95 24% VAT = €728.25 gross) + supplier email drafted to <code className="font-mono text-[11px]">accounts@kappaoffice.example</code>.
-                </p>
+              <div className="flex items-center gap-1.5 text-[12px] font-bold text-ok">
+                <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                <span>Enforce €587.30</span>
               </div>
-              <div className="mt-2.5 flex items-center justify-between border-t border-ok/25 pt-2 font-mono text-[13px]">
-                <span className="font-semibold text-ok">€587.30 net · €728.25 gross</span>
-                <span className="font-semibold text-ok group-hover:underline">
-                  {resolvedChoice === "refund" ? "Committed" : "Enforce Option B →"}
-                </span>
-              </div>
+              <span className="font-mono text-[9.5px] text-ink-2">AADE 5.1 (Rec)</span>
             </button>
-          </div>
 
-          {pendingApproval && onReject && (
-            <div className="flex items-center justify-between border-t border-line/60 pt-2 text-[11.5px] text-ink-3">
-              <span>Holding ERP changes &amp; outbound supplier email until authorized.</span>
+            {/* Button 2: 📦 Accept 22 Replacements */}
+            <button
+              type="button"
+              disabled={callLive && Boolean(consult?.selectedChoice)}
+              onClick={() => {
+                soundFx.playUiClick();
+                onSelectResolution("redelivery", activeReqId, claimId);
+              }}
+              className={cx(
+                "group flex flex-col items-center justify-center gap-0.5 rounded-xl border p-2 text-center transition-all",
+                resolvedChoice === "redelivery"
+                  ? "border-signal bg-signal/15 text-signal ring-2 ring-signal/40"
+                  : "border-line bg-sunken/60 text-ink hover:border-signal/50 hover:bg-surface"
+              )}
+            >
+              <div className="flex items-center gap-1.5 text-[12px] font-bold text-ink">
+                <PackageCheck className="h-3.5 w-3.5 shrink-0 text-signal" />
+                <span>Accept 22 Units</span>
+              </div>
+              <span className="font-mono text-[9.5px] text-ink-2">AADE 9.3</span>
+            </button>
+
+            {/* Button 3: 📞 Call iPhone */}
+            <button
+              type="button"
+              onClick={() => {
+                soundFx.playUiClick();
+                if (pendingApproval?.req_id) escalatedReqIdRef.current = pendingApproval.req_id;
+                onEscalateToPhone(activeReqId, claimId);
+              }}
+              className={cx(
+                "group flex flex-col items-center justify-center gap-0.5 rounded-xl border border-signal/40 bg-signal/[0.08] p-2 text-center transition-all hover:border-signal hover:bg-signal/15",
+                isConnected && "border-ok/50 bg-ok/10"
+              )}
+            >
+              <div className="flex items-center gap-1.5 text-[12px] font-bold text-signal">
+                <PhoneForwarded className="h-3.5 w-3.5 shrink-0" />
+                <span>{isConnected ? "Call Active" : isRinging ? "Ringing…" : "Call iPhone"}</span>
+              </div>
+              <span className="font-mono text-[9.5px] text-ink-2">Grok Voice /mobile</span>
+            </button>
+
+            {/* Button 4: ✕ Reject */}
+            {pendingApproval && onReject ? (
               <button
                 type="button"
                 onClick={() => {
                   soundFx.playUiClick();
                   onReject(pendingApproval.req_id);
                 }}
-                className="font-medium text-ink-3 transition-colors hover:text-danger hover:underline"
+                className="group flex flex-col items-center justify-center gap-0.5 rounded-xl border border-danger/35 bg-danger/[0.06] p-2 text-center transition-all hover:border-danger hover:bg-danger/15"
               >
-                Cancel &amp; Roll Back
+                <div className="flex items-center gap-1.5 text-[12px] font-bold text-danger">
+                  <XCircle className="h-3.5 w-3.5 shrink-0" />
+                  <span>Reject</span>
+                </div>
+                <span className="font-mono text-[9.5px] text-ink-2">Roll Back Staged</span>
               </button>
+            ) : (
+              <div className="flex flex-col items-center justify-center gap-0.5 rounded-xl border border-line bg-sunken/40 p-2 text-center">
+                <span className="text-[12px] font-medium text-ink-3">Risk Gate</span>
+                <span className="font-mono text-[9.5px] text-ok">Authorized</span>
+              </div>
+            )}
+          </div>
+
+          {/* Compressed Executive Brief: 2 Ultra-Clean Single-Line Summary Chips */}
+          <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+            <div className="flex items-center gap-2 rounded-lg border border-danger/25 bg-danger/[0.04] px-2.5 py-1 text-[11.5px] font-medium text-ink">
+              <span className="shrink-0 rounded bg-danger/15 px-1 py-0.5 font-mono text-[9px] font-bold uppercase text-danger">1. Problem</span>
+              <span className="truncate">22 bad hubs · INV-7781 frozen · AADE XML ready</span>
             </div>
-          )}
+            <div className="flex items-center gap-2 rounded-lg border border-ok/25 bg-ok/[0.04] px-2.5 py-1 text-[11.5px] font-medium text-ink">
+              <span className="shrink-0 rounded bg-ok/15 px-1 py-0.5 font-mono text-[9px] font-bold uppercase text-ok">2. Staged</span>
+              <span className="truncate">€587.30 full credit vs 22 replacements + €202.40 credit</span>
+            </div>
+          </div>
 
           {/* Live Two-Way Real-Time Subtitles & Transcript (Recoup AI <-> You on iPhone) */}
           {consult && (consult.active || consult.ringing || consult.turns.length > 0 || consult.end) && (
@@ -614,7 +520,7 @@ export function OperatorConsultPanel({
 
               <div
                 ref={transcriptRef}
-                className="scroll-thin max-h-[220px] space-y-2 overflow-y-auto pr-0.5"
+                className="scroll-thin max-h-[165px] space-y-2 overflow-y-auto pr-0.5"
                 aria-live="polite"
               >
                 {consult.turns.length === 0 && (consult.ringing || consult.active) && (

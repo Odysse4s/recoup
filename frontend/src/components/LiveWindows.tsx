@@ -11,6 +11,7 @@ import {
   Pin,
   PinOff,
   ShieldCheck,
+  Sparkles,
   SquareTerminal,
   XCircle,
 } from "lucide-react";
@@ -163,6 +164,193 @@ function TelemetryStrip({ win, progress, typing }: { win: LiveWin; progress: num
             </span>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+function ForgeAnvilVisual({ isRegistered, toolName }: { isRegistered: boolean; toolName?: string }) {
+  return (
+    <div
+      aria-label="Forge Blacksmith Anvil & Hammer"
+      className={cx(
+        "relative flex items-center justify-between overflow-hidden border-b px-4 py-2 transition-colors duration-500",
+        isRegistered
+          ? "border-emerald-500/40 bg-gradient-to-r from-slate-950 via-emerald-950/40 to-slate-950 text-emerald-200"
+          : "border-purple-500/40 bg-gradient-to-r from-slate-950 via-[#1f1035] to-slate-950 text-purple-200"
+      )}
+    >
+      {/* Background ambient forge glow */}
+      <div
+        className={cx(
+          "pointer-events-none absolute -left-10 top-1/2 h-24 w-40 -translate-y-1/2 rounded-full blur-2xl transition-colors duration-500",
+          isRegistered ? "bg-emerald-500/20" : "bg-amber-500/15"
+        )}
+      />
+
+      {/* Anvil + Hammer Animation SVG */}
+      <div className="relative flex shrink-0 items-center">
+        <svg viewBox="0 0 140 68" className="h-16 w-32 drop-shadow-lg" aria-hidden="true">
+          <defs>
+            <linearGradient id="anvilBodyGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stopColor="#475569" />
+              <stop offset="100%" stopColor="#1e293b" />
+            </linearGradient>
+            <linearGradient id="hammerHeadGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+              <stop offset="0%" stopColor="#cbd5e1" />
+              <stop offset="100%" stopColor="#64748b" />
+            </linearGradient>
+            <filter id="forgeGlow" x="-20%" y="-20%" width="140%" height="140%">
+              <feGaussianBlur stdDeviation="3" result="blur" />
+              <feComposite in="SourceGraphic" in2="blur" operator="over" />
+            </filter>
+          </defs>
+
+          {/* Anvil Base */}
+          <path d="M 18 60 L 98 60 L 88 50 L 26 50 Z" fill="#334155" stroke="#475569" strokeWidth="1" />
+          {/* Anvil Waist */}
+          <path d="M 36 50 C 36 43, 42 38, 42 34 L 78 34 C 78 38, 84 43, 84 50 Z" fill="url(#anvilBodyGrad)" />
+          {/* Anvil Horn (left) and Step/Face (right) */}
+          <path
+            d="M 10 34 C 20 34, 30 32, 40 32 L 104 32 L 104 39 L 90 39 C 86 39, 82 42, 78 42 L 40 42 C 30 42, 20 37, 10 34 Z"
+            fill="url(#anvilBodyGrad)"
+            stroke="#64748b"
+            strokeWidth="1"
+          />
+          {/* Striking surface highlight */}
+          <line x1="42" y1="32" x2="104" y2="32" stroke="#cbd5e1" strokeWidth="2" strokeLinecap="round" />
+
+          {!isRegistered ? (
+            <>
+              {/* Hot Anvil Contact Glow */}
+              <circle cx="72" cy="32" r="5" fill="#f59e0b" opacity="0.6" filter="url(#forgeGlow)" />
+              <circle cx="72" cy="32" r="2.5" fill="#fef08a" />
+
+              {/* Rhythmic Hammer Strike */}
+              <motion.g
+                animate={{
+                  rotate: [0, -38, -38, 4, 0],
+                }}
+                transition={{
+                  repeat: Infinity,
+                  duration: 0.7,
+                  times: [0, 0.25, 0.45, 0.62, 0.7],
+                  ease: "easeInOut",
+                }}
+                style={{ transformOrigin: "62px 12px" }}
+              >
+                {/* Wood Handle */}
+                <rect x="59" y="8" width="5" height="25" rx="2" fill="#d97706" stroke="#92400e" strokeWidth="0.8" />
+                {/* Steel Hammer Head */}
+                <rect x="50" y="27" width="22" height="10" rx="2" fill="url(#hammerHeadGrad)" stroke="#94a3b8" strokeWidth="0.8" />
+              </motion.g>
+
+              {/* Sparks erupting from the strike contact point */}
+              <g transform="translate(72, 32)">
+                <motion.circle
+                  cx={0}
+                  cy={0}
+                  r={2}
+                  fill="#fde047"
+                  animate={{
+                    x: [0, 18, 26],
+                    y: [0, -14, -20],
+                    opacity: [0, 1, 0],
+                    scale: [0.5, 1.4, 0],
+                  }}
+                  transition={{ repeat: Infinity, duration: 0.7, times: [0.5, 0.65, 0.9], ease: "easeOut" }}
+                />
+                <motion.circle
+                  cx={0}
+                  cy={0}
+                  r={1.8}
+                  fill="#f97316"
+                  animate={{
+                    x: [0, -16, -24],
+                    y: [0, -12, -18],
+                    opacity: [0, 1, 0],
+                    scale: [0.5, 1.3, 0],
+                  }}
+                  transition={{ repeat: Infinity, duration: 0.7, times: [0.5, 0.64, 0.88], ease: "easeOut" }}
+                />
+                <motion.circle
+                  cx={0}
+                  cy={0}
+                  r={1.5}
+                  fill="#c084fc"
+                  animate={{
+                    x: [0, 8, 14],
+                    y: [0, -20, -26],
+                    opacity: [0, 1, 0],
+                    scale: [0.5, 1.2, 0],
+                  }}
+                  transition={{ repeat: Infinity, duration: 0.7, times: [0.5, 0.66, 0.92], ease: "easeOut" }}
+                />
+                <motion.circle
+                  cx={0}
+                  cy={0}
+                  r={1.2}
+                  fill="#ffffff"
+                  animate={{
+                    x: [0, -8, -12],
+                    y: [0, -18, -24],
+                    opacity: [0, 1, 0],
+                    scale: [0.5, 1, 0],
+                  }}
+                  transition={{ repeat: Infinity, duration: 0.7, times: [0.5, 0.63, 0.85], ease: "easeOut" }}
+                />
+              </g>
+            </>
+          ) : (
+            <>
+              {/* Resting Hammer */}
+              <g transform="translate(14, 18) rotate(34 60 28)">
+                <rect x="59" y="8" width="5" height="25" rx="2" fill="#78350f" opacity="0.75" />
+                <rect x="50" y="27" width="22" height="10" rx="2" fill="url(#hammerHeadGrad)" stroke="#64748b" strokeWidth="0.8" />
+              </g>
+
+              {/* Gleaming Forged Checkmark / Starburst Badge */}
+              <g transform="translate(72, 24)">
+                <circle cx="0" cy="0" r="11" fill="#10b981" filter="url(#forgeGlow)" opacity="0.95" />
+                <path d="M -4.5 0 L -1 3.5 L 5 -2.5" fill="none" stroke="#ffffff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                {/* Shimmer rays */}
+                <line x1="0" y1="-14" x2="0" y2="-17" stroke="#34d399" strokeWidth="1.5" strokeLinecap="round" />
+                <line x1="12" y1="-8" x2="15" y2="-10" stroke="#f59e0b" strokeWidth="1.5" strokeLinecap="round" />
+                <line x1="12" y1="8" x2="15" y2="10" stroke="#34d399" strokeWidth="1.5" strokeLinecap="round" />
+                <line x1="-12" y1="-8" x2="-15" y2="-10" stroke="#f59e0b" strokeWidth="1.5" strokeLinecap="round" />
+                <line x1="-12" y1="8" x2="-15" y2="10" stroke="#34d399" strokeWidth="1.5" strokeLinecap="round" />
+              </g>
+            </>
+          )}
+        </svg>
+      </div>
+
+      {/* Telemetry info block */}
+      <div className="min-w-0 flex-1 pl-3 text-left">
+        {!isRegistered ? (
+          <div>
+            <div className="flex items-center gap-1.5 font-mono text-[11px] font-bold tracking-wide text-amber-300">
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-400" />
+              </span>
+              <span>BLACKSMITH TDD ENGINE ACTIVE</span>
+            </div>
+            <div className="mt-0.5 truncate text-[11.5px] text-purple-200/90">
+              Forging <span className="font-mono font-semibold text-white">{toolName ? `${toolName}.py` : "custom tool"}</span> · Sandboxed AST &amp; pure stdlib TDD
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div className="flex items-center gap-1.5 font-mono text-[11px] font-bold tracking-wide text-emerald-300">
+              <Sparkles className="h-3.5 w-3.5 text-amber-300 animate-pulse" />
+              <span>TOOL FORGED &amp; VERIFIED IN SANDBOX</span>
+            </div>
+            <div className="mt-0.5 truncate text-[11.5px] text-emerald-100">
+              Tool <span className="font-mono font-semibold text-white">{toolName ? `${toolName}.py` : ""}</span> added to <span className="font-semibold text-amber-300">Agent Toolbox ↘</span>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -332,8 +520,12 @@ function LiveWindow({
     ? { label: win.doneLabel, tone: allOk ? ("ok" as Tone) : ("danger" as Tone) }
     : { label: win.liveLabel, tone: meta.tone };
 
-  const bannerTitle = win.categoryBadge ?? meta.defaultCategory;
   const isForge = win.kind === "forge";
+  const isForgeRegistered = isForge && win.doneLabel === "REGISTERED";
+  const forgeBannerTitle = isForgeRegistered
+    ? "⚒️ FORGED & VERIFIED — ADDED TO TOOLBOX ↘"
+    : "⚒️ THE FORGE — BUILDING CUSTOM TOOL";
+  const bannerTitle = isForge ? forgeBannerTitle : (win.categoryBadge ?? meta.defaultCategory);
   const isSqlite = win.kind === "sqlite";
   const isWorkspaceFile = win.kind === "editor" || win.kind === "exec";
   const hasMyDataXml = isWorkspaceFile && /aade|mydata/i.test(`${win.path}\n${win.code}`);
@@ -347,7 +539,11 @@ function LiveWindow({
         ref={scope}
         style={{
           opacity: 0,
-          boxShadow: `var(--shadow-float), 0 0 0 1.5px color-mix(in oklab, ${meta.hex} 65%, transparent), 0 0 54px -8px color-mix(in oklab, ${meta.hex} 60%, transparent)`,
+          boxShadow: isForgeRegistered
+            ? "var(--shadow-float), 0 0 0 2px #10B981, 0 0 54px -4px rgba(16, 185, 129, 0.55), 0 0 24px rgba(245, 158, 11, 0.35)"
+            : isForge
+            ? "var(--shadow-float), 0 0 0 1.5px #A855F7, 0 0 54px -6px rgba(168, 85, 247, 0.45)"
+            : `var(--shadow-float), 0 0 0 1.5px color-mix(in oklab, ${meta.hex} 65%, transparent), 0 0 54px -8px color-mix(in oklab, ${meta.hex} 60%, transparent)`,
         }}
         className="relative w-[min(660px,calc(100vw-2rem))] overflow-hidden rounded-xl bg-raised"
       >
@@ -355,8 +551,11 @@ function LiveWindow({
         <div
           onPointerDown={(e) => dragControls.start(e)}
           className={cx(
-            "flex min-h-8 cursor-grab touch-none flex-wrap items-center justify-between gap-2 px-3.5 py-1.5 font-mono text-[11px] font-bold uppercase tracking-[0.1em] active:cursor-grabbing",
-            isForge && "bg-gradient-to-r from-[#7e22ce] via-[#9333ea] to-[#A855F7] text-white",
+            "flex min-h-8 cursor-grab touch-none flex-wrap items-center justify-between gap-2 px-3.5 py-1.5 font-mono text-[11px] font-bold uppercase tracking-[0.1em] active:cursor-grabbing transition-all duration-500",
+            isForge &&
+              (isForgeRegistered
+                ? "bg-gradient-to-r from-emerald-600 via-teal-600 to-amber-500 text-white shadow-[0_0_24px_rgba(16,185,129,0.45)]"
+                : "bg-gradient-to-r from-[#581c87] via-[#7e22ce] to-[#9333ea] text-white shadow-[0_0_20px_rgba(168,85,247,0.35)]"),
             isWorkspaceFile && "bg-[#F59E0B] text-slate-950",
             isSqlite && "bg-[#10B981] text-slate-950"
           )}
@@ -453,6 +652,9 @@ function LiveWindow({
             ))}
           </div>
         )}
+
+        {/* Dedicated Blacksmith Hammer striking Anvil Visual for The Forge */}
+        {isForge && <ForgeAnvilVisual isRegistered={isForgeRegistered} toolName={win.toolName} />}
 
         {/* Code body */}
         <div className="relative bg-code">

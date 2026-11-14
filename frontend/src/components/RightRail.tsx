@@ -177,6 +177,24 @@ export function RiskGateCard({ approval, onDecide }: { approval: ApprovalNeededP
           </ul>
         </div>
 
+        {/* Approve & Apply / Reject decision buttons ABOVE the diff */}
+        <div className="flex items-center gap-2.5 pt-0.5">
+          <button
+            type="button"
+            onClick={withClick(() => onDecide(approval.req_id, true))}
+            className={cx(btn("ok", "lg"), "flex-1 text-[13.5px] font-semibold")}
+          >
+            <Check className="h-4 w-4" /> Enforce €587.30 Refund
+          </button>
+          <button
+            type="button"
+            onClick={withClick(() => onDecide(approval.req_id, false))}
+            className={cx(btn("danger", "lg"), "flex-1 text-[13.5px] font-semibold")}
+          >
+            <XCircle className="h-4 w-4" /> Cancel &amp; Roll Back
+          </button>
+        </div>
+
         <div>
           <button
             type="button"
@@ -205,9 +223,9 @@ export function RiskGateCard({ approval, onDecide }: { approval: ApprovalNeededP
                     </li>
                   ))}
                 </ul>
-                <div className="pt-1">
+                <div className="scroll-thin max-h-[150px] overflow-y-auto pt-1">
                   {approval.diff_preview ? (
-                    <DiffBlock diff={approval.diff_preview} max={160} />
+                    <DiffBlock diff={approval.diff_preview} max={150} />
                   ) : (
                     <pre className="bg-code p-2.5 font-mono text-[11px] text-ink-2 rounded">
                       {JSON.stringify(approval.args, null, 2).replace(/"pk_col":/g, '"record_id":')}
@@ -217,23 +235,6 @@ export function RiskGateCard({ approval, onDecide }: { approval: ApprovalNeededP
               </motion.div>
             )}
           </AnimatePresence>
-        </div>
-
-        <div className="flex items-center gap-2.5 pt-0.5">
-          <button
-            type="button"
-            onClick={withClick(() => onDecide(approval.req_id, true))}
-            className={cx(btn("ok", "lg"), "flex-1 text-[13.5px] font-semibold")}
-          >
-            <Check className="h-4 w-4" /> Enforce €587.30 Refund
-          </button>
-          <button
-            type="button"
-            onClick={withClick(() => onDecide(approval.req_id, false))}
-            className={cx(btn("danger", "lg"), "flex-1 text-[13.5px] font-semibold")}
-          >
-            <XCircle className="h-4 w-4" /> Cancel &amp; Roll Back
-          </button>
         </div>
 
         <div className="flex items-center gap-1.5 text-[11.5px] text-ink-3">
