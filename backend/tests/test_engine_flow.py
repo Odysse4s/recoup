@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -21,7 +22,7 @@ from app.engine import orchestrator
 from app.engine.env import Env, diff_databases, fingerprint_env, make_rehearsal_env
 from app.engine.events import BUS
 from app.engine.risk import assess_risk
-from app.engine.sandbox import validate_ast, verify_and_register_forged_tool
+from app.engine.sandbox import run_in_sandbox, validate_ast, verify_and_register_forged_tool
 from app.engine.seed import populate_default_seed
 from app.engine.tools import REGISTRY, DeleteRows, UpsertRow
 from app.engine.undo import UndoLog
@@ -175,6 +176,32 @@ def test_sandbox_allows_future_io_and_print_debug(tmp_path):
     )
     assert res["registered"] is True
     REGISTRY.pop("parse_csv_row", None)
+
+
+def test_sandbox_kills_runaway_cpu_loop_instead_of_hanging():
+    """A tight infinite loop has no disallowed import/dunder, so AST validation must let it
+    through - only the sandbox's own CPU rlimit / subprocess timeout can stop it from running
+    forever if the Forge Engineer ever synthesizes something pathological."""
+    code = (
+        "def spin(args: dict) -> dict:\n"
+        "    total = 0\n"
+        "    while True:\n"
+        "        total += 1\n"
+        "    return {'total': total}\n"
+    )
+    ok, errors = validate_ast(code, "spin")
+    assert ok, f"a plain loop with no forbidden imports/attrs must pass static AST validation: {errors}"
+
+    start = time.monotonic()
+    result = run_in_sandbox(code, "spin", {}, timeout=3.0)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 6.0, "sandbox must be killed near its own timeout budget, not hang indefinitely"
+    assert result["ok"] is False
+    # The subprocess's own RLIMIT_CPU=2s fires first (SIGKILL, "Exited with -9"); if it didn't,
+    # subprocess.run's wall-clock `timeout=` would still catch it ("Sandbox timeout ..."). Either
+    # way the call must come back promptly with a failure, never hang or report success.
+    assert "-9" in result["error"] or "timeout" in result["error"].lower()
 
 
 async def test_orchestrator_hero_run_rehearse_replay_undo_and_anticipate(tmp_path, monkeypatch):
