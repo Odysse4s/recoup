@@ -532,7 +532,7 @@ class GeminiProvider:
         self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
     ) -> LLMResponse:
         key = _cache_key(self.model, system, messages, tools)
-        cache_file = CACHE_DIR / f"{key}.json"
+        cache_file = CACHE_DIR / f"{key}_v2.json"
         if self.use_cache:
             cached = _cache_read(cache_file)
             if cached is not None:
@@ -544,10 +544,11 @@ class GeminiProvider:
                 return FakeProvider().complete(system, messages, tools)
             raise RuntimeError("GEMINI_API_KEY is not set")
 
+        max_output_tokens = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "8192"))
         payload: dict[str, Any] = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": _to_gemini_contents(messages),
-            "generationConfig": {"maxOutputTokens": 2048},
+            "generationConfig": {"maxOutputTokens": max_output_tokens},
         }
         if tools:
             payload["tools"] = [
@@ -574,12 +575,18 @@ class GeminiProvider:
             raise
 
         candidates = data.get("candidates") or []
-        parts = ((candidates[0].get("content") or {}).get("parts") or []) if candidates else []
+        first_cand = candidates[0] if candidates else {}
+        finish_reason = str(first_cand.get("finishReason", "")).upper()
+        parts = ((first_cand.get("content") or {}).get("parts") or []) if first_cand else []
         texts: list[str] = []
+        thought_texts: list[str] = []
         calls: list[ToolCall] = []
         for idx, part in enumerate(parts):
             if "text" in part:
-                texts.append(part["text"])
+                if part.get("thought") is True:
+                    thought_texts.append(part["text"])
+                else:
+                    texts.append(part["text"])
             elif "functionCall" in part:
                 fc = part["functionCall"]
                 name = str(fc.get("name", ""))
@@ -589,7 +596,7 @@ class GeminiProvider:
                         id=f"gem_{idx}_{name}",
                         name=name,
                         args=args,
-                        thought="".join(texts) or None,
+                        thought="".join(thought_texts) or "".join(texts) or None,
                     )
                 )
 
@@ -600,7 +607,7 @@ class GeminiProvider:
             input_tokens=int(usage.get("promptTokenCount", 0)),
             output_tokens=int(usage.get("candidatesTokenCount", 0)),
         )
-        if self.use_cache:
+        if self.use_cache and finish_reason != "MAX_TOKENS" and (resp.text or resp.tool_calls):
             _cache_write(cache_file, resp)
         return resp
 

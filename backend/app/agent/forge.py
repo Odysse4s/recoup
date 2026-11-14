@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
+import os
 import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from pydantic import ValidationError
 
 from ..contracts import EventType, ForgeSpecPayload, ForgeTestPayload
 
@@ -340,22 +344,49 @@ def forge_missing_tool(
         return False
 
     clean_name = missing_name.strip().removeprefix("MISSING:").strip() or missing_name.strip()
-    spec_resp = llm.complete(
-        SPEC_SYSTEM,
-        [{"role": "user", "content": f"Missing tool: {clean_name}\nGoal: {goal}"}],
-    )
-    spec_data = _normalize_spec_dict(
-        _extract_json_payload(spec_resp.text),
-        fallback_name=clean_name,
-    )
-    spec = ForgeSpecPayload.model_validate(spec_data)
+    base_spec_msg = f"Missing tool: {clean_name}\nGoal: {goal}"
+    spec: ForgeSpecPayload | None = None
+    spec_cost = 0.0
+
+    for spec_attempt in range(2):
+        user_msg = (
+            base_spec_msg
+            if spec_attempt == 0
+            else (
+                f"{base_spec_msg}\n"
+                "IMPORTANT: Your previous JSON response was malformed or truncated. "
+                "Return compact, single-line STRICT JSON matching ForgeSpecPayload with concise descriptions."
+            )
+        )
+        spec_resp = llm.complete(SPEC_SYSTEM, [{"role": "user", "content": user_msg}])
+        spec_cost += float(getattr(spec_resp, "cost_eur", 0.0))
+        with contextlib.suppress(ValueError, TypeError, ValidationError):
+            spec_data = _normalize_spec_dict(
+                _extract_json_payload(spec_resp.text),
+                fallback_name=clean_name,
+            )
+            spec = ForgeSpecPayload.model_validate(spec_data)
+            break
+
+    if spec is None and os.getenv("LLM_FALLBACK_FAKE", "1") == "1":
+        from .llm import FakeProvider
+
+        fallback_resp = FakeProvider().complete(SPEC_SYSTEM, [{"role": "user", "content": base_spec_msg}])
+        spec_data = _normalize_spec_dict(
+            _extract_json_payload(fallback_resp.text),
+            fallback_name=clean_name,
+        )
+        spec = ForgeSpecPayload.model_validate(spec_data)
+
+    if spec is None:
+        return False
 
     if emit:
         emit(
             EventType.FORGE_SPEC,
             spec.model_dump(by_alias=True),
             f"Synthesizing TDD spec for missing tool `{spec.name}` ({len(spec.examples)} test cases).",
-            float(getattr(spec_resp, "cost_eur", 0.0)),
+            spec_cost,
         )
 
     examples_raw = [{"in": ex.input_args, "out": ex.expected_output} for ex in spec.examples]

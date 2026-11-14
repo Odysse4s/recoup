@@ -242,7 +242,7 @@ def _inspect_photo_with_gemini(file_path: Path, llm: LLMProvider | None = None) 
                 ],
             }
         ],
-        "generationConfig": {"maxOutputTokens": 1024},
+        "generationConfig": {"maxOutputTokens": 4096},
     }
 
     try:
@@ -253,11 +253,17 @@ def _inspect_photo_with_gemini(file_path: Path, llm: LLMProvider | None = None) 
         raise
 
     candidates = data.get("candidates") or []
-    parts = ((candidates[0].get("content") or {}).get("parts") or []) if candidates else []
-    text = "".join(str(p.get("text", "")) for p in parts if isinstance(p, dict) and "text" in p)
+    first_cand = candidates[0] if candidates else {}
+    finish_reason = str(first_cand.get("finishReason", "")).upper()
+    parts = ((first_cand.get("content") or {}).get("parts") or []) if first_cand else []
+    text = "".join(
+        str(p.get("text", ""))
+        for p in parts
+        if isinstance(p, dict) and "text" in p and p.get("thought") is not True
+    )
     findings = _parse_vision_response_text(text) if text.strip() else list(DEFAULT_PHOTO_FINDINGS)
 
-    if use_cache:
+    if use_cache and finish_reason != "MAX_TOKENS":
         llm_mod.CACHE_DIR.mkdir(parents=True, exist_ok=True)
         cache_file.write_text(
             json.dumps(
