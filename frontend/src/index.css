@@ -1,0 +1,406 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---------------------------------------------------------------------------
+   Recoup design tokens. Light = "Editorial Daylight", Dark = "Emerald Tactical".
+   Components only reference semantic tokens, never raw palette values.
+   --------------------------------------------------------------------------- */
+:root {
+  --canvas: #f6f5f2;
+  --surface: #ffffff;
+  --raised: #ffffff;
+  --sunken: #f1f0ec;
+  --code: #fbfaf8;
+  --line: #e2e4e9;
+  --line-strong: #cfd3db;
+  --ink: #0f172a;
+  --ink-2: #475569;
+  --ink-3: #8a94a6;
+  --ok: #059669;
+  --warn: #d97706;
+  --danger: #dc2626;
+  --accent: #047857;
+  --forge: #7c3aed;
+  --signal: #0e7490;
+  --purple: #9333ea;
+  --on-solid: #ffffff;
+  --shadow-card: 0 1px 0 rgba(15, 23, 42, 0.03), 0 1px 2px rgba(15, 23, 42, 0.05),
+    0 10px 28px -16px rgba(15, 23, 42, 0.14);
+  --shadow-float: 0 1px 2px rgba(15, 23, 42, 0.06), 0 12px 24px -8px rgba(15, 23, 42, 0.14),
+    0 40px 80px -24px rgba(15, 23, 42, 0.28);
+  --mesh-a: rgba(5, 150, 105, 0.08);
+  --mesh-b: rgba(14, 116, 144, 0.05);
+  --grid-dot: rgba(15, 23, 42, 0.07);
+  color-scheme: light;
+}
+
+.dark {
+  --canvas: #07090e;
+  --surface: #0d111a;
+  --raised: #131926;
+  --sunken: #0a0d14;
+  --code: #090c13;
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.14);
+  --ink: #e9edf4;
+  --ink-2: #9ba5b7;
+  --ink-3: #5f697c;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --danger: #f87171;
+  --accent: #34d399;
+  --forge: #b197fc;
+  --signal: #22d3ee;
+  --purple: #c084fc;
+  --on-solid: #07090e;
+  --shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 1px 2px rgba(0, 0, 0, 0.5),
+    0 16px 36px -20px rgba(0, 0, 0, 0.7);
+  --shadow-float: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 30px 80px -20px rgba(0, 0, 0, 0.85);
+  --mesh-a: rgba(52, 211, 153, 0.11);
+  --mesh-b: rgba(34, 211, 238, 0.06);
+  --grid-dot: rgba(255, 255, 255, 0.05);
+  color-scheme: dark;
+}
+
+:root[data-theme-accent="emerald"] {
+  --accent: #047857;
+  --mesh-a: rgba(5, 150, 105, 0.08);
+}
+:root.dark[data-theme-accent="emerald"] {
+  --accent: #34d399;
+  --mesh-a: rgba(52, 211, 153, 0.11);
+}
+:root[data-theme-accent="indigo"] {
+  --accent: #4f46e5;
+  --mesh-a: rgba(79, 70, 229, 0.07);
+}
+:root.dark[data-theme-accent="indigo"] {
+  --accent: #8b93ff;
+  --mesh-a: rgba(99, 102, 241, 0.13);
+}
+:root[data-theme-accent="amber"] {
+  --accent: #b45309;
+  --mesh-a: rgba(217, 119, 6, 0.08);
+}
+:root.dark[data-theme-accent="amber"] {
+  --accent: #fbbf24;
+  --mesh-a: rgba(251, 191, 36, 0.1);
+}
+:root[data-theme-accent="rose"] {
+  --accent: #e11d48;
+  --mesh-a: rgba(244, 63, 94, 0.08);
+}
+:root.dark[data-theme-accent="rose"] {
+  --accent: #fb7185;
+  --mesh-a: rgba(251, 113, 133, 0.11);
+}
+:root[data-theme-accent="cyan"] {
+  --accent: #0891b2;
+  --mesh-a: rgba(6, 182, 212, 0.08);
+}
+:root.dark[data-theme-accent="cyan"] {
+  --accent: #22d3ee;
+  --mesh-a: rgba(34, 211, 238, 0.11);
+}
+:root[data-theme-accent="violet"] {
+  --accent: #7c3aed;
+  --mesh-a: rgba(139, 92, 246, 0.08);
+}
+:root.dark[data-theme-accent="violet"] {
+  --accent: #a78bfa;
+  --mesh-a: rgba(167, 139, 250, 0.12);
+}
+
+@theme inline {
+  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-sunken: var(--sunken);
+  --color-code: var(--code);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+  --color-accent: var(--accent);
+  --color-forge: var(--forge);
+  --color-signal: var(--signal);
+  --color-purple: var(--purple);
+  --color-on-solid: var(--on-solid);
+  --shadow-card: var(--shadow-card);
+  --shadow-float: var(--shadow-float);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: var(--canvas);
+    color: var(--ink);
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  code,
+  pre,
+  kbd,
+  .font-mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--accent) 28%, transparent);
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+  }
+
+  :focus-visible {
+    outline: 2px solid color-mix(in oklab, var(--accent) 70%, transparent);
+    outline-offset: 2px;
+  }
+}
+
+/* Ambient mesh lighting + dot grid behind the HUD */
+.recoup-canvas {
+  background-color: var(--canvas);
+  background-image:
+    radial-gradient(900px 420px at 12% -8%, var(--mesh-a), transparent 70%),
+    radial-gradient(760px 380px at 92% 4%, var(--mesh-b), transparent 70%),
+    radial-gradient(var(--grid-dot) 1px, transparent 1px);
+  background-size:
+    auto,
+    auto,
+    22px 22px;
+  background-attachment: fixed;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Thin, theme-aware scrollbars */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+.scroll-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+/* Completed pipeline connector: a travelling light beam */
+@keyframes beam {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+.beam {
+  background-image: linear-gradient(
+    90deg,
+    color-mix(in oklab, var(--ok) 55%, transparent) 0%,
+    var(--ok) 45%,
+    color-mix(in oklab, var(--ok) 20%, white) 50%,
+    var(--ok) 55%,
+    color-mix(in oklab, var(--ok) 55%, transparent) 100%
+  );
+  background-size: 200% 100%;
+  animation: beam 2.4s linear infinite;
+}
+.beam-live {
+  background-image: repeating-linear-gradient(
+    90deg,
+    var(--accent) 0 6px,
+    transparent 6px 12px
+  );
+  background-size: 24px 100%;
+  animation: beam 0.9s linear infinite reverse;
+}
+
+/* Equalizer bars (voice input / briefing) */
+@keyframes eq {
+  0%,
+  100% {
+    transform: scaleY(0.25);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+.eq-bar {
+  transform-origin: center;
+  animation: eq 0.9s ease-in-out infinite;
+}
+
+@keyframes blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+.cursor-blink {
+  animation: blink 1s steps(1) infinite;
+}
+
+@keyframes scan {
+  from {
+    transform: translateY(-100%);
+  }
+  to {
+    transform: translateY(500%);
+  }
+}
+.scanline {
+  animation: scan 2.8s linear infinite;
+}
+
+@keyframes ring-out {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.7;
+  }
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+.call-ring {
+  animation: ring-out 2.4s cubic-bezier(0.2, 0.6, 0.3, 1) infinite;
+}
+
+/* Voice karaoke: spoken words flow from emerald accent into ElevenLabs violet */
+.karaoke-spoken {
+  background-image: linear-gradient(90deg, var(--accent), var(--purple));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* ---------------------------------------------------------------------------
+   Thought Graph: energy packets travel along bezier connectors via
+   dash offsets (dash + gap sums match each keyframe distance for seamless loops).
+   --------------------------------------------------------------------------- */
+.graph-grid {
+  background-image: radial-gradient(var(--grid-dot) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+@keyframes graph-flow {
+  to {
+    stroke-dashoffset: -40;
+  }
+}
+@keyframes graph-flow-12 {
+  to {
+    stroke-dashoffset: -12;
+  }
+}
+@keyframes graph-flow-10 {
+  to {
+    stroke-dashoffset: -10;
+  }
+}
+@keyframes graph-breathe {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.graph-packet {
+  stroke-dasharray: 6 34;
+  animation: graph-flow 1.15s linear infinite;
+}
+.graph-packet-slow {
+  stroke-dasharray: 2 38;
+  animation: graph-flow 3.4s linear infinite;
+}
+.graph-ghost {
+  stroke-dasharray: 6 6;
+  animation:
+    graph-flow-12 1.4s linear infinite,
+    graph-breathe 2.6s ease-in-out infinite;
+}
+.graph-held {
+  stroke-dasharray: 4 6;
+  animation:
+    graph-flow-10 0.8s linear infinite,
+    graph-breathe 1.2s ease-in-out infinite;
+}
+@keyframes graph-radar {
+  0% {
+    transform: scale(0.96);
+    opacity: 0.75;
+  }
+  100% {
+    transform: scale(1.32, 1.6);
+    opacity: 0;
+  }
+}
+.graph-radar {
+  animation: graph-radar 1.8s cubic-bezier(0.2, 0.6, 0.3, 1) infinite;
+}
+
+/* Theme switch: circular reveal via View Transitions when supported */
+::view-transition-old(root) {
+  animation: none;
+}
+::view-transition-new(root) {
+  animation: theme-reveal 0.6s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes theme-reveal {
+  from {
+    clip-path: circle(0 at var(--vt-x, 90%) var(--vt-y, 2%));
+  }
+  to {
+    clip-path: circle(150vmax at var(--vt-x, 90%) var(--vt-y, 2%));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .beam,
+  .beam-live,
+  .eq-bar,
+  .scanline,
+  .call-ring,
+  .graph-packet,
+  .graph-packet-slow,
+  .graph-ghost,
+  .graph-held,
+  .graph-radar {
+    animation: none;
+  }
+}

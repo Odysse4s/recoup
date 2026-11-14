@@ -1,0 +1,239 @@
+import { AnimatePresence, motion } from "framer-motion";
+import { CornerDownLeft, Mic, MicOff, Sparkles, Volume2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ApprovalNeededPayload } from "../contracts";
+import { soundFx } from "../lib/sound";
+import { useSpeechInput, useVoiceSignal } from "../lib/voice";
+import { btn, Chip, cx, Kbd } from "./ui";
+import { VoiceOrb } from "./VoiceOrb";
+
+const EST_CHARS_PER_SEC = 15;
+
+function useCaptionProgress(text: string | null, speaking: boolean, reported: number) {
+  const [estimate, setEstimate] = useState(0);
+  useEffect(() => {
+    setEstimate(0);
+    if (!speaking || !text) return;
+    const start = performance.now();
+    const t = window.setInterval(() => {
+      const chars = ((performance.now() - start) / 1000) * EST_CHARS_PER_SEC;
+      setEstimate(Math.min(0.98, chars / text.length));
+    }, 100);
+    return () => window.clearInterval(t);
+  }, [text, speaking]);
+  return speaking ? Math.max(reported, estimate) : 1;
+}
+
+function sentencesOf(text: string) {
+  const out: { start: number; text: string }[] = [];
+  const re = /[^.!?]+[.!?]*\s*/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) out.push({ start: m.index, text: m[0] });
+  return out.length ? out : [{ start: 0, text }];
+}
+
+function VoiceCaption({
+  mode,
+  text,
+  progress,
+}: {
+  mode: "speaking" | "listening";
+  text: string;
+  progress: number;
+}) {
+  const listening = mode === "listening";
+  const signal = useVoiceSignal();
+  const provider = !listening && signal.provider === "elevenlabs" ? "ElevenLabs" : null;
+  const { spoken, rest } = useMemo(() => {
+    if (listening) return { spoken: text, rest: "" };
+    const pos = Math.round(progress * text.length);
+    const sentences = sentencesOf(text);
+    const current = [...sentences].reverse().find((s) => s.start <= pos) ?? sentences[0];
+    const within = Math.max(0, Math.min(current.text.length, pos - current.start));
+    const nextSpace = current.text.indexOf(" ", within);
+    const cut = within === 0 ? 0 : nextSpace === -1 ? current.text.length : nextSpace;
+    return { spoken: current.text.slice(0, cut), rest: current.text.slice(cut) };
+  }, [listening, text, progress]);
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, height: 0, marginTop: 0 }}
+      animate={{ opacity: 1, height: "auto", marginTop: 8 }}
+      exit={{ opacity: 0, height: 0, marginTop: 0, transition: { duration: 0.18 } }}
+      transition={{ type: "spring", stiffness: 420, damping: 32 }}
+      role="status"
+      aria-live="polite"
+      className="overflow-hidden"
+    >
+      <div
+        className={cx(
+          "flex h-[34px] items-center gap-3 rounded-xl border bg-surface px-3.5 shadow-card",
+          listening ? "border-danger/40" : "border-accent/35"
+        )}
+      >
+        <div className="flex shrink-0 items-center gap-2">
+          <Chip tone={listening ? "danger" : "accent"}>
+            {listening ? <Mic className="h-2.5 w-2.5" /> : <Volume2 className="h-2.5 w-2.5" />}
+            {listening ? "Push-to-talk" : provider ?? "Voice briefing"}
+          </Chip>
+          <VoiceOrb variant="bars" tone={listening ? "danger" : "accent"} className="h-5 w-[76px]" />
+        </div>
+        <p className="min-w-0 flex-1 truncate text-[13.5px] font-medium leading-snug tracking-tight">
+          {listening && !text ? (
+            <span className="text-ink-3">Listening — speak a vendor audit goal or “approve”…</span>
+          ) : (
+            <>
+              <span className={listening ? "text-ink" : "karaoke-spoken"}>{spoken}</span>
+              <span className="text-ink-3">{rest}</span>
+              {listening && <span className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] bg-danger cursor-blink" />}
+            </>
+          )}
+        </p>
+        {!listening && (
+          <div className="h-1 w-16 shrink-0 overflow-hidden rounded-full bg-sunken" aria-hidden>
+            <div
+              className="h-full rounded-full transition-[width] duration-150"
+              style={{ width: `${Math.round(progress * 100)}%`, backgroundImage: "linear-gradient(90deg, var(--accent), var(--purple))" }}
+            />
+          </div>
+        )}
+      </div>
+    </motion.div>
+  );
+}
+
+export function CommandBar({
+  value,
+  onChange,
+  onSubmit,
+  busy,
+  brandName = "Recoup",
+  pendingApproval = null,
+  onApprove,
+  speaking = false,
+  spokenText = null,
+  speechProgress = 0,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onSubmit: (goal: string) => void;
+  busy: boolean;
+  brandName?: string;
+  pendingApproval?: ApprovalNeededPayload | null;
+  onApprove?: (reqId: string, approved: boolean) => void;
+  speaking?: boolean;
+  spokenText?: string | null;
+  speechProgress?: number;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [focused, setFocused] = useState(false);
+  const [transcript, setTranscript] = useState("");
+  const speech = useSpeechInput((text, final) => {
+    setTranscript(text);
+    if (final && pendingApproval && onApprove) {
+      const cmd = text.trim().toLowerCase();
+      if (/^(approve|yes|confirm|authorize|commit)\b/.test(cmd)) {
+        onApprove(pendingApproval.req_id, true);
+        return;
+      }
+      if (/^(reject|abort|deny|cancel|no|rollback)\b/.test(cmd)) {
+        onApprove(pendingApproval.req_id, false);
+        return;
+      }
+    }
+    onChange(text);
+    if (final) inputRef.current?.focus();
+  });
+  useEffect(() => {
+    if (speech.listening) setTranscript("");
+  }, [speech.listening]);
+  const captionProgress = useCaptionProgress(spokenText, speaking, speechProgress);
+  const caption: { mode: "speaking" | "listening"; text: string } | null = speech.listening
+    ? { mode: "listening", text: transcript }
+    : speaking && spokenText
+    ? { mode: "speaking", text: spokenText }
+    : null;
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  return (
+    <div className="relative min-w-0 flex-1">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!value.trim()) return;
+          soundFx.playUiClick();
+          onSubmit(value.trim());
+        }}
+        className={cx(
+          "relative flex h-11 w-full items-center gap-2 rounded-xl border bg-surface pl-3 pr-1.5 shadow-card transition-all",
+          speech.listening ? "border-danger/50" : focused ? "border-accent/60 ring-4 ring-accent/10" : "border-line"
+        )}
+      >
+        <Sparkles className="h-4 w-4 shrink-0 text-accent" />
+        <input
+          ref={inputRef}
+          value={value}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={speech.listening ? "Listening…" : `Assign a vendor audit or AP recovery goal to ${brandName}…`}
+          aria-label="Goal"
+          className="h-full min-w-0 flex-1 bg-transparent text-[14px] text-ink placeholder:text-ink-3 focus:outline-none"
+        />
+        {!focused && !value && <Kbd>⌘K</Kbd>}
+
+        <button
+          type="button"
+          onClick={() => {
+            soundFx.playUiClick();
+            speech.toggle();
+          }}
+          disabled={!speech.supported}
+          aria-pressed={speech.listening}
+          aria-label={speech.listening ? "Stop voice input" : "Push to talk"}
+          title={speech.supported ? (speech.listening ? "Stop listening" : "Push to talk") : "Voice input isn't supported in this browser"}
+          className={cx(
+            "relative flex h-8 items-center gap-2 overflow-hidden rounded-lg border px-2.5 text-[12px] font-medium transition-colors",
+            speech.listening
+              ? "border-danger/40 bg-danger/10 text-danger"
+              : "border-line bg-sunken text-ink-2 hover:text-ink disabled:opacity-40"
+          )}
+        >
+          {speech.supported ? <Mic className="h-3.5 w-3.5" /> : <MicOff className="h-3.5 w-3.5" />}
+          <AnimatePresence initial={false}>
+            {speech.listening && (
+              <motion.span
+                initial={{ width: 0, opacity: 0 }}
+                animate={{ width: "auto", opacity: 1 }}
+                exit={{ width: 0, opacity: 0 }}
+                className="flex items-center overflow-hidden"
+              >
+                <VoiceOrb variant="bars" tone="danger" className="h-4 w-9" />
+              </motion.span>
+            )}
+          </AnimatePresence>
+          <span className="hidden sm:inline">{speech.listening ? "Listening" : "Talk"}</span>
+        </button>
+
+        <button type="submit" disabled={!value.trim()} className={cx(btn("primary", "md"), "h-8 pl-3 pr-2.5")}>
+          {busy ? "Rehearse Again" : "Rehearse & Run"}
+          <CornerDownLeft className="h-3.5 w-3.5 opacity-70" />
+        </button>
+      </form>
+      <AnimatePresence>
+        {caption && <VoiceCaption key={caption.mode} mode={caption.mode} text={caption.text} progress={caption.mode === "speaking" ? captionProgress : 1} />}
+      </AnimatePresence>
+    </div>
+  );
+}
