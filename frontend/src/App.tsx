@@ -103,7 +103,7 @@ export default function App() {
     <div className="recoup-canvas flex min-h-screen flex-col text-ink lg:h-screen lg:overflow-hidden">
       <TopBar r={r} theme={theme} onToggleTheme={toggle} onOpenMobile={openMobile} />
 
-      <div className="relative z-[25] flex shrink-0 items-center gap-6 border-b border-line bg-surface/40 px-5 py-3 backdrop-blur-xl">
+      <div className="relative z-[25] flex shrink-0 items-center gap-4 border-b border-line bg-surface/40 px-4 py-2 backdrop-blur-xl">
         <CommandBar
           value={goal}
           onChange={setGoal}
@@ -133,9 +133,12 @@ export default function App() {
         rewinding={rewinding}
       />
 
-      <main className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-y-auto p-4 lg:grid-cols-12 lg:overflow-hidden">
-        <div className="scroll-thin flex min-h-0 flex-col gap-4 lg:col-span-3 lg:overflow-y-auto">
-          <PlanPanel plan={r.plan} verify={r.verify} presets={presets} onRun={run} />
+      <main className="grid min-h-0 flex-1 grid-cols-1 gap-3 p-3 overflow-y-auto lg:grid-cols-12 lg:overflow-hidden">
+        {/* Left Column (col-span-3) */}
+        <div className="min-h-0 flex flex-col gap-3 lg:col-span-3 lg:overflow-hidden">
+          <div className="min-h-0 flex-1 flex flex-col [&>section]:h-full [&>section]:flex-1 [&>section]:min-h-0">
+            <PlanPanel plan={r.plan} verify={r.verify} presets={presets} onRun={run} />
+          </div>
           <ForgeVault
             tools={r.forgedTools}
             forgeSpec={r.forgeSpec}
@@ -147,17 +150,21 @@ export default function App() {
           />
         </div>
 
-        <div className="scroll-thin flex min-h-0 flex-col gap-4 lg:col-span-5 lg:overflow-y-auto">
+        {/* Center Column (col-span-5) */}
+        <div className="min-h-0 flex flex-col gap-3 lg:col-span-5 lg:overflow-hidden">
           <AnimatePresence initial={false}>
             {r.pendingApproval && !isHighStakesConsult && !r.operatorConsult && (
               <RiskGateCard key={r.pendingApproval.req_id} approval={r.pendingApproval} onDecide={r.decide} />
             )}
           </AnimatePresence>
-          <WorkspaceDeck r={r} />
+          <div className="min-h-0 flex-1 flex flex-col [&>div]:h-full [&>div]:min-h-0 [&>div]:flex-1">
+            <WorkspaceDeck r={r} />
+          </div>
           <Telemetry events={r.events} queued={r.queued} connected={r.connected} mode={r.mode} />
         </div>
 
-        <div className="scroll-thin flex min-h-0 flex-col gap-4 lg:col-span-4 lg:overflow-y-auto">
+        {/* Right Column (col-span-4) */}
+        <div className="min-h-0 flex flex-col gap-3 lg:col-span-4 lg:overflow-y-auto scroll-thin">
           <OperatorConsultPanel
             brandName={brand_name}
             consult={r.operatorConsult}

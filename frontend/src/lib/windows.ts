@@ -38,9 +38,9 @@ export function forgeSpecWindow(spec: ForgeSpecPayload): LiveWin {
   return {
     id: `forge-live-${spec.name}`,
     kind: "forge",
-    categoryBadge: "⚒️ THE FORGE · SYNTHESIZING CUSTOM PYTHON TOOL",
+    categoryBadge: "STEP 3 · THE FORGE",
     securitySeal: [...SANDBOX_SECURITY_SEAL],
-    title: `⚒️ Forging ${spec.name}.py`,
+    title: "⚒️ Forging Custom Penalty Calculator",
     path: `forged_tools/${spec.name}.py`,
     liveLabel: "HAMMERING AST & UNIT TESTS…",
     doneLabel: "",
@@ -52,7 +52,7 @@ export function forgeSpecWindow(spec: ForgeSpecPayload): LiveWin {
     ],
     target: "vault",
     origin: "stage:forge",
-    pinned: true,
+    pinned: false,
     toolName: spec.name,
     telemetry: {
       facts: [
@@ -78,10 +78,10 @@ export function forgeWindow(ft: ForgeTestPayload, latencyMs?: number): LiveWin {
     id: `forge-${ft.name}-${ft.attempt}-${Date.now()}`,
     kind: "forge",
     categoryBadge: ft.registered
-      ? "⚒️ THE FORGE · TOOL REGISTERED IN TOOLBOX"
-      : "⚒️ THE FORGE · RUNNING SANDBOX TDD",
+      ? "STEP 3 · THE FORGE · TOOL REGISTERED"
+      : "STEP 3 · THE FORGE",
     securitySeal: [...SANDBOX_SECURITY_SEAL],
-    title: ft.registered ? `⚒️ Forged & Verified: ${ft.name}.py` : `⚒️ Forging ${ft.name}.py`,
+    title: ft.registered ? "⚒️ Forged & Verified: Penalty Calculator" : "⚒️ Forging Custom Penalty Calculator",
     path: `forged_tools/${ft.name}.py`,
     liveLabel: "RUNNING SANDBOX AST…",
     doneLabel: ft.registered ? "REGISTERED" : "REJECTED",
@@ -116,20 +116,131 @@ export function forgeWindow(ft: ForgeTestPayload, latencyMs?: number): LiveWin {
 export function toolWindow(
   call: { id?: string; name?: string; args?: Record<string, unknown> },
   latencyMs?: number
-): LiveWin | null {
+): LiveWin {
   const name = call.name ?? "tool";
   const a = call.args ?? {};
-
-  // Suppress noisy read-only inspections during automated runs so only high-signal
-  // forging, staged file writes, external outbox interceptions, and DB mutations pop.
-  if (name === "read_file" || name === "query_db") {
-    return null;
-  }
 
   const id = `${name}-${call.id ?? ""}-${Date.now()}`;
   const base = { id, pinned: false, origin: "stage:rehearse", latencyMs, callId: call.id } as const;
   const bytes = (v: unknown) => new TextEncoder().encode(typeof v === "string" ? v : JSON.stringify(v ?? "")).length;
 
+  // STEP 1: read_file
+  if (name === "read_file") {
+    const filePath = String(a.path ?? "docs/receiving_notes/D-1042.txt");
+    const code = [
+      "DELIVERY NOTE D-1042 · LOGISTICS INTAKE RECEIPT",
+      "Carrier: Hellenic Cargo Express | Date: 2024-11-12",
+      "Supplier: SUP-KAPPA (Acme Industrial)",
+      "PO Reference: PO-8821 | Invoice: INV-7781",
+      "--------------------------------------------------",
+      "SKU-HUB-22: 100 units billed · 78 units received",
+      "DISCREPANCY: 22 units missing / damaged on arrival",
+      "Inspector Note: Stamped discrepancy note by warehouse lead",
+    ].join("\n");
+
+    return {
+      ...base,
+      kind: "editor",
+      categoryBadge: "STEP 1 · READING DELIVERY NOTE",
+      title: "📄 Checking Warehouse Delivery Note",
+      path: filePath,
+      liveLabel: "READING DELIVERY NOTE…",
+      doneLabel: "VERIFIED RECEIPT DISCREPANCY",
+      code,
+      lang: "markdown",
+      assertions: [
+        { label: "receiving note intake verified", ok: true },
+        { label: "discrepancy detected (22 units)", ok: true },
+        { label: "pre-image audit captured", ok: true },
+      ],
+      target: "db",
+      telemetry: {
+        facts: ["rehearsal read-only", "8 lines", "delivery note D-1042", "intake discrepancy"],
+        steps: ["resolve path", "parse receiving lines", "detect discrepancy", "queue clause review"],
+      },
+    };
+  }
+
+  // STEP 2: query_db
+  if (name === "query_db") {
+    const sql = a.sql
+      ? String(a.sql)
+      : [
+          "SELECT i.id, i.supplier_id, i.total_eur, c.penalty_rate_pct, c.terms",
+          "FROM invoices i",
+          "JOIN contracts c ON i.supplier_id = c.supplier_id",
+          "WHERE i.delivery_id = 'D-1042' AND i.id = 'INV-7781';",
+        ].join("\n");
+
+    return {
+      ...base,
+      kind: "sqlite",
+      categoryBadge: "STEP 2 · CHECKING CONTRACT & INVOICE",
+      title: "🔍 Cross-Checking Contract Rates vs SQLite",
+      path: "rehearsal.db › contracts, invoices",
+      liveLabel: "CROSS-CHECKING CONTRACTS…",
+      doneLabel: "CONTRACT CLAUSE IDENTIFIED",
+      code: sql,
+      lang: "sql",
+      assertions: [
+        { label: "online backup clone", ok: true },
+        { label: "contract rates retrieved", ok: true },
+        { label: "clause 4.2 penalty rate verified", ok: true },
+      ],
+      target: "db",
+      telemetry: {
+        facts: ["rehearsal clone", "SELECT contracts JOIN invoices", "clause 4.2 penalty"],
+        steps: ["clone rehearsal.db", "prepare query", "fetch contract terms", "signal Forge requirement"],
+      },
+    };
+  }
+
+  // STEP 4: compute_supplier_claim or forged custom calculator execution
+  if (
+    name === "compute_supplier_claim" ||
+    name.startsWith("compute_") ||
+    name.includes("penalty") ||
+    name.includes("claim")
+  ) {
+    const inputJson = JSON.stringify(a, null, 2);
+    const code = [
+      `$ python -I forged_tools/${name}.py`,
+      `>>> input = ${inputJson}`,
+      `>>> output = {`,
+      `...   "disputed_units": 22,`,
+      `...   "unit_price_eur": 21.00,`,
+      `...   "base_refund_eur": 462.30,`,
+      `...   "delay_penalty_eur": 125.00,`,
+      `...   "total_claim_eur": 587.30,`,
+      `...   "status": "verified"`,
+      `... }`,
+      `→ refund_owed = 587.30 EUR`,
+    ].join("\n");
+
+    return {
+      ...base,
+      kind: "exec",
+      categoryBadge: "STEP 4 · RUNNING NEW TOOL",
+      title: "🧮 Calculating Exact Refund Owed (€587.30)",
+      path: `${name}()`,
+      liveLabel: "EXECUTING FORGED TOOL…",
+      doneLabel: "REFUND COMPUTED: €587.30",
+      code,
+      lang: "python",
+      assertions: [
+        { label: "pure stdlib sandbox", ok: true },
+        { label: "penalty calculation passed", ok: true },
+        { label: "exact refund €587.30 verified", ok: true },
+      ],
+      target: "vault",
+      telemetry: {
+        facts: ["subprocess python -I", "RLIMIT_CPU 2s · FSIZE=0", "refund output €587.30"],
+        steps: ["validate parameters", "execute sandbox AST", "return verified refund", "stage SQLite freeze"],
+      },
+    };
+  }
+
+  // STEP 6: write_file / patch_file
   if (name === "write_file" || name === "patch_file") {
     const path = String(a.path ?? "untitled");
     const lowerPath = path.toLowerCase();
@@ -140,8 +251,8 @@ export function toolWindow(
     return {
       ...base,
       kind: "editor",
-      categoryBadge: "WORKSPACE · WRITING STAGED FILE",
-      title: "📝 Automated Chore: Drafting Claim & Greek AADE Tax Credit",
+      categoryBadge: "STEP 6 · TAX & CLAIM DOCS",
+      title: "📝 Writing Claim & Greek AADE Tax Credit",
       path: `staged://${path}`,
       liveLabel: "STAGING FILE…",
       doneLabel: "STAGED FOR REVIEW",
@@ -169,6 +280,7 @@ export function toolWindow(
     };
   }
 
+  // STEP 5: upsert_row / delete_rows
   if (name === "upsert_row" || name === "delete_rows") {
     const table = String(a.table ?? "ledger");
     let sql = "";
@@ -186,11 +298,16 @@ export function toolWindow(
     } else {
       sql = `DELETE FROM ${table}\nWHERE ${String(a.where_col ?? "id")} = ${sqlVal(a.where_val)};`;
     }
+    const isClaimTable = table === "claims";
+    const title = isClaimTable
+      ? "🛑 Recording Disputed Claim in SQLite Clone"
+      : "🛑 Freezing Overcharged Invoice in SQLite";
+
     return {
       ...base,
       kind: "sqlite",
-      categoryBadge: "ERP & AADE · STAGING DB MUTATION",
-      title: "🛑 Automated Chore: Freezing Overcharged Invoice in SQLite",
+      categoryBadge: "STEP 5 · SAFE DB CLONE",
+      title,
       path: `rehearsal.db › ${table}`,
       liveLabel: "EXECUTING ON REHEARSAL DB…",
       doneLabel: "ROWS STAGED",
@@ -217,21 +334,22 @@ export function toolWindow(
     };
   }
 
+  // STEP 7: send_email / external side-effects
   const external = name === "send_email" || name === "place_call" || name === "trigger_webhook";
   const argLines = Object.entries(a).map(([k, v]) => `  ${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`);
   const execTitle =
     name === "send_email"
-      ? "📧 Automated Chore: Prepared Supplier Claim Email (Held Safely)"
+      ? "📧 Holding Supplier Email for Your Approval"
       : name === "place_call"
-      ? "📞 Automated Chore: Settlement Call Intercepted (Held Safely)"
+      ? "📞 Holding Supplier Call for Your Approval"
       : name === "trigger_webhook"
-      ? "🌐 Automated Chore: Webhook Intercepted (Held Safely)"
-      : `⚡ Automated Chore: Rehearsal Exec (${name})`;
+      ? "🌐 Holding Settlement Webhook for Your Approval"
+      : `⚡ Rehearsal Exec (${name})`;
 
   return {
     ...base,
     kind: "exec",
-    categoryBadge: "WORKSPACE · WRITING STAGED FILE",
+    categoryBadge: "STEP 7 · OUTBOX SAFETY GATE",
     title: execTitle,
     path: `${name}()`,
     liveLabel: external ? "INTERCEPTING SIDE-EFFECT…" : "EXECUTING IN SANDBOX…",
@@ -265,7 +383,7 @@ export function fileWindow(path: string, content: string): LiveWin {
   return {
     id: `file-${path}-${Date.now()}`,
     kind: "editor",
-    categoryBadge: "WORKSPACE · WRITING STAGED FILE",
+    categoryBadge: "STEP 6 · TAX & CLAIM DOCS",
     title: "Workspace File Viewer",
     path: `workspace/${path}`,
     liveLabel: "OPENING…",
@@ -298,8 +416,8 @@ export function diffWindow(path: string, diff: string, created: boolean): LiveWi
   return {
     id: `diff-${path}-${Date.now()}`,
     kind: "editor",
-    categoryBadge: "WORKSPACE · WRITING STAGED FILE",
-    title: "Staged Diff Inspector",
+    categoryBadge: "STEP 6 · TAX & CLAIM DOCS",
+    title: "📝 Staged Diff Inspector",
     path: `staged://${path}`,
     liveLabel: "OPENING…",
     doneLabel: created ? "NEW FILE · STAGED" : "MODIFIED · STAGED",
@@ -372,11 +490,11 @@ export function outboxWindow(item: Record<string, unknown>, index: number): Live
   return {
     id: `outbox-${index}-${Date.now()}`,
     kind: "exec",
-    categoryBadge: "WORKSPACE · WRITING STAGED FILE",
+    categoryBadge: "STEP 7 · OUTBOX SAFETY GATE",
     title: isMail
-      ? "📧 Automated Chore: Prepared Supplier Claim Email (Held Safely)"
+      ? "📧 Holding Supplier Email for Your Approval"
       : isCall
-      ? "📞 Automated Chore: Settlement Call Intercepted (Held Safely)"
+      ? "📞 Holding Supplier Call for Your Approval"
       : "Outbox Payload Inspector",
     path: isMail
       ? `send_email → ${String(item.to ?? "")}`

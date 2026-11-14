@@ -16,11 +16,11 @@ interface RibbonStep {
 
 const STEPS: RibbonStep[] = [
   { id: "plan", num: "1", label: "Plan", stages: ["plan"], anchorKeys: ["stage:plan"] },
-  { id: "forge", num: "2", label: "Build Safe Tool", stages: ["forge"], anchorKeys: ["stage:forge"] },
-  { id: "rehearse", num: "3", label: "Dry-Run in Clone", stages: ["rehearse", "verify"], anchorKeys: ["stage:rehearse", "stage:verify"] },
-  { id: "gate", num: "4", label: "Your Approval", stages: ["gate"], anchorKeys: ["stage:gate"] },
-  { id: "commit", num: "5", label: "Apply & Email Supplier", stages: ["commit"], anchorKeys: ["stage:commit"] },
-  { id: "anticipate", num: "6", label: "Next Suggestion", stages: ["anticipate"], anchorKeys: ["stage:anticipate"] },
+  { id: "forge", num: "2", label: "Safe Tool", stages: ["forge"], anchorKeys: ["stage:forge"] },
+  { id: "rehearse", num: "3", label: "Rehearse", stages: ["rehearse", "verify"], anchorKeys: ["stage:rehearse", "stage:verify"] },
+  { id: "gate", num: "4", label: "Gate", stages: ["gate"], anchorKeys: ["stage:gate"] },
+  { id: "commit", num: "5", label: "Commit", stages: ["commit"], anchorKeys: ["stage:commit"] },
+  { id: "anticipate", num: "6", label: "Next", stages: ["anticipate"], anchorKeys: ["stage:anticipate"] },
 ];
 
 function useElapsed(since: number | null, running: boolean) {
@@ -64,8 +64,9 @@ export function PipelineRibbon({
   };
 
   return (
-    <div className="relative z-20 shrink-0 border-b border-line bg-surface/60 px-5 pb-3 pt-3 backdrop-blur-xl">
-      <div className="flex items-center">
+    <div className="relative z-20 flex h-[42px] shrink-0 items-center justify-between border-b border-line bg-surface/60 px-4 backdrop-blur-xl gap-3">
+      {/* Stage Pills */}
+      <div className="flex shrink-0 items-center gap-1">
         {STEPS.map((st, idx) => {
           const isCurrent = idx === activeIdx && !(stageDone && idx === activeIdx && st.id !== "anticipate");
           const isPassed = idx < activeIdx || (stageDone && idx === activeIdx && (st.id !== "rehearse" || stage === "verify") && st.id !== "anticipate");
@@ -76,10 +77,11 @@ export function PipelineRibbon({
                 ref={attachAnchors(st.anchorKeys)}
                 layout
                 transition={{ type: "spring", stiffness: 420, damping: 34 }}
+                title={`${st.num}. ${st.label}`}
                 aria-label={`${st.num}. ${st.label}`}
                 className={cx(
-                  "relative flex shrink-0 items-center gap-2 rounded-full border transition-colors duration-300",
-                  isCurrent ? "h-9 pl-1.5 pr-3.5" : "h-7 pl-1 pr-2.5",
+                  "relative flex shrink-0 items-center gap-1.5 rounded-full border transition-colors duration-300",
+                  isCurrent ? "h-7 pl-1 pr-2.5" : "h-6 pl-1 pr-2",
                   isGate
                     ? "border-danger/50 bg-danger/10 text-danger"
                     : isCurrent
@@ -92,7 +94,7 @@ export function PipelineRibbon({
                 {isCurrent && (
                   <motion.span
                     aria-hidden
-                    className={cx("pointer-events-none absolute -inset-[3px] rounded-full border-2", isGate ? "border-danger/40" : "border-accent/35")}
+                    className={cx("pointer-events-none absolute -inset-[2px] rounded-full border-2", isGate ? "border-danger/40" : "border-accent/35")}
                     animate={{ opacity: [0.2, 0.9, 0.2], scale: [1, 1.04, 1] }}
                     transition={{ duration: 1.8, repeat: Infinity, ease: "easeInOut" }}
                   />
@@ -100,7 +102,7 @@ export function PipelineRibbon({
                 <span
                   className={cx(
                     "flex shrink-0 items-center justify-center rounded-full font-mono font-semibold tabular",
-                    isCurrent ? "h-6 w-6 text-[10.5px]" : "h-5 w-5 text-[9.5px]",
+                    isCurrent ? "h-4.5 w-4.5 text-[9.5px]" : "h-4 w-4 text-[9px]",
                     isGate
                       ? "bg-danger text-white"
                       : isCurrent
@@ -110,46 +112,47 @@ export function PipelineRibbon({
                       : "bg-sunken text-ink-3"
                   )}
                 >
-                  {isPassed ? <Check className="h-3 w-3" strokeWidth={3} /> : st.num}
+                  {isPassed ? <Check className="h-2.5 w-2.5" strokeWidth={3} /> : st.num}
                 </span>
-                <span className={cx("whitespace-nowrap font-medium", isCurrent ? "text-[13px]" : "text-[12px]")}>
+                <span className={cx("whitespace-nowrap font-medium", isCurrent ? "text-[12px]" : "text-[11px]")}>
                   <span className="sr-only">{st.num}. </span>
                   {st.label}
                 </span>
               </motion.div>
               {idx < STEPS.length - 1 && (
-                <div className="relative mx-1.5 h-[2px] min-w-3 flex-1 overflow-hidden rounded-full bg-line">
-                  {idx < activeIdx && <div className="beam absolute inset-0" />}
-                  {idx === activeIdx && running && <div className="beam-live absolute inset-0 opacity-70" />}
-                </div>
+                <div className={cx("h-[2px] w-1.5 shrink-0 rounded-full", idx < activeIdx ? "bg-ok/50" : "bg-line")} />
               )}
             </Fragment>
           );
         })}
       </div>
 
-      <div className="mt-2.5 flex items-center gap-3">
+      {/* Divider */}
+      <div className="h-4 w-[1px] shrink-0 bg-line" />
+
+      {/* Live Narration & Timer */}
+      <div className="flex min-w-0 flex-1 items-center gap-2.5">
         <span className="flex shrink-0 items-center gap-1.5 font-mono text-[10.5px] font-medium uppercase tracking-wider text-ink-3">
           <Dot tone={liveTone} live={running || rewinding} />
-          {rewinding ? "Rewind" : running ? "Live" : runStatus === "committed" ? "Done" : "Idle"}
+          <span>{rewinding ? "Rewind" : running ? "Live" : runStatus === "committed" ? "Done" : "Idle"}</span>
         </span>
         <div className="relative h-5 min-w-0 flex-1 overflow-hidden">
           <AnimatePresence mode="popLayout" initial={false}>
             <motion.p
               key={narration}
-              initial={{ y: 14, opacity: 0, filter: "blur(4px)" }}
+              initial={{ y: 10, opacity: 0, filter: "blur(4px)" }}
               animate={{ y: 0, opacity: 1, filter: "blur(0px)" }}
-              exit={{ y: -14, opacity: 0, filter: "blur(4px)" }}
-              transition={{ duration: 0.35, ease: [0.2, 0.8, 0.2, 1] }}
-              className="absolute inset-0 truncate text-[13.5px] font-medium text-ink"
+              exit={{ y: -10, opacity: 0, filter: "blur(4px)" }}
+              transition={{ duration: 0.25, ease: [0.2, 0.8, 0.2, 1] }}
+              className="absolute inset-0 truncate text-[12.5px] font-medium text-ink"
             >
               <InlineCode text={narration} />
             </motion.p>
           </AnimatePresence>
         </div>
-        <span className="shrink-0 font-mono text-[11px] text-ink-3 tabular">
-          {activeIdx >= 0 ? `Step ${activeIdx + 1}/6` : "Step —/6"}
-          {elapsed && <span className="ml-2 text-ink-2">{elapsed}</span>}
+        <span className="flex shrink-0 items-center gap-2 font-mono text-[11px] text-ink-3 tabular">
+          <span>{activeIdx >= 0 ? `Step ${activeIdx + 1}/6` : "Step —/6"}</span>
+          {elapsed && <span className="font-semibold text-ink-2">{elapsed}</span>}
         </span>
       </div>
     </div>

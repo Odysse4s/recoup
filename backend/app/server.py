@@ -493,7 +493,7 @@ async def _run_stage_demo(
             await asyncio.sleep(0)
 
     try:
-        # Step 1: REHEARSE_START
+        # Step 0: REHEARSE_START
         goal_text = (
             "Check delivery D-1042 from Kappa Office Systems — "
             "22 hubs arrived missing or broken and invoice INV-7781 is overcharged"
@@ -506,13 +506,13 @@ async def _run_stage_demo(
         )
         await _pace()
 
-        # Step 2: PLAN_CREATED (7 clear steps, NEVER place_call to vendor!)
+        # Step 0b: PLAN_CREATED (7 clear steps, NEVER place_call to vendor!)
         plan_steps = [
             PlanStep(id=1, intent="Inspect receiving inspection note for shipment D-1042", tool="read_file", status="pending"),
             PlanStep(id=2, intent="Query supplier contract, delivery records, and invoices", tool="query_db", status="pending"),
             PlanStep(id=3, intent="Synthesize custom enterprise claim calculator for contract discrepancies", tool="MISSING:compute_supplier_claim", status="pending"),
-            PlanStep(id=4, intent="Draft supplier claim CLM-D-1042 in claims ledger", tool="upsert_row", status="pending"),
-            PlanStep(id=5, intent="Place invoice INV-7781 on payment hold (disputed)", tool="upsert_row", status="pending"),
+            PlanStep(id=4, intent="Calculate itemized supplier claim breakdown via compute_supplier_claim", tool="compute_supplier_claim", status="pending"),
+            PlanStep(id=5, intent="Stage ERP updates: draft claim CLM-D-1042 and hold invoice INV-7781", tool="upsert_row", status="pending"),
             PlanStep(id=6, intent="Generate itemized credit memo audit document claims/CLM-D-1042.md", tool="write_file", status="pending"),
             PlanStep(id=7, intent="Queue formal credit claim email to accounts@kappaoffice.example", tool="send_email", status="pending"),
         ]
@@ -533,7 +533,44 @@ async def _run_stage_demo(
         )
         await _pace()
 
-        # Step 3: FORGE_SPEC + FORGE_TEST_RESULT + FORGE_REGISTERED
+        commit_plan: list[ToolCall] = []
+        previews: dict[str, str] = {}
+
+        # Step 1: read_file (deliveries/D-1042_receiving_note.md)
+        note_p1 = rehearsal_env.root_dir / "deliveries" / "D-1042_receiving_note.md"
+        note_p2 = rehearsal_env.root_dir / "inbox" / "D-1042_receiving_note.md"
+        note_text = (
+            "# IT Receiving Log: Shipment D-1042\n\n"
+            "- Vendor: Kappa Office Systems S.A.\n"
+            "- SLA promised date: 2026-11-10, delivered: 2026-11-12\n"
+            "- PO quantity: 120 units of HUB-USBC; IT stockroom counted 104 units delivered.\n"
+            "- 6 units arrived with crushed enclosures / DOA ports, quarantined for RMA.\n"
+        )
+        for np in (note_p1, note_p2):
+            if not np.exists():
+                np.parent.mkdir(parents=True, exist_ok=True)
+                np.write_text(note_text, encoding="utf-8")
+
+        call_rf = ToolCall(id="call_rf_1", name="read_file", args={"path": "deliveries/D-1042_receiving_note.md"})
+        BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_rf.model_dump()}, step=1, thought="Reading receiving inspection note.")
+        rf_out = REGISTRY["read_file"].do(call_rf.args, rehearsal_env) if "read_file" in REGISTRY else {}
+        previews[call_rf.id] = REGISTRY["read_file"].preview(call_rf.args, rehearsal_env) if "read_file" in REGISTRY else ""
+        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_rf.model_dump(), "output": rf_out}, step=1)
+        await _pace()
+
+        # Step 2: query_db (contracts & invoices for INV-7781 / Kappa Office Systems)
+        call_q = ToolCall(
+            id="call_q_2",
+            name="query_db",
+            args={"sql": "SELECT d.id, d.supplier_id, i.id as invoice_id, i.status FROM deliveries d JOIN invoices i ON d.id = i.delivery_id WHERE d.id = 'D-1042'"},
+        )
+        BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_q.model_dump()}, step=2, thought="Querying deliveries & invoices for INV-7781.")
+        q_out = REGISTRY["query_db"].do(call_q.args, rehearsal_env) if "query_db" in REGISTRY else {}
+        previews[call_q.id] = REGISTRY["query_db"].preview(call_q.args, rehearsal_env) if "query_db" in REGISTRY else ""
+        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_q.model_dump(), "output": q_out}, step=2)
+        await _pace()
+
+        # Step 3: FORGE_SPEC -> FORGE_TEST -> FORGE_REGISTERED
         forge_spec = ForgeSpecPayload(
             name="compute_supplier_claim",
             purpose="Calculate itemized supplier claim breakdown (overbill, shortfall, damaged units, SLA delay penalty)",
@@ -570,9 +607,11 @@ async def _run_stage_demo(
             run_id,
             EventType.FORGE_SPEC,
             forge_spec.model_dump(),
+            step=3,
             thought="Synthesizing missing enterprise claim calculator `compute_supplier_claim`.",
         )
-        await _pace()
+        forge_sleep_1 = 0.005 if "PYTEST_CURRENT_TEST" in os.environ else 1.3
+        await asyncio.sleep(forge_sleep_1)
 
         registered_ok = False
         with contextlib.suppress(Exception):
@@ -617,6 +656,7 @@ async def _run_stage_demo(
             run_id,
             EventType.FORGE_TEST_RESULT,
             forge_test.model_dump(),
+            step=3,
             thought="AST validated and test passed in isolated sandbox.",
         )
         await _pace()
@@ -625,55 +665,26 @@ async def _run_stage_demo(
             run_id,
             EventType.FORGE_REGISTERED,
             {"name": "compute_supplier_claim", "tool": "compute_supplier_claim"},
+            step=3,
             thought="Registered `compute_supplier_claim` into runtime tool registry.",
         )
-        await _pace()
+        forge_sleep_2 = 0.005 if "PYTEST_CURRENT_TEST" in os.environ else 1.2
+        await asyncio.sleep(forge_sleep_2)
 
-        # Step 4: Execute real staged mutations against isolated rehearsal_env
-        commit_plan: list[ToolCall] = []
-        previews: dict[str, str] = {}
-
-        # 4.1 read_file
-        note_p = rehearsal_env.root_dir / "inbox" / "D-1042_receiving_note.md"
-        if not note_p.exists():
-            note_p.parent.mkdir(parents=True, exist_ok=True)
-            note_p.write_text(
-                "# IT Receiving Log: Shipment D-1042\n\n"
-                "- Vendor: Kappa Office Systems S.A.\n"
-                "- SLA promised date: 2026-11-10, delivered: 2026-11-12\n"
-                "- PO quantity: 120 units of HUB-USBC; IT stockroom counted 104 units delivered.\n"
-                "- 6 units arrived with crushed enclosures / DOA ports, quarantined for RMA.\n",
-                encoding="utf-8",
-            )
-        call_rf = ToolCall(id="call_rf_1", name="read_file", args={"path": "inbox/D-1042_receiving_note.md"})
-        BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_rf.model_dump()}, step=1, thought="Reading receiving note.")
-        rf_out = REGISTRY["read_file"].do(call_rf.args, rehearsal_env) if "read_file" in REGISTRY else {}
-        previews[call_rf.id] = REGISTRY["read_file"].preview(call_rf.args, rehearsal_env) if "read_file" in REGISTRY else ""
-        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_rf.model_dump(), "output": rf_out}, step=1)
-        await _pace()
-
-        # 4.2 query_db
-        call_q = ToolCall(id="call_q_2", name="query_db", args={"sql": "SELECT * FROM deliveries WHERE id = 'D-1042'"})
-        BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_q.model_dump()}, step=2, thought="Querying deliveries table.")
-        q_out = REGISTRY["query_db"].do(call_q.args, rehearsal_env) if "query_db" in REGISTRY else {}
-        previews[call_q.id] = REGISTRY["query_db"].preview(call_q.args, rehearsal_env) if "query_db" in REGISTRY else ""
-        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_q.model_dump(), "output": q_out}, step=2)
-        await _pace()
-
-        # 4.3 compute_supplier_claim
+        # Step 4: compute_supplier_claim
         claim_calc_args = {"overcharge": 168.0, "shortfall": 280.0, "damaged": 105.0, "late_penalty": 34.3}
-        call_calc = ToolCall(id="call_calc_3", name="compute_supplier_claim", args=claim_calc_args)
-        BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_calc.model_dump()}, step=3, thought="Executing forged tool compute_supplier_claim.")
+        call_calc = ToolCall(id="call_calc_4", name="compute_supplier_claim", args=claim_calc_args)
+        BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_calc.model_dump()}, step=4, thought="Executing forged tool compute_supplier_claim.")
         calc_out = (
             REGISTRY["compute_supplier_claim"].do(claim_calc_args, rehearsal_env)
             if "compute_supplier_claim" in REGISTRY
             else {"result": {"total": 587.30}}
         )
         previews[call_calc.id] = "total: 587.30 EUR"
-        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_calc.model_dump(), "output": calc_out}, step=3)
+        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_calc.model_dump(), "output": calc_out}, step=4)
         await _pace()
 
-        # 4.4 upsert_row on claims
+        # Step 5: upsert_row on claims & invoices
         claims_args = {
             "table": "claims",
             "pk_col": "id",
@@ -687,15 +698,14 @@ async def _run_stage_demo(
                 "status": "drafted",
             },
         }
-        call_c = ToolCall(id="call_c_4", name="upsert_row", args=claims_args)
+        call_c = ToolCall(id="call_c_5a", name="upsert_row", args=claims_args)
         commit_plan.append(call_c)
-        BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_c.model_dump()}, step=4, thought="Drafting CLM-D-1042 in claims ledger.")
+        BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_c.model_dump()}, step=5, thought="Drafting CLM-D-1042 in claims ledger.")
         c_out = REGISTRY["upsert_row"].do(claims_args, rehearsal_env) if "upsert_row" in REGISTRY else {}
         previews[call_c.id] = REGISTRY["upsert_row"].preview(claims_args, rehearsal_env) if "upsert_row" in REGISTRY else ""
-        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_c.model_dump(), "output": c_out}, step=4)
+        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_c.model_dump(), "output": c_out}, step=5)
         await _pace()
 
-        # 4.5 upsert_row on invoices
         invoices_args = {
             "table": "invoices",
             "pk_col": "id",
@@ -704,7 +714,7 @@ async def _run_stage_demo(
                 "status": "disputed",
             },
         }
-        call_i = ToolCall(id="call_i_5", name="upsert_row", args=invoices_args)
+        call_i = ToolCall(id="call_i_5b", name="upsert_row", args=invoices_args)
         commit_plan.append(call_i)
         BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_i.model_dump()}, step=5, thought="Placing invoice INV-7781 on dispute hold.")
         i_out = REGISTRY["upsert_row"].do(invoices_args, rehearsal_env) if "upsert_row" in REGISTRY else {}
@@ -712,7 +722,7 @@ async def _run_stage_demo(
         BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_i.model_dump(), "output": i_out}, step=5)
         await _pace()
 
-        # 4.6 write_file claims/CLM-D-1042.md
+        # Step 6: write_file claims/CLM-D-1042.md
         credit_memo_content = (
             "# Credit Claim CLM-D-1042\n\n"
             "- Supplier: Kappa Office Systems S.A. (SUP-KAPPA)\n"
@@ -737,7 +747,7 @@ async def _run_stage_demo(
         BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_w.model_dump(), "output": w_out}, step=6)
         await _pace()
 
-        # 4.7 send_email (queued in rehearsal_env.outbox, ZERO vendor calls!)
+        # Step 7: send_email (queued in rehearsal_env.outbox, ZERO vendor calls!)
         email_args = {
             "to": "accounts@kappaoffice.example",
             "subject": "Credit Claim CLM-D-1042 on Invoice INV-7781: EUR 587.30",
@@ -757,7 +767,7 @@ async def _run_stage_demo(
         BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_e.model_dump(), "output": e_out}, step=7)
         await _pace()
 
-        # Step 5: VERIFY_RESULT + REHEARSE_REPORT
+        # VERIFY_RESULT + REHEARSE_REPORT
         verify_payload = VerifyPayload(
             passed=True,
             criteria=[
@@ -783,7 +793,7 @@ async def _run_stage_demo(
         )
         await _pace()
 
-        # Step 6: Register REAL asyncio.Future in PENDING[req_id] and ApprovalNeededPayload in PENDING_PAYLOADS
+        # Register REAL asyncio.Future in PENDING[req_id] and ApprovalNeededPayload in PENDING_PAYLOADS
         req_id = f"req_{uuid.uuid4().hex[:8]}"
         fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         PENDING[req_id] = fut

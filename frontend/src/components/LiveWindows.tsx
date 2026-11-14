@@ -169,185 +169,239 @@ function TelemetryStrip({ win, progress, typing }: { win: LiveWin; progress: num
   );
 }
 
-function ForgeAnvilVisual({ isRegistered, toolName }: { isRegistered: boolean; toolName?: string }) {
+function ForgeAnvilVisual({ win }: { win: LiveWin }) {
+  const isRegistered = win.doneLabel === "REGISTERED";
+  const totalTests = win.assertions?.length ? win.assertions.length : 3;
+  const passedCount = win.assertions?.length ? win.assertions.filter((a) => a.ok).length : 3;
+  const testRatio = `${passedCount}/${totalTests} TESTS PASSED`;
+
   return (
     <div
       aria-label="Forge Blacksmith Anvil & Hammer"
       className={cx(
-        "relative flex items-center justify-between overflow-hidden border-b px-4 py-2 transition-colors duration-500",
+        "relative flex flex-col sm:flex-row items-center justify-between gap-3 overflow-hidden border-b px-4 py-4 transition-colors duration-500",
         isRegistered
-          ? "border-emerald-500/40 bg-gradient-to-r from-slate-950 via-emerald-950/40 to-slate-950 text-emerald-200"
-          : "border-purple-500/40 bg-gradient-to-r from-slate-950 via-[#1f1035] to-slate-950 text-purple-200"
+          ? "border-emerald-500/50 bg-gradient-to-r from-slate-950 via-emerald-950/50 to-slate-950 text-emerald-200"
+          : "border-purple-500/50 bg-gradient-to-r from-slate-950 via-[#241242] to-slate-950 text-purple-200"
       )}
     >
       {/* Background ambient forge glow */}
       <div
         className={cx(
-          "pointer-events-none absolute -left-10 top-1/2 h-24 w-40 -translate-y-1/2 rounded-full blur-2xl transition-colors duration-500",
-          isRegistered ? "bg-emerald-500/20" : "bg-amber-500/15"
+          "pointer-events-none absolute -left-10 top-1/2 h-32 w-52 -translate-y-1/2 rounded-full blur-2xl transition-colors duration-500",
+          isRegistered ? "bg-emerald-500/25" : "bg-amber-500/20"
         )}
       />
 
-      {/* Anvil + Hammer Animation SVG */}
+      {/* Heroic Center-Stage Hammer-on-Anvil SVG */}
       <div className="relative flex shrink-0 items-center">
-        <svg viewBox="0 0 140 68" className="h-16 w-32 drop-shadow-lg" aria-hidden="true">
+        <svg viewBox="0 0 190 90" className="h-24 w-48 drop-shadow-xl" aria-hidden="true">
           <defs>
             <linearGradient id="anvilBodyGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#475569" />
-              <stop offset="100%" stopColor="#1e293b" />
+              <stop offset="0%" stopColor="#64748b" />
+              <stop offset="40%" stopColor="#334155" />
+              <stop offset="100%" stopColor="#0f172a" />
             </linearGradient>
             <linearGradient id="hammerHeadGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-              <stop offset="0%" stopColor="#cbd5e1" />
-              <stop offset="100%" stopColor="#64748b" />
+              <stop offset="0%" stopColor="#f1f5f9" />
+              <stop offset="50%" stopColor="#94a3b8" />
+              <stop offset="100%" stopColor="#475569" />
             </linearGradient>
-            <filter id="forgeGlow" x="-20%" y="-20%" width="140%" height="140%">
-              <feGaussianBlur stdDeviation="3" result="blur" />
+            <radialGradient id="strikeFlashGrad" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stopColor="#ffffff" />
+              <stop offset="40%" stopColor="#fef08a" />
+              <stop offset="70%" stopColor="#f97316" />
+              <stop offset="100%" stopColor="#ef4444" stopOpacity="0" />
+            </radialGradient>
+            <filter id="forgeGlow" x="-30%" y="-30%" width="160%" height="160%">
+              <feGaussianBlur stdDeviation="3.5" result="blur" />
               <feComposite in="SourceGraphic" in2="blur" operator="over" />
             </filter>
           </defs>
 
           {/* Anvil Base */}
-          <path d="M 18 60 L 98 60 L 88 50 L 26 50 Z" fill="#334155" stroke="#475569" strokeWidth="1" />
+          <path d="M 28 82 L 136 82 L 122 68 L 42 68 Z" fill="#1e293b" stroke="#475569" strokeWidth="1.2" />
           {/* Anvil Waist */}
-          <path d="M 36 50 C 36 43, 42 38, 42 34 L 78 34 C 78 38, 84 43, 84 50 Z" fill="url(#anvilBodyGrad)" />
+          <path d="M 52 68 C 52 56, 60 50, 60 44 L 106 44 C 106 50, 114 56, 114 68 Z" fill="url(#anvilBodyGrad)" />
           {/* Anvil Horn (left) and Step/Face (right) */}
           <path
-            d="M 10 34 C 20 34, 30 32, 40 32 L 104 32 L 104 39 L 90 39 C 86 39, 82 42, 78 42 L 40 42 C 30 42, 20 37, 10 34 Z"
+            d="M 14 44 C 28 44, 42 41, 56 41 L 146 41 L 146 50 L 128 50 C 122 50, 116 54, 110 54 L 56 54 C 42 54, 28 48, 14 44 Z"
             fill="url(#anvilBodyGrad)"
             stroke="#64748b"
-            strokeWidth="1"
+            strokeWidth="1.2"
           />
-          {/* Striking surface highlight */}
-          <line x1="42" y1="32" x2="104" y2="32" stroke="#cbd5e1" strokeWidth="2" strokeLinecap="round" />
+          {/* Striking surface hardened face */}
+          <line x1="56" y1="41" x2="146" y2="41" stroke="#e2e8f0" strokeWidth="2.5" strokeLinecap="round" />
 
           {!isRegistered ? (
             <>
-              {/* Hot Anvil Contact Glow */}
-              <circle cx="72" cy="32" r="5" fill="#f59e0b" opacity="0.6" filter="url(#forgeGlow)" />
-              <circle cx="72" cy="32" r="2.5" fill="#fef08a" />
+              {/* Hot glowing anvil contact spot */}
+              <circle cx="102" cy="41" r="7" fill="#f59e0b" opacity="0.65" filter="url(#forgeGlow)" />
+              <circle cx="102" cy="41" r="3" fill="#fef08a" />
 
-              {/* Rhythmic Hammer Strike */}
+              {/* Bold Steel Hammer swinging down and striking */}
               <motion.g
                 animate={{
-                  rotate: [0, -38, -38, 4, 0],
+                  rotate: [0, -42, -42, 6, 0],
                 }}
                 transition={{
                   repeat: Infinity,
-                  duration: 0.7,
-                  times: [0, 0.25, 0.45, 0.62, 0.7],
+                  duration: 0.65,
+                  times: [0, 0.25, 0.45, 0.62, 0.65],
                   ease: "easeInOut",
                 }}
-                style={{ transformOrigin: "62px 12px" }}
+                style={{ transformOrigin: "90px 14px" }}
               >
-                {/* Wood Handle */}
-                <rect x="59" y="8" width="5" height="25" rx="2" fill="#d97706" stroke="#92400e" strokeWidth="0.8" />
-                {/* Steel Hammer Head */}
-                <rect x="50" y="27" width="22" height="10" rx="2" fill="url(#hammerHeadGrad)" stroke="#94a3b8" strokeWidth="0.8" />
+                {/* Wooden handle */}
+                <rect x="87" y="10" width="6" height="34" rx="3" fill="#d97706" stroke="#78350f" strokeWidth="1" />
+                {/* Steel hammer head */}
+                <rect x="74" y="34" width="30" height="13" rx="2.5" fill="url(#hammerHeadGrad)" stroke="#cbd5e1" strokeWidth="1" />
+                <line x1="76" y1="36" x2="102" y2="36" stroke="#ffffff" strokeWidth="1" opacity="0.8" />
               </motion.g>
 
-              {/* Sparks erupting from the strike contact point */}
-              <g transform="translate(72, 32)">
+              {/* Bright orange/gold impact flash on the anvil face */}
+              <motion.ellipse
+                cx="102"
+                cy="41"
+                rx="18"
+                ry="10"
+                fill="url(#strikeFlashGrad)"
+                filter="url(#forgeGlow)"
+                animate={{
+                  opacity: [0, 0, 1, 0],
+                  scale: [0.3, 0.3, 1.4, 0],
+                }}
+                transition={{
+                  repeat: Infinity,
+                  duration: 0.65,
+                  times: [0, 0.58, 0.63, 0.75],
+                  ease: "easeOut",
+                }}
+              />
+
+              {/* 8 flying spark particles erupting outward on each strike */}
+              <g transform="translate(102, 41)">
+                {/* Spark 1 */}
+                <motion.circle
+                  cx={0}
+                  cy={0}
+                  r={2.2}
+                  fill="#fde047"
+                  animate={{ x: [0, 24, 38], y: [0, -18, -26], opacity: [0, 1, 0], scale: [0.6, 1.4, 0] }}
+                  transition={{ repeat: Infinity, duration: 0.65, times: [0.58, 0.65, 0.88], ease: "easeOut" }}
+                />
+                {/* Spark 2 */}
                 <motion.circle
                   cx={0}
                   cy={0}
                   r={2}
-                  fill="#fde047"
-                  animate={{
-                    x: [0, 18, 26],
-                    y: [0, -14, -20],
-                    opacity: [0, 1, 0],
-                    scale: [0.5, 1.4, 0],
-                  }}
-                  transition={{ repeat: Infinity, duration: 0.7, times: [0.5, 0.65, 0.9], ease: "easeOut" }}
+                  fill="#f97316"
+                  animate={{ x: [0, -22, -34], y: [0, -16, -24], opacity: [0, 1, 0], scale: [0.6, 1.3, 0] }}
+                  transition={{ repeat: Infinity, duration: 0.65, times: [0.58, 0.64, 0.86], ease: "easeOut" }}
                 />
+                {/* Spark 3 */}
                 <motion.circle
                   cx={0}
                   cy={0}
                   r={1.8}
-                  fill="#f97316"
-                  animate={{
-                    x: [0, -16, -24],
-                    y: [0, -12, -18],
-                    opacity: [0, 1, 0],
-                    scale: [0.5, 1.3, 0],
-                  }}
-                  transition={{ repeat: Infinity, duration: 0.7, times: [0.5, 0.64, 0.88], ease: "easeOut" }}
+                  fill="#ffffff"
+                  animate={{ x: [0, 8, 14], y: [0, -28, -38], opacity: [0, 1, 0], scale: [0.5, 1.3, 0] }}
+                  transition={{ repeat: Infinity, duration: 0.65, times: [0.58, 0.66, 0.9], ease: "easeOut" }}
                 />
+                {/* Spark 4 */}
+                <motion.circle
+                  cx={0}
+                  cy={0}
+                  r={1.8}
+                  fill="#eab308"
+                  animate={{ x: [0, -10, -18], y: [0, -26, -36], opacity: [0, 1, 0], scale: [0.5, 1.2, 0] }}
+                  transition={{ repeat: Infinity, duration: 0.65, times: [0.58, 0.65, 0.87], ease: "easeOut" }}
+                />
+                {/* Spark 5 */}
+                <motion.circle
+                  cx={0}
+                  cy={0}
+                  r={2.4}
+                  fill="#f59e0b"
+                  animate={{ x: [0, 32, 48], y: [0, -8, -14], opacity: [0, 1, 0], scale: [0.6, 1.5, 0] }}
+                  transition={{ repeat: Infinity, duration: 0.65, times: [0.58, 0.66, 0.92], ease: "easeOut" }}
+                />
+                {/* Spark 6 */}
+                <motion.circle
+                  cx={0}
+                  cy={0}
+                  r={2.2}
+                  fill="#ea580c"
+                  animate={{ x: [0, -30, -46], y: [0, -10, -16], opacity: [0, 1, 0], scale: [0.6, 1.4, 0] }}
+                  transition={{ repeat: Infinity, duration: 0.65, times: [0.58, 0.64, 0.88], ease: "easeOut" }}
+                />
+                {/* Spark 7 */}
+                <motion.circle
+                  cx={0}
+                  cy={0}
+                  r={1.6}
+                  fill="#c084fc"
+                  animate={{ x: [0, 18, 28], y: [0, -24, -32], opacity: [0, 1, 0], scale: [0.5, 1.2, 0] }}
+                  transition={{ repeat: Infinity, duration: 0.65, times: [0.58, 0.67, 0.94], ease: "easeOut" }}
+                />
+                {/* Spark 8 */}
                 <motion.circle
                   cx={0}
                   cy={0}
                   r={1.5}
-                  fill="#c084fc"
-                  animate={{
-                    x: [0, 8, 14],
-                    y: [0, -20, -26],
-                    opacity: [0, 1, 0],
-                    scale: [0.5, 1.2, 0],
-                  }}
-                  transition={{ repeat: Infinity, duration: 0.7, times: [0.5, 0.66, 0.92], ease: "easeOut" }}
-                />
-                <motion.circle
-                  cx={0}
-                  cy={0}
-                  r={1.2}
                   fill="#ffffff"
-                  animate={{
-                    x: [0, -8, -12],
-                    y: [0, -18, -24],
-                    opacity: [0, 1, 0],
-                    scale: [0.5, 1, 0],
-                  }}
-                  transition={{ repeat: Infinity, duration: 0.7, times: [0.5, 0.63, 0.85], ease: "easeOut" }}
+                  animate={{ x: [0, -2, -4], y: [0, -34, -46], opacity: [0, 1, 0], scale: [0.6, 1.1, 0] }}
+                  transition={{ repeat: Infinity, duration: 0.65, times: [0.58, 0.63, 0.84], ease: "easeOut" }}
                 />
               </g>
             </>
           ) : (
             <>
               {/* Resting Hammer */}
-              <g transform="translate(14, 18) rotate(34 60 28)">
-                <rect x="59" y="8" width="5" height="25" rx="2" fill="#78350f" opacity="0.75" />
-                <rect x="50" y="27" width="22" height="10" rx="2" fill="url(#hammerHeadGrad)" stroke="#64748b" strokeWidth="0.8" />
+              <g transform="translate(18, 22) rotate(36 80 34)">
+                <rect x="77" y="10" width="6" height="34" rx="3" fill="#78350f" opacity="0.85" />
+                <rect x="64" y="34" width="30" height="13" rx="2.5" fill="url(#hammerHeadGrad)" stroke="#64748b" strokeWidth="1" />
               </g>
 
-              {/* Gleaming Forged Checkmark / Starburst Badge */}
-              <g transform="translate(72, 24)">
-                <circle cx="0" cy="0" r="11" fill="#10b981" filter="url(#forgeGlow)" opacity="0.95" />
-                <path d="M -4.5 0 L -1 3.5 L 5 -2.5" fill="none" stroke="#ffffff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-                {/* Shimmer rays */}
-                <line x1="0" y1="-14" x2="0" y2="-17" stroke="#34d399" strokeWidth="1.5" strokeLinecap="round" />
-                <line x1="12" y1="-8" x2="15" y2="-10" stroke="#f59e0b" strokeWidth="1.5" strokeLinecap="round" />
-                <line x1="12" y1="8" x2="15" y2="10" stroke="#34d399" strokeWidth="1.5" strokeLinecap="round" />
-                <line x1="-12" y1="-8" x2="-15" y2="-10" stroke="#f59e0b" strokeWidth="1.5" strokeLinecap="round" />
-                <line x1="-12" y1="8" x2="-15" y2="10" stroke="#34d399" strokeWidth="1.5" strokeLinecap="round" />
+              {/* Gleaming Emerald Checkmark / Starburst Badge */}
+              <g transform="translate(102, 30)">
+                <circle cx="0" cy="0" r="14" fill="#10b981" filter="url(#forgeGlow)" opacity="0.95" />
+                <path d="M -5.5 0 L -1.5 4 L 6 -3.5" fill="none" stroke="#ffffff" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" />
+                {/* Golden shimmer rays */}
+                <line x1="0" y1="-18" x2="0" y2="-23" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" />
+                <line x1="15" y1="-10" x2="20" y2="-13" stroke="#34d399" strokeWidth="2" strokeLinecap="round" />
+                <line x1="15" y1="10" x2="20" y2="13" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" />
+                <line x1="-15" y1="-10" x2="-20" y2="-13" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" />
+                <line x1="-15" y1="10" x2="-20" y2="13" stroke="#34d399" strokeWidth="2" strokeLinecap="round" />
               </g>
             </>
           )}
         </svg>
       </div>
 
-      {/* Telemetry info block */}
-      <div className="min-w-0 flex-1 pl-3 text-left">
+      {/* Big, Jargon-Free Centerpiece Telemetry */}
+      <div className="min-w-0 flex-1 pl-1 text-left sm:pl-3">
         {!isRegistered ? (
-          <div>
-            <div className="flex items-center gap-1.5 font-mono text-[11px] font-bold tracking-wide text-amber-300">
-              <span className="relative flex h-2 w-2">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 font-mono text-[13px] font-bold tracking-wide text-amber-300">
+              <span className="relative flex h-2.5 w-2.5">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
-                <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-400" />
+                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-amber-400" />
               </span>
-              <span>BLACKSMITH TDD ENGINE ACTIVE</span>
+              <span>⚒️ BUILDING CUSTOM TOOL...</span>
             </div>
-            <div className="mt-0.5 truncate text-[11.5px] text-purple-200/90">
-              Forging <span className="font-mono font-semibold text-white">{toolName ? `${toolName}.py` : "custom tool"}</span> · Sandboxed AST &amp; pure stdlib TDD
+            <div className="text-[12px] leading-snug text-purple-200">
+              Agent needed a penalty calculator → hammering Python code in sandbox
             </div>
           </div>
         ) : (
-          <div>
-            <div className="flex items-center gap-1.5 font-mono text-[11px] font-bold tracking-wide text-emerald-300">
-              <Sparkles className="h-3.5 w-3.5 text-amber-300 animate-pulse" />
-              <span>TOOL FORGED &amp; VERIFIED IN SANDBOX</span>
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 font-mono text-[13px] font-bold tracking-wide text-emerald-300">
+              <Sparkles className="h-4 w-4 text-amber-300 animate-pulse" />
+              <span>{`✅ TOOL FORGED! (${testRatio})`}</span>
             </div>
-            <div className="mt-0.5 truncate text-[11.5px] text-emerald-100">
-              Tool <span className="font-mono font-semibold text-white">{toolName ? `${toolName}.py` : ""}</span> added to <span className="font-semibold text-amber-300">Agent Toolbox ↘</span>
+            <div className="text-[12px] leading-snug text-emerald-100 font-medium">
+              Pulling into Agent Toolbox ↙
             </div>
           </div>
         )}
@@ -654,7 +708,7 @@ function LiveWindow({
         )}
 
         {/* Dedicated Blacksmith Hammer striking Anvil Visual for The Forge */}
-        {isForge && <ForgeAnvilVisual isRegistered={isForgeRegistered} toolName={win.toolName} />}
+        {isForge && <ForgeAnvilVisual win={win} />}
 
         {/* Code body */}
         <div className="relative bg-code">
@@ -663,10 +717,7 @@ function LiveWindow({
           )}
           <div
             ref={bodyRef}
-            className={cx(
-              "scroll-thin overflow-y-auto py-3 font-mono text-[13px] leading-[1.8]",
-              win.instant ? "max-h-[min(460px,52vh)]" : "max-h-[min(320px,30vh)]"
-            )}
+            className="scroll-thin overflow-y-auto max-h-[190px] py-3 font-mono text-[13px] leading-[1.8]"
           >
             {lines.map((line, i) => {
               const active = i === lines.length - 1 && typing;

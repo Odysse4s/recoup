@@ -20,14 +20,14 @@ import {
   XCircle,
   type LucideIcon,
 } from "lucide-react";
-import { useId, useMemo, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useMemo, useState, type KeyboardEvent } from "react";
 import type { AnticipateOfferPayload, ApprovalNeededPayload, ChangeReport, ServerEvent } from "../contracts";
 import { anchorRef } from "../lib/anchors";
 import { highlightLine } from "../lib/highlight";
 import { reportCounts } from "../lib/narrate";
 import { soundFx } from "../lib/sound";
 import type { WorkspaceState } from "../lib/types";
-import { btn, Chip, cx, Dot, Panel, type Tone } from "./ui";
+import { btn, Chip, cx, Dot, Drawer, type Tone } from "./ui";
 
 const withClick = (fn: () => void) => () => {
   soundFx.playUiClick();
@@ -304,17 +304,22 @@ export function DiffStack({
 }) {
   const stack = ws?.undo_stack ?? [];
   const reversed = [...stack].reverse();
-  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [checkpointsOpen, setCheckpointsOpen] = useState(false);
   const drawerId = useId();
   const diffs = (report?.files_modified ?? []).filter((f) => !f.path.endsWith(".db") && !f.path.endsWith(".sqlite"));
+  const dbCount = Object.keys(report?.db_summary ?? {}).length;
+  const outboxCount = report?.external_outbox?.length ?? 0;
+  const totalCount = diffs.length + dbCount + outboxCount;
+
   return (
-    <Panel
-      title="Staged Changes"
+    <Drawer
+      title={`Staged Files & Undo (${totalCount})`}
       icon={<FileDiff />}
-      meta={report ? committed ? <Chip tone="ok">committed</Chip> : <Chip tone="warn">staged preview</Chip> : null}
+      badge={report ? committed ? <Chip tone="ok">committed</Chip> : <Chip tone="warn">staged preview</Chip> : null}
       actions={
         <div className="flex items-center gap-1">
           <button
+            type="button"
             onClick={() => onUndo(1)}
             disabled={rewinding || stack.length === 0}
             className={btn("warn", "sm")}
@@ -326,32 +331,34 @@ export function DiffStack({
               {stack.length}
             </span>
           </button>
-          <button
-            type="button"
-            onClick={withClick(() => setDrawerOpen((o) => !o))}
-            aria-expanded={drawerOpen}
-            aria-controls={drawerId}
-            aria-label="Reversible undo checkpoints"
-            title="Reversible undo checkpoints — rewind to any step, newest first"
-            className={cx(
-              btn("outline", "sm"),
-              "px-1.5",
-              drawerOpen && "border-warn/40 bg-warn/10 text-warn"
-            )}
-          >
-            <History className="h-3.5 w-3.5" />
-            <ChevronDown className={cx("h-3 w-3 transition-transform", drawerOpen && "rotate-180")} />
-          </button>
+          {stack.length > 0 && (
+            <button
+              type="button"
+              onClick={withClick(() => setCheckpointsOpen((o) => !o))}
+              aria-expanded={checkpointsOpen}
+              aria-controls={drawerId}
+              aria-label="Reversible undo checkpoints"
+              title="Reversible undo checkpoints — rewind to any step, newest first"
+              className={cx(
+                btn("outline", "sm"),
+                "px-1.5",
+                checkpointsOpen && "border-warn/40 bg-warn/10 text-warn"
+              )}
+            >
+              <History className="h-3.5 w-3.5" />
+              <ChevronDown className={cx("h-3 w-3 transition-transform", checkpointsOpen && "rotate-180")} />
+            </button>
+          )}
         </div>
       }
       anchor={anchorRef("diff")}
       pulseKey={pulseKey}
-      pulseTone="ok"
-      className="min-h-[180px] flex-1"
-      bodyClassName="scroll-thin overflow-y-auto"
+      pulseTone="warn"
+      defaultOpen={false}
+      bodyClassName="scroll-thin max-h-[240px] overflow-y-auto"
     >
       <AnimatePresence initial={false}>
-        {drawerOpen && (
+        {checkpointsOpen && (
           <motion.div
             id={drawerId}
             initial={{ height: 0, opacity: 0 }}
@@ -521,7 +528,7 @@ export function DiffStack({
           </div>
         )}
       </div>
-    </Panel>
+    </Drawer>
   );
 }
 
@@ -536,70 +543,78 @@ export function AnticipateCard({
   onDismiss: (id: string) => void;
   brandName?: string;
 }) {
+  const [open, setOpen] = useState(Boolean(offer));
+
+  useEffect(() => {
+    if (offer) {
+      setOpen(true);
+    }
+  }, [offer?.offer_id]);
+
+  if (!offer) return null;
+
   return (
     <AnimatePresence mode="wait">
-      {offer ? (
-        <motion.section
-          key={offer.offer_id}
-          initial={{ opacity: 0, y: 18, scale: 0.97 }}
-          animate={{ opacity: 1, y: 0, scale: 1 }}
-          exit={{ opacity: 0, scale: 0.97 }}
-          transition={{ type: "spring", stiffness: 300, damping: 26 }}
-          className="relative flex shrink-0 flex-col overflow-hidden rounded-xl border border-signal/40 bg-surface"
-          style={{ boxShadow: "var(--shadow-card), 0 18px 50px -22px color-mix(in oklab, var(--signal) 60%, transparent)" }}
-        >
-          <div className="flex shrink-0 items-center gap-2 border-b border-line px-3.5 py-2">
-            <Sparkles className="h-3.5 w-3.5 text-signal" />
-            <h4 className="text-[13px] font-semibold text-ink">Next Suggested Audit</h4>
-            <Chip tone="signal">{Math.round(offer.prediction.confidence * 100)}% confidence</Chip>
-            <span className="ml-auto font-mono text-[11px] text-ink-2 tabular">{offer.prediction.kind}</span>
-          </div>
-          <div className="scroll-thin max-h-[240px] min-h-0 space-y-2 overflow-y-auto p-3.5">
-            <div className="h-1 overflow-hidden rounded-full bg-sunken">
-              <motion.div
-                className="h-full rounded-full bg-signal"
-                initial={{ width: 0 }}
-                animate={{ width: `${offer.prediction.confidence * 100}%` }}
-                transition={{ duration: 1.2, ease: [0.2, 0.8, 0.2, 1] }}
-              />
+      <motion.div
+        key={offer.offer_id}
+        initial={{ opacity: 0, y: 12, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, scale: 0.98 }}
+        transition={{ type: "spring", stiffness: 320, damping: 28 }}
+        className="shrink-0"
+      >
+        <Drawer
+          title={`Next Suggested Audit · ${Math.round(offer.prediction.confidence * 100)}%`}
+          icon={<Sparkles className="text-signal" />}
+          badge={<Chip tone="signal">{offer.prediction.kind}</Chip>}
+          actions={
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={withClick(() => onAccept(offer.offer_id))}
+                className={cx(btn("signal", "sm"), "h-6 px-2 text-[11px] font-semibold")}
+              >
+                <Check className="h-3 w-3" /> Approve &amp; Run
+              </button>
+              <button
+                type="button"
+                onClick={withClick(() => onDismiss(offer.offer_id))}
+                className={cx(btn("outline", "sm"), "h-6 px-2 text-[11px]")}
+              >
+                Dismiss
+              </button>
             </div>
-            <h3 className="text-[13.5px] font-semibold leading-snug tracking-tight text-ink">{offer.prediction.need}</h3>
-            <p className="text-[12px] leading-snug text-ink-2">
-              <span className="font-semibold text-signal">Proactive Finding · </span>
-              {offer.prediction.evidence || "€175.00 rate discrepancy detected across paid shipments D-1017 & D-1031"}
-            </p>
-            {offer.report.files_modified
-              .filter((f) => !f.path.endsWith(".db"))
-              .slice(0, 1)
-              .map((f) => (
-                <div key={f.path} className="overflow-hidden rounded-lg border border-line">
-                  <div className="border-b border-line bg-sunken px-3 py-1 font-mono text-[11px] text-ink-2">{f.path}</div>
-                  <DiffBlock diff={f.diff} max={90} />
-                </div>
-              ))}
-          </div>
-          <div className="sticky bottom-0 z-10 flex shrink-0 gap-2 border-t border-line bg-surface px-3.5 py-2.5">
-            <button onClick={withClick(() => onAccept(offer.offer_id))} className={cx(btn("signal", "md"), "flex-1 font-semibold")}>
-              <Check className="h-3.5 w-3.5" /> Approve &amp; Run · {offer.mutations_count} mutation{offer.mutations_count === 1 ? "" : "s"}
-            </button>
-            <button onClick={withClick(() => onDismiss(offer.offer_id))} className={cx(btn("outline", "md"), "font-medium")}>
-              Dismiss
-            </button>
-          </div>
-        </motion.section>
-      ) : (
-        <motion.section
-          key="idle"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="flex shrink-0 items-center justify-between gap-2 rounded-xl border border-dashed border-line px-3.5 py-2.5"
+          }
+          open={open}
+          onOpenChange={setOpen}
+          pulseKey={1}
+          pulseTone="signal"
+          bodyClassName="scroll-thin max-h-[220px] overflow-y-auto p-3 space-y-2"
         >
-          <span className="flex items-center gap-2 text-[12px] font-semibold text-ink-2">
-            <Sparkles className="h-3.5 w-3.5 text-signal" /> Next Suggested Audit
-          </span>
-          <span className="truncate text-[11.5px] text-ink-3">{brandName} proactively monitors paid AP for contract discrepancies</span>
-        </motion.section>
-      )}
+          <div className="h-1 overflow-hidden rounded-full bg-sunken">
+            <motion.div
+              className="h-full rounded-full bg-signal"
+              initial={{ width: 0 }}
+              animate={{ width: `${offer.prediction.confidence * 100}%` }}
+              transition={{ duration: 1.2, ease: [0.2, 0.8, 0.2, 1] }}
+            />
+          </div>
+          <h3 className="text-[13px] font-semibold leading-snug tracking-tight text-ink">{offer.prediction.need}</h3>
+          <p className="text-[11.5px] leading-snug text-ink-2">
+            <span className="font-semibold text-signal">Proactive Finding · </span>
+            {offer.prediction.evidence || "€175.00 rate discrepancy detected across paid shipments D-1017 & D-1031"}
+          </p>
+          {offer.report.files_modified
+            .filter((f) => !f.path.endsWith(".db"))
+            .slice(0, 1)
+            .map((f) => (
+              <div key={f.path} className="overflow-hidden rounded-lg border border-line">
+                <div className="border-b border-line bg-sunken px-2.5 py-1 font-mono text-[10.5px] text-ink-2">{f.path}</div>
+                <DiffBlock diff={f.diff} max={80} />
+              </div>
+            ))}
+        </Drawer>
+      </motion.div>
     </AnimatePresence>
   );
 }
@@ -662,19 +677,20 @@ export function CostMonitor({ events, totalCost }: { events: ServerEvent[]; tota
   const voicePct = breakdownTotal > 0 ? 100 - reasoningPct : 0;
 
   return (
-    <Panel
-      title="Live Cost Monitor"
+    <Drawer
+      title={`Run Cost Breakdown · ${fmtEur(totalCost)}`}
       icon={<Euro />}
-      meta={<Dot tone={totalCost > 0 ? "ok" : "neutral"} live={totalCost > 0} />}
+      badge={<Dot tone={totalCost > 0 ? "ok" : "neutral"} live={totalCost > 0} />}
+      defaultOpen={false}
       className="shrink-0"
     >
-      <div className="space-y-3 p-3.5">
+      <div className="space-y-2.5 p-3">
         <div className="flex items-baseline justify-between">
           <motion.span
             key={totalCost.toFixed(6)}
             initial={{ y: -4, opacity: 0.3 }}
             animate={{ y: 0, opacity: 1 }}
-            className="font-mono text-2xl font-semibold tabular text-ok"
+            className="font-mono text-xl font-semibold tabular text-ok"
           >
             {fmtEur(totalCost)}
           </motion.span>
@@ -709,6 +725,8 @@ export function CostMonitor({ events, totalCost }: { events: ServerEvent[]; tota
           <span className="font-mono tabular text-ink">{fmtEur(voiceCost)}</span>
         </div>
       </div>
-    </Panel>
+    </Drawer>
   );
 }
+
+export const CostMonitorPanel = CostMonitor;

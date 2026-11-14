@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
-import type { ReactNode } from "react";
+import { ChevronDown } from "lucide-react";
+import { useState, type ReactNode } from "react";
 import { soundFx } from "../lib/sound";
 
 export type Tone = "ok" | "warn" | "danger" | "accent" | "forge" | "signal" | "neutral";
@@ -181,6 +182,118 @@ export function Panel({
         {actions && <div className="flex shrink-0 items-center gap-1.5">{actions}</div>}
       </header>
       <div className={cx("min-h-0 flex-1", bodyClassName)}>{children}</div>
+    </section>
+  );
+}
+
+export interface DrawerProps {
+  title: ReactNode;
+  icon?: ReactNode;
+  badge?: ReactNode;
+  actions?: ReactNode;
+  defaultOpen?: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  className?: string;
+  bodyClassName?: string;
+  anchor?: (el: HTMLElement | null) => void;
+  pulseKey?: number;
+  pulseTone?: Tone;
+  children: ReactNode;
+}
+
+export function Drawer({
+  title,
+  icon,
+  badge,
+  actions,
+  defaultOpen = false,
+  open,
+  onOpenChange,
+  className,
+  bodyClassName,
+  anchor,
+  pulseKey = 0,
+  pulseTone = "accent",
+  children,
+}: DrawerProps) {
+  const [internalOpen, setInternalOpen] = useState(defaultOpen);
+  const isControlled = open !== undefined;
+  const isOpen = isControlled ? open : internalOpen;
+
+  const toggleOpen = () => {
+    soundFx.playUiClick();
+    const next = !isOpen;
+    if (!isControlled) {
+      setInternalOpen(next);
+    }
+    onOpenChange?.(next);
+  };
+
+  return (
+    <section
+      ref={anchor}
+      className={cx(
+        "relative flex min-h-0 shrink-0 flex-col rounded-xl border border-line bg-surface shadow-card transition-colors",
+        className
+      )}
+    >
+      <PulseRing pulseKey={pulseKey} tone={pulseTone} />
+      <header
+        role="button"
+        tabIndex={0}
+        aria-expanded={isOpen}
+        onClick={toggleOpen}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            toggleOpen();
+          }
+        }}
+        className={cx(
+          "flex h-[38px] min-h-[38px] cursor-pointer select-none items-center justify-between gap-2 px-3.5 transition-colors hover:bg-sunken/40",
+          isOpen && "border-b border-line"
+        )}
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          {icon && <span className="text-ink-3 [&>svg]:h-3.5 [&>svg]:w-3.5">{icon}</span>}
+          <h2 className="truncate text-[12px] font-semibold tracking-tight text-ink">{title}</h2>
+          {badge}
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {actions && (
+            <div
+              className="flex shrink-0 items-center gap-1.5"
+              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => e.stopPropagation()}
+            >
+              {actions}
+            </div>
+          )}
+          <span
+            aria-hidden
+            className={cx(
+              "inline-flex h-4 w-4 shrink-0 items-center justify-center text-ink-3 transition-transform duration-200",
+              isOpen ? "rotate-180 text-ink" : "rotate-0"
+            )}
+          >
+            <ChevronDown className="h-3.5 w-3.5" />
+          </span>
+        </div>
+      </header>
+      <AnimatePresence initial={false}>
+        {isOpen && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.22, ease: [0.2, 0.8, 0.2, 1] }}
+            className="overflow-hidden"
+          >
+            <div className={cx("min-h-0", bodyClassName)}>{children}</div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </section>
   );
 }

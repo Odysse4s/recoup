@@ -2,6 +2,7 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   BrainCircuit,
   Check,
+  ChevronDown,
   DatabaseZap,
   FileDiff,
   Fingerprint,
@@ -176,7 +177,7 @@ const inkMix = "color-mix(in oklab, var(--c) 76%, var(--ink))";
 
 function SecuritySealGrid({ seals, compact = false }: { seals: string[]; compact?: boolean }) {
   return (
-    <span className={cx("grid grid-cols-2 gap-1", compact ? "mt-1 border-t border-line/70 pt-1" : "mt-1.5")}>
+    <span className={cx("grid grid-cols-2 gap-1", compact ? "mt-1 border-t border-line/70 pt-1" : "mt-1")}>
       {seals.map((seal, idx) => {
         const emerald = idx === 1 || idx === 2;
         return (
@@ -424,9 +425,9 @@ function useSha256(value: unknown): string | null {
 
 function Metric({ label, value, mono = true, title }: { label: string; value: string; mono?: boolean; title?: string }) {
   return (
-    <div className="min-w-0 rounded-md border border-line bg-sunken/70 px-2 py-1.5" title={title}>
+    <div className="min-w-0 rounded-md border border-line bg-sunken/70 px-2 py-1" title={title}>
       <div className="text-[9px] font-medium uppercase tracking-wider text-ink-3">{label}</div>
-      <div className={cx("truncate text-[11.5px] text-ink tabular", mono && "font-mono")}>{value}</div>
+      <div className={cx("truncate text-[11px] text-ink tabular", mono && "font-mono")}>{value}</div>
     </div>
   );
 }
@@ -469,8 +470,12 @@ function NodeInspector({
       className="absolute right-2 top-2 z-20 flex max-h-[calc(100%-16px)] flex-col overflow-hidden rounded-xl border border-line bg-raised/95 shadow-float backdrop-blur-md"
       style={{ width: `min(${INSPECTOR_W}px, calc(100% - 16px))`, "--c": c } as CSSProperties}
     >
+      {/* Node Inspector Header */}
       <div className="flex shrink-0 items-start gap-2.5 border-b border-line px-3 py-2.5">
-        <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md" style={{ background: "color-mix(in oklab, var(--c) 15%, transparent)", color: inkMix }}>
+        <span
+          className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
+          style={{ background: "color-mix(in oklab, var(--c) 15%, transparent)", color: inkMix }}
+        >
           <Icon className="h-3.5 w-3.5" />
         </span>
         <div className="min-w-0 flex-1">
@@ -488,79 +493,158 @@ function NodeInspector({
             )}
           </div>
         </div>
-        <button type="button" onClick={act(onClose)} aria-label="Close inspector" className={cx(btn("ghost", "sm"), "h-6 w-6 px-0")}>
+        <button
+          type="button"
+          onClick={act(onClose)}
+          aria-label="Close inspector (Esc)"
+          title="Close (Esc)"
+          className={cx(btn("ghost", "sm"), "h-6 w-6 px-0 text-ink-3 hover:text-ink")}
+        >
           <X className="h-3.5 w-3.5" />
         </button>
       </div>
 
-      <div className="scroll-thin min-h-0 flex-1 space-y-2.5 overflow-y-auto px-3 py-2.5">
-        {d.summary && <p className="text-[12px] leading-relaxed text-ink-2">{d.summary}</p>}
-
-        {node.securityBadges && node.securityBadges.length > 0 && (
-          <div className="rounded-lg border border-forge/30 bg-forge/[0.06] p-2">
-            <div className="flex items-center gap-1.5 text-[9.5px] font-semibold uppercase tracking-wider text-forge">
-              <ShieldCheck className="h-3 w-3 text-ok" /> Sandbox Security Seal
-            </div>
-            <SecuritySealGrid seals={node.securityBadges} />
+      {/* TOP PRIMARY ACTIONS — Pinned at top right under header so they can NEVER move off-screen */}
+      {d.action?.kind === "approval" && (
+        <div className="shrink-0 border-b border-line bg-surface/90 px-3 py-2">
+          <div className="mb-1.5 flex items-center justify-between">
+            <span className="inline-flex items-center gap-1 font-mono text-[10px] font-bold uppercase tracking-wider text-danger">
+              <Radar className="h-3 w-3 animate-pulse text-danger" />
+              Action Required
+            </span>
+            <span className="font-mono text-[9.5px] text-ink-3">
+              req: {(d.action as { reqId: string }).reqId.slice(0, 8)}
+            </span>
           </div>
-        )}
+          <div className="flex gap-1.5">
+            <button
+              type="button"
+              onClick={act(() => onDecide((d.action as { reqId: string }).reqId, true))}
+              className={cx(btn("ok", "sm"), "flex-1 font-semibold shadow-sm")}
+            >
+              <Check className="h-3.5 w-3.5" /> Approve
+            </button>
+            <button
+              type="button"
+              onClick={act(() => onDecide((d.action as { reqId: string }).reqId, false))}
+              className={cx(btn("danger", "sm"), "flex-1 font-semibold")}
+            >
+              <X className="h-3.5 w-3.5" /> Reject
+            </button>
+          </div>
+        </div>
+      )}
+
+      {d.action?.kind === "offer" && (
+        <div className="shrink-0 border-b border-line bg-surface/90 px-3 py-2">
+          <div className="mb-1.5 flex items-center justify-between">
+            <span className="inline-flex items-center gap-1 font-mono text-[10px] font-bold uppercase tracking-wider text-signal">
+              <Sparkles className="h-3 w-3 text-signal" />
+              Agent Offer
+            </span>
+          </div>
+          <div className="flex gap-1.5">
+            <button
+              type="button"
+              onClick={act(() => onAcceptOffer((d.action as { offerId: string }).offerId))}
+              className={cx(btn("signal", "sm"), "flex-1 font-semibold")}
+            >
+              Accept Offer
+            </button>
+            <button
+              type="button"
+              onClick={act(() => onDismissOffer((d.action as { offerId: string }).offerId))}
+              className={cx(btn("outline", "sm"))}
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Scrollable Inspector Body — Compact & Human-friendly with collapsible technical details */}
+      <div className="scroll-thin min-h-0 flex-1 space-y-2 overflow-y-auto px-3 py-2.5">
+        {d.summary && <p className="text-[12px] leading-relaxed text-ink-2">{d.summary}</p>}
 
         <div className="grid grid-cols-3 gap-1.5">
           <Metric label="Latency" value={d.latencyMs ? `${d.latencyMs} ms` : "—"} />
           <Metric label="Cost" value={d.costEur ? `€${d.costEur.toFixed(4)}` : "—"} />
-          <Metric label="Receipt" value={sha ? (sha === "unavailable" ? "n/a" : sha.slice(0, 10)) : "—"} title={sha ? `sha256 ${sha}` : "No reversible receipt yet"} />
+          <Metric
+            label="Receipt"
+            value={sha ? (sha === "unavailable" ? "n/a" : sha.slice(0, 8)) : "—"}
+            title={sha ? `sha256 ${sha}` : "No reversible receipt yet"}
+          />
         </div>
 
         {d.facts.length > 0 && (
-          <dl className="space-y-1.5">
+          <dl className="space-y-1 rounded-md border border-line bg-sunken/40 p-1.5">
             {d.facts.map((f, i) => (
-              <div key={`${f.label}-${i}`} className="grid grid-cols-[78px_1fr] gap-2 text-[11.5px] leading-snug">
+              <div key={`${f.label}-${i}`} className="grid grid-cols-[74px_1fr] gap-2 text-[11px] leading-snug">
                 <dt className="pt-px text-[9.5px] font-medium uppercase tracking-wider text-ink-3">{f.label}</dt>
-                <dd className={cx("min-w-0 break-words text-ink", f.mono && "font-mono text-[10.5px]")}>{f.value}</dd>
+                <dd className={cx("min-w-0 break-words text-ink", f.mono && "font-mono text-[10px]")}>{f.value}</dd>
               </div>
             ))}
           </dl>
         )}
 
+        {/* Collapsible Sandbox Security Seal */}
+        {node.securityBadges && node.securityBadges.length > 0 && (
+          <details className="group rounded-lg border border-forge/30 bg-forge/[0.04]">
+            <summary className="flex cursor-pointer select-none items-center justify-between px-2.5 py-1.5 text-[9.5px] font-semibold uppercase tracking-wider text-forge hover:bg-forge/[0.06]">
+              <span className="flex items-center gap-1.5">
+                <ShieldCheck className="h-3 w-3 text-ok" /> Sandbox Security Seal ({node.securityBadges.length})
+              </span>
+              <ChevronDown className="h-3 w-3 text-forge transition-transform duration-200 group-open:rotate-180" />
+            </summary>
+            <div className="border-t border-forge/20 p-2">
+              <SecuritySealGrid seals={node.securityBadges} />
+            </div>
+          </details>
+        )}
+
+        {/* Collapsible Arguments */}
         {d.args !== undefined && (
-          <div>
-            <div className="mb-1 text-[9.5px] font-medium uppercase tracking-wider text-ink-3">{d.argsLabel ?? "Arguments"}</div>
-            <pre className="scroll-thin max-h-36 overflow-auto rounded-md border border-line bg-code p-2 font-mono text-[10.5px] leading-relaxed text-ink-2">{json(d.args)}</pre>
-          </div>
+          <details className="group rounded-md border border-line bg-sunken/40">
+            <summary className="flex cursor-pointer select-none items-center justify-between px-2.5 py-1 text-[9.5px] font-semibold uppercase tracking-wider text-ink-3 hover:bg-sunken/70 hover:text-ink">
+              <span>{d.argsLabel ?? "Arguments"}</span>
+              <ChevronDown className="h-3 w-3 text-ink-3 transition-transform duration-200 group-open:rotate-180" />
+            </summary>
+            <div className="border-t border-line/60 p-1.5">
+              <pre className="scroll-thin max-h-32 overflow-auto rounded bg-code p-1.5 font-mono text-[10px] leading-relaxed text-ink-2">
+                {json(d.args)}
+              </pre>
+            </div>
+          </details>
         )}
 
+        {/* Collapsible Source Code */}
         {d.code && (
-          <div>
-            <div className="mb-1 text-[9.5px] font-medium uppercase tracking-wider text-ink-3">Source</div>
-            <pre className="scroll-thin max-h-44 overflow-auto whitespace-pre rounded-md border border-line bg-code p-2 font-mono text-[10.5px] leading-relaxed text-ink-2">{d.code}</pre>
-          </div>
+          <details className="group rounded-md border border-line bg-sunken/40">
+            <summary className="flex cursor-pointer select-none items-center justify-between px-2.5 py-1 text-[9.5px] font-semibold uppercase tracking-wider text-ink-3 hover:bg-sunken/70 hover:text-ink">
+              <span>Source Code</span>
+              <ChevronDown className="h-3 w-3 text-ink-3 transition-transform duration-200 group-open:rotate-180" />
+            </summary>
+            <div className="border-t border-line/60 p-1.5">
+              <pre className="scroll-thin max-h-40 overflow-auto whitespace-pre rounded bg-code p-2 font-mono text-[10.5px] leading-relaxed text-ink-2">
+                {d.code}
+              </pre>
+            </div>
+          </details>
         )}
 
+        {/* Collapsible SHA-256 Receipt */}
         {sha && sha !== "unavailable" && (
-          <div className="break-all rounded-md border border-dashed border-line px-2 py-1.5 font-mono text-[9.5px] leading-relaxed text-ink-3">sha256 · {sha}</div>
+          <details className="group rounded-md border border-dashed border-line bg-sunken/30">
+            <summary className="flex cursor-pointer select-none items-center justify-between px-2 py-1 font-mono text-[9px] text-ink-3 hover:text-ink">
+              <span className="truncate">sha256 · {sha.slice(0, 14)}…</span>
+              <ChevronDown className="h-3 w-3 shrink-0 text-ink-3 transition-transform duration-200 group-open:rotate-180" />
+            </summary>
+            <div className="break-all border-t border-dashed border-line/60 p-1.5 font-mono text-[9px] text-ink-3 select-all">
+              {sha}
+            </div>
+          </details>
         )}
       </div>
-
-      {d.action?.kind === "approval" && (
-        <div className="flex shrink-0 gap-1.5 border-t border-line bg-surface/80 px-3 py-2.5">
-          <button type="button" onClick={act(() => onDecide((d.action as { reqId: string }).reqId, true))} className={cx(btn("ok", "md"), "flex-1")}>
-            Approve
-          </button>
-          <button type="button" onClick={act(() => onDecide((d.action as { reqId: string }).reqId, false))} className={cx(btn("danger", "md"), "flex-1")}>
-            Reject
-          </button>
-        </div>
-      )}
-      {d.action?.kind === "offer" && (
-        <div className="flex shrink-0 gap-1.5 border-t border-line bg-surface/80 px-3 py-2.5">
-          <button type="button" onClick={act(() => onAcceptOffer((d.action as { offerId: string }).offerId))} className={cx(btn("signal", "md"), "flex-1")}>
-            Accept
-          </button>
-          <button type="button" onClick={act(() => onDismissOffer((d.action as { offerId: string }).offerId))} className={btn("outline", "md")}>
-            Dismiss
-          </button>
-        </div>
-      )}
     </motion.aside>
   );
 }
@@ -695,14 +779,20 @@ export function NeuralGraph({
     return () => el.removeEventListener("wheel", onWheel);
   }, [zoomAt]);
 
-  const gateHeld = graph.nodes.some((n) => n.id === "gate" && n.status === "held");
-  useEffect(() => {
-    if (gateHeld) setSelectedId((s) => s ?? "gate");
-  }, [gateHeld]);
-
+  // Clean up selectedId if the node was removed from the graph
   useEffect(() => {
     if (selectedId && !graph.nodes.some((n) => n.id === selectedId)) setSelectedId(null);
   }, [graph.nodes, selectedId]);
+
+  // Global Escape key listener to close NodeInspector smoothly
+  useEffect(() => {
+    if (!selectedId) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSelectedId(null);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedId]);
 
   const ensureVisible = useCallback(
     (n: GNode, withInspector: boolean) => {

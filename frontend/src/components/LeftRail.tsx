@@ -1,5 +1,16 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowUpRight, Braces, CheckCircle2, Circle, Layers, Loader2, ShieldCheck, Sparkles, XCircle } from "lucide-react";
+import {
+  ArrowUpRight,
+  Braces,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Layers,
+  Loader2,
+  ShieldCheck,
+  Sparkles,
+  XCircle,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ForgeSpecPayload, ForgeTestPayload, PlanPayload, VerifyPayload } from "../contracts";
 import { anchorRef } from "../lib/anchors";
@@ -27,85 +38,153 @@ export function PlanPanel({
   presets: Preset[];
   onRun: (goal: string) => void;
 }) {
+  const [verifyOpen, setVerifyOpen] = useState(false);
+
   return (
     <Panel
       title={plan ? "Agent Plan" : "Audit Presets"}
       icon={<Layers />}
       meta={plan ? <Chip>{plan.steps.length} steps</Chip> : null}
-      bodyClassName="scroll-thin overflow-y-auto p-3"
+      className="min-h-0 flex-1"
+      bodyClassName="scroll-thin flex min-h-0 flex-1 flex-col overflow-y-auto p-2.5"
     >
       {plan ? (
-        <div className="space-y-2.5">
-          <p className="line-clamp-1 px-0.5 text-[12px] font-medium text-ink-2" title={plan.goal}>
-            {plan.goal.includes("Goal:") ? plan.goal.split("Goal:").pop()!.trim() : plan.goal}
-          </p>
-          <ol className="relative space-y-1.5">
-            {plan.steps.map((s, i) => {
-              const missing = s.tool.startsWith("MISSING:");
-              return (
-                <motion.li
-                  key={s.id}
-                  layout
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: i * 0.08 }}
-                  className={cx(
-                    "relative flex gap-2.5 rounded-lg border p-2 transition-colors duration-300",
-                    s.status === "running" && "border-accent/40 bg-accent/[0.07]",
-                    s.status === "done" && "border-line bg-surface",
-                    s.status === "failed" && "border-danger/40 bg-danger/[0.06]",
-                    s.status === "pending" && "border-line bg-sunken/60"
-                  )}
-                >
-                  <span className="mt-px shrink-0">
-                    {s.status === "done" ? (
-                      <CheckCircle2 className="h-4 w-4 text-ok" />
-                    ) : s.status === "running" ? (
-                      <Loader2 className="h-4 w-4 animate-spin text-accent" />
-                    ) : s.status === "failed" ? (
-                      <XCircle className="h-4 w-4 text-danger" />
-                    ) : (
-                      <Circle className="h-4 w-4 text-ink-3" />
-                    )}
+        <div className="flex min-h-0 flex-1 flex-col justify-between gap-2">
+          <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto pr-0.5">
+            <p className="line-clamp-1 px-1 text-[11.5px] font-medium text-ink-2" title={plan.goal}>
+              {plan.goal.includes("Goal:") ? plan.goal.split("Goal:").pop()!.trim() : plan.goal}
+            </p>
+            <ol className="relative space-y-1">
+              {plan.steps.map((s, i) => {
+                const missing = s.tool.startsWith("MISSING:");
+                const isRunning = s.status === "running";
+                const isDone = s.status === "done";
+                const isFailed = s.status === "failed";
+                const isPending = s.status === "pending";
+
+                const toolBadge = missing ? (
+                  <Chip tone="forge" className="h-4 shrink-0 px-1 font-mono text-[9px]">
+                    ⚒️ forge
+                  </Chip>
+                ) : s.tool ? (
+                  <span
+                    className="hidden max-w-[85px] shrink-0 truncate font-mono text-[10px] text-ink-3 sm:inline"
+                    title={s.tool}
+                  >
+                    {s.tool}
                   </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[12.5px] font-medium leading-snug text-ink">{s.intent}</div>
-                    <div className="mt-1 flex items-center gap-1.5">
-                      <span className="font-mono text-[10.5px] font-semibold text-ink-3">STEP {String(s.id).padStart(2, "0")}</span>
-                      <Chip tone={missing ? "forge" : "neutral"}>{missing ? `build · ${s.tool.slice(8)}` : s.tool}</Chip>
+                ) : null;
+
+                return (
+                  <motion.li
+                    key={s.id}
+                    layout
+                    initial={{ opacity: 0, x: -8 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: i * 0.04 }}
+                    className={cx(
+                      "relative flex items-center gap-2 rounded-lg border px-2.5 py-1.5 transition-colors duration-200",
+                      isRunning && "border-accent/50 bg-accent/[0.08] shadow-[0_0_12px_rgba(59,130,246,0.12)] ring-1 ring-accent/30",
+                      isDone && "border-line bg-surface/85 text-ink-2",
+                      isFailed && "border-danger/40 bg-danger/[0.06]",
+                      isPending && "border-line/60 bg-sunken/40 text-ink-3 opacity-80"
+                    )}
+                  >
+                    <span className="shrink-0">
+                      {isDone ? (
+                        <CheckCircle2 className="h-3.5 w-3.5 text-ok" />
+                      ) : isRunning ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" />
+                      ) : isFailed ? (
+                        <XCircle className="h-3.5 w-3.5 text-danger" />
+                      ) : (
+                        <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-sunken font-mono text-[9px] font-semibold text-ink-3">
+                          {s.id}
+                        </span>
+                      )}
+                    </span>
+
+                    <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                      <span
+                        className={cx(
+                          "shrink-0 font-mono text-[10px] font-bold uppercase tracking-wider",
+                          isRunning ? "text-accent" : isDone ? "text-ink-2" : "text-ink-3"
+                        )}
+                      >
+                        STEP {s.id}
+                      </span>
+                      <span className="shrink-0 text-ink-3/40">·</span>
+                      <span
+                        className={cx(
+                          "truncate text-[12px] font-medium leading-tight",
+                          isRunning ? "font-semibold text-ink" : isDone ? "text-ink-2" : isPending ? "text-ink-3" : "text-ink"
+                        )}
+                        title={s.intent}
+                      >
+                        {s.intent}
+                      </span>
                     </div>
-                  </div>
-                </motion.li>
-              );
-            })}
-          </ol>
+
+                    {toolBadge}
+                  </motion.li>
+                );
+              })}
+            </ol>
+          </div>
 
           <AnimatePresence>
             {verify && (
               <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                className="overflow-hidden"
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 4 }}
+                className="mt-auto shrink-0 pt-1"
               >
-                <div className="mb-1.5 mt-1 flex items-center justify-between px-0.5">
-                  <span className="text-[12px] font-semibold uppercase tracking-wider text-ink-3">Verification</span>
-                  <Chip tone={verify.passed ? "ok" : "danger"}>{verify.passed ? "Verified" : "Failed"}</Chip>
-                </div>
-                <div className="space-y-1">
-                  {verify.criteria.map((c, i) => (
+                <button
+                  type="button"
+                  onClick={() => setVerifyOpen((v) => !v)}
+                  className="flex w-full items-center justify-between rounded-lg border border-line bg-sunken/60 px-2.5 py-1.5 text-left transition-colors hover:border-line-strong hover:bg-sunken"
+                >
+                  <span className="flex items-center gap-1.5 text-[11px] font-semibold text-ink-2">
+                    {verifyOpen ? (
+                      <ChevronDown className="h-3 w-3 text-ink-3" />
+                    ) : (
+                      <ChevronRight className="h-3 w-3 text-ink-3" />
+                    )}
+                    Verification Checks · {verify.criteria.filter((c) => c.passed).length}/{verify.criteria.length} Passed
+                  </span>
+                  <Chip tone={verify.passed ? "ok" : "danger"} className="h-4 px-1.5 text-[9px]">
+                    {verify.passed ? "Verified" : "Failed"}
+                  </Chip>
+                </button>
+
+                <AnimatePresence initial={false}>
+                  {verifyOpen && (
                     <motion.div
-                      key={i}
-                      initial={{ opacity: 0, y: 4 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ delay: 0.12 * i }}
-                      title={c.detail}
-                      className="flex items-center gap-2 rounded-md px-1 py-0.5 text-[12px]"
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: "auto" }}
+                      exit={{ opacity: 0, height: 0 }}
+                      className="overflow-hidden"
                     >
-                      {c.passed ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-ok" /> : <XCircle className="h-3.5 w-3.5 shrink-0 text-danger" />}
-                      <span className="line-clamp-1 flex-1 font-medium text-ink-2">{c.criterion}</span>
+                      <div className="mt-1 space-y-1 rounded-lg border border-line/60 bg-surface/50 p-1.5">
+                        {verify.criteria.map((c, i) => (
+                          <div
+                            key={i}
+                            title={c.detail}
+                            className="flex items-center gap-2 rounded px-1.5 py-0.5 text-[11.5px]"
+                          >
+                            {c.passed ? (
+                              <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-ok" />
+                            ) : (
+                              <XCircle className="h-3.5 w-3.5 shrink-0 text-danger" />
+                            )}
+                            <span className="line-clamp-1 flex-1 font-medium text-ink-2">{c.criterion}</span>
+                          </div>
+                        ))}
+                      </div>
                     </motion.div>
-                  ))}
-                </div>
+                  )}
+                </AnimatePresence>
               </motion.div>
             )}
           </AnimatePresence>
@@ -162,6 +241,7 @@ export function ForgeVault({
   const prevCountRef = useRef(tools.length);
   const [showNewBadge, setShowNewBadge] = useState(false);
   const badgeTimerRef = useRef<number | null>(null);
+  const [sealOpen, setSealOpen] = useState(false);
 
   useEffect(() => {
     if (tools.length > prevCountRef.current) {
@@ -187,10 +267,10 @@ export function ForgeVault({
       meta={
         <div className="flex items-center gap-1.5">
           <AnimatePresence>
-            {showNewBadge && (
+            {showNewBadge ? (
               <motion.span
                 initial={{ scale: 0.6, opacity: 0, y: -2 }}
-                animate={{ scale: [1, 1.12, 1], opacity: 1, y: 0 }}
+                animate={{ scale: [1, 1.08, 1], opacity: 1, y: 0 }}
                 exit={{ scale: 0.8, opacity: 0 }}
                 transition={{ duration: 0.35 }}
                 className="inline-flex h-5 items-center gap-1 rounded-md border border-emerald-400 bg-emerald-500/20 px-2 font-mono text-[10px] font-bold tracking-wider text-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.5)]"
@@ -198,66 +278,63 @@ export function ForgeVault({
                 <Sparkles className="h-3 w-3 animate-spin text-amber-300" />
                 +1 NEW TOOL ADDED
               </motion.span>
+            ) : (
+              <Chip tone="forge">{tools.length} ready</Chip>
             )}
           </AnimatePresence>
-          <Chip tone="forge">7-Layer Sandbox</Chip>
         </div>
       }
       anchor={anchorRef("vault")}
       pulseKey={pulseKey}
       pulseTone="forge"
       className="shrink-0"
-      bodyClassName="p-3"
+      bodyClassName="p-2.5"
     >
-      <div className="space-y-2.5">
-        {/* +1 NEW TOOL ADDED banner flash */}
-        <AnimatePresence>
-          {showNewBadge && (
-            <motion.div
-              initial={{ opacity: 0, height: 0, scale: 0.95 }}
-              animate={{ opacity: 1, height: "auto", scale: 1 }}
-              exit={{ opacity: 0, height: 0, scale: 0.95 }}
-              transition={{ duration: 0.3 }}
-              className="overflow-hidden rounded-lg border border-emerald-500/50 bg-gradient-to-r from-emerald-950/70 via-slate-900 to-purple-950/70 p-2.5 text-emerald-300 shadow-[0_0_18px_rgba(16,185,129,0.3)]"
-            >
-              <div className="flex items-center justify-between">
-                <span className="flex items-center gap-1.5 font-mono text-[11px] font-bold text-emerald-300">
-                  <span className="inline-block animate-bounce">⚒️</span> +1 NEW TOOL ADDED TO TOOLBOX
-                </span>
-                <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 font-mono text-[9.5px] font-bold text-emerald-200">
-                  READY FOR EXECUTION
-                </span>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* 7-Layer Sandbox Security Seal */}
-        <div
-          aria-label="7-Layer Sandbox Security Seal"
-          className="rounded-lg border border-forge/35 bg-forge/[0.06] p-2.5"
-        >
-          <div className="mb-1.5 flex items-center justify-between gap-2">
-            <span className="inline-flex items-center gap-1.5 font-mono text-[11px] font-bold uppercase tracking-wider text-forge">
-              <ShieldCheck className="h-3.5 w-3.5 text-ok" />
-              7-Layer Security Seal
+      <div className="space-y-2">
+        {/* 1-line pull-down drawer toggle for 7-Layer Sandbox Security */}
+        <div className="rounded-lg border border-forge/25 bg-forge/[0.04]">
+          <button
+            type="button"
+            onClick={() => setSealOpen((o) => !o)}
+            aria-label="Toggle 7-Layer Sandbox Security Seal"
+            aria-expanded={sealOpen}
+            className="flex w-full items-center justify-between px-2.5 py-1 text-left transition-colors hover:bg-forge/[0.06]"
+          >
+            <span className="inline-flex items-center gap-1.5 font-mono text-[10.5px] font-bold uppercase tracking-wider text-forge">
+              <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-ok" />
+              🛡️ 7-Layer Sandbox Security
             </span>
-            <Chip tone="ok" className="h-4 px-1.5 text-[9.5px]">
-              enforced
-            </Chip>
-          </div>
-          <div className="flex flex-wrap gap-1">
-            {SEVEN_LAYER_SEAL.map((guarantee) => (
-              <span
-                key={guarantee}
-                className="inline-flex items-center rounded border border-forge/30 bg-surface/90 px-1.5 py-0.5 font-mono text-[10.5px] font-medium text-ink"
+            <div className="flex items-center gap-1.5">
+              <Chip tone="ok" className="h-3.5 px-1 text-[8.5px]">
+                enforced
+              </Chip>
+              <ChevronDown className={cx("h-3 w-3 text-forge transition-transform duration-200", sealOpen && "rotate-180")} />
+            </div>
+          </button>
+          <AnimatePresence initial={false}>
+            {sealOpen && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                className="overflow-hidden border-t border-forge/20 bg-surface/60 p-1.5"
               >
-                {guarantee}
-              </span>
-            ))}
-          </div>
+                <div className="flex flex-wrap gap-1">
+                  {SEVEN_LAYER_SEAL.map((guarantee) => (
+                    <span
+                      key={guarantee}
+                      className="inline-flex items-center rounded border border-forge/30 bg-surface px-1.5 py-0.5 font-mono text-[10px] font-medium text-ink"
+                    >
+                      {guarantee}
+                    </span>
+                  ))}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
 
+        {/* Currently synthesizing indicator */}
         <AnimatePresence initial={false}>
           {synthesizing && forgeSpec && (
             <motion.div
@@ -265,45 +342,54 @@ export function ForgeVault({
               initial={{ opacity: 0, height: 0 }}
               animate={{ opacity: 1, height: "auto" }}
               exit={{ opacity: 0, height: 0 }}
-              className="overflow-hidden rounded-lg border border-dashed border-forge/40 bg-forge/[0.05] p-2.5"
+              className="overflow-hidden rounded-lg border border-dashed border-forge/50 bg-forge/[0.06] p-2"
             >
-              <div className="flex items-center gap-2 font-mono text-[12px] text-forge">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                def {forgeSpec.name}(args)
-                <span className="ml-auto text-[10.5px] text-ink-3">
+              <div className="flex items-center justify-between gap-1.5 font-mono text-[11px] text-forge">
+                <div className="flex items-center gap-1.5 truncate">
+                  <Loader2 className="h-3 w-3 shrink-0 animate-spin text-forge" />
+                  <span className="truncate font-semibold">⚒️ Forging {forgeSpec.name}…</span>
+                </div>
+                <span className="shrink-0 text-[10px] text-ink-3">
                   {forgeTest ? `attempt ${forgeTest.attempt}` : `${forgeSpec.examples.length} tests`}
                 </span>
               </div>
-              <div className="mt-1 line-clamp-1 text-[12px] text-ink-3">{forgeSpec.purpose}</div>
+              <div className="mt-0.5 line-clamp-1 text-[11px] text-ink-3">{forgeSpec.purpose}</div>
             </motion.div>
           )}
         </AnimatePresence>
+
+        {/* Clean, glowing 2-line clickable tool pills */}
         {tools.map((t) => (
           <motion.button
             key={t.name}
             layout
-            initial={{ opacity: 0, scale: 0.94 }}
+            initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
             onClick={() => onInspect(t.name)}
             disabled={!forgedCode[t.name]}
             title={forgedCode[t.name] ? "Inspect synthesized source" : undefined}
-            className="group block w-full rounded-lg border border-line bg-surface p-2.5 text-left transition-colors enabled:hover:border-forge/40 disabled:cursor-default"
+            className="group block w-full rounded-lg border border-forge/35 bg-forge/[0.05] p-2 text-left transition-all hover:border-forge/60 hover:bg-forge/[0.09] hover:shadow-[0_0_12px_rgba(168,85,247,0.18)] disabled:cursor-default"
           >
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-[12.5px] font-medium text-ink">
-                <span className="text-forge">def</span> {t.name}
-                <span className="text-ink-3">(args) → dict</span>
+            <div className="flex items-center justify-between gap-1.5">
+              <span className="truncate font-mono text-[12px] font-semibold text-ink">
+                <span className="text-forge">⚒️</span> {t.name}
               </span>
-              <Chip tone="ok" className="ml-auto">
-                pass · {t.uses} use{t.uses === 1 ? "" : "s"}
+              <Chip tone="ok" className="h-4 px-1 text-[9px] font-bold">
+                PASS · {t.uses} use{t.uses === 1 ? "" : "s"}
               </Chip>
             </div>
-            <div className="mt-1 line-clamp-1 text-[12px] text-ink-3">{t.description}</div>
+            <div className="mt-0.5 flex items-center justify-between text-[11px] text-ink-3">
+              <span className="truncate">{t.description || "Synthesized Python tool"}</span>
+              <span className="ml-1.5 shrink-0 font-mono text-[10px] font-medium text-forge group-hover:underline">
+                Click to inspect code →
+              </span>
+            </div>
           </motion.button>
         ))}
+
         {tools.length === 0 && !synthesizing && (
-          <p className="text-[12px] text-ink-3">
-            On <code className="font-mono text-forge">MISSING:&lt;tool&gt;</code>, {brandName} builds &amp; verifies pure Python tools inside the 7-layer sandbox.
+          <p className="text-[11px] text-ink-3">
+            When {brandName} needs a missing calculator, it builds &amp; tests a safe Python tool live here.
           </p>
         )}
       </div>

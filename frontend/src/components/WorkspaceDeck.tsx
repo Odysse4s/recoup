@@ -78,7 +78,7 @@ export function WorkspaceDeck({ r }: { r: RecoupRuntime }) {
   );
 
   return (
-    <div className={cx("flex min-h-[540px] flex-col gap-2", view === "graph" ? "flex-[1.45_0_auto]" : "flex-[1.2_0_auto]")}>
+    <div className="flex min-h-0 flex-1 flex-col gap-2">
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
         <div className="hidden min-w-0 items-center gap-2 xl:flex">
           <span className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.14em] text-ink-3">
@@ -137,7 +137,7 @@ export function WorkspaceDeck({ r }: { r: RecoupRuntime }) {
           onDismissOffer={r.dismissOffer}
           onSwitchToStudio={() => setView("db")}
           dockAnchor={view === "graph"}
-          className={view === "split" ? "h-[360px] shrink-0" : "min-h-[540px] flex-1"}
+          className={view === "split" ? "h-[320px] shrink-0" : "min-h-0 flex-1"}
         />
       )}
       {view !== "graph" && (

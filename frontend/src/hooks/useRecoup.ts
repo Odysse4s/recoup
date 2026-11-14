@@ -80,7 +80,7 @@ const EVENT_TYPES = [
   "run_done",
 ] as const;
 
-const MAX_LIVE_WINDOWS = 2;
+const MAX_LIVE_WINDOWS = 3;
 const sleep = (ms: number) => new Promise((r) => window.setTimeout(r, ms));
 
 export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }) {
@@ -108,6 +108,9 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [narration, setNarration] = useState(IDLE_NARRATION);
   const [windows, setWindows] = useState<LiveWin[]>([]);
+  const windowsRef = useRef<LiveWin[]>([]);
+  windowsRef.current = windows;
+  const forgeFallbackTimerRef = useRef<number | null>(null);
   const [pulses, setPulses] = useState<Record<DockTarget, number>>({ vault: 0, diff: 0, db: 0 });
   const [rowMarks, setRowMarks] = useState<Record<string, RowMark>>({});
   const [ghostRows, setGhostRows] = useState<Record<string, Row[]>>({});
@@ -850,8 +853,16 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           spawnWindow({
             ...specWin,
             id: liveId,
-            pinned: true,
+            pinned: false,
           });
+          if (forgeFallbackTimerRef.current !== null) {
+            window.clearTimeout(forgeFallbackTimerRef.current);
+            forgeFallbackTimerRef.current = null;
+          }
+          forgeFallbackTimerRef.current = window.setTimeout(() => {
+            dockWindow(liveId, "vault");
+            forgeFallbackTimerRef.current = null;
+          }, 12000);
         }
         break;
       }
@@ -860,10 +871,14 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         setForgeTest(ft);
         setForgedCode((m) => ({ ...m, [ft.name]: ft }));
         setStage("forge");
+        if (forgeFallbackTimerRef.current !== null) {
+          window.clearTimeout(forgeFallbackTimerRef.current);
+          forgeFallbackTimerRef.current = null;
+        }
         if (ft.ast_passed && ft.test_results.length > 0 && ft.test_results.every((r) => r.passed)) soundFx.playForgePass();
         if (windowsEnabledRef.current) {
           const liveId = `forge-live-${ft.name}`;
-          const existingWin = windows.find((w) => w.id === liveId);
+          const existingWin = windowsRef.current.find((w) => w.id === liveId);
           const fresh = forgeWindow(ft, ev.latency_ms || undefined);
 
           if (existingWin) {
@@ -887,7 +902,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             );
             window.setTimeout(() => {
               dockWindow(liveId, "vault");
-            }, 2200);
+            }, 1600);
           } else {
             const winToSpawn = {
               ...fresh,
@@ -897,7 +912,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             spawnWindow(winToSpawn);
             window.setTimeout(() => {
               dockWindow(liveId, "vault");
-            }, 2200);
+            }, 1600);
           }
         }
         break;
@@ -1035,20 +1050,18 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         applyRef.current(next);
         return;
       }
-      if (next.type === "call_start") {
-        while (queueRef.current.length > 0) {
-          const flushed = queueRef.current.shift();
-          if (flushed) applyRef.current(flushed);
-        }
-        setQueued(0);
+      if (next.type === "call_start" || next.type === "call_turn") {
+        queueRef.current.shift();
+        setQueued(queueRef.current.length);
+        applyRef.current(next);
         return;
       }
-      const callName = next.type === "tool_call" ? callOf(next)?.name ?? "" : "";
       const spawns =
         next.type === "forge_test" ||
         next.type === "forge_spec" ||
-        (next.type === "tool_call" && !["read_file", "query_db"].includes(callName));
-      if (spawns && liveCountRef.current >= MAX_LIVE_WINDOWS) return;
+        next.type === "tool_call";
+      const unpinnedCount = windowsRef.current.filter((w) => !w.pinned).length;
+      if (spawns && unpinnedCount >= MAX_LIVE_WINDOWS) return;
       queueRef.current.shift();
       setQueued(queueRef.current.length);
       applyRef.current(next);
@@ -1085,17 +1098,30 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             // Do NOT instant-flush! Enqueue so prior tool/forge live windows pace out first!
             enqueue([parsed]);
           } else if (parsed.type === "call_start") {
-            // Speed-drain any remaining queued rehearsal events so desktop catches up immediately,
-            // and apply call_start right away
-            while (queueRef.current.length > 0) {
-              const flushed = queueRef.current.shift();
-              if (flushed) applyRef.current(flushed);
+            const p = parsed.payload as unknown as CallStartPayload;
+            const isUserConsult = p?.mode === "user_consult" || p?.channel === "voice_call" || !p?.mode;
+            if (isUserConsult) {
+              markPhoneCallActive();
+              stopSpeaking();
+              setSpeaking(false);
             }
-            setQueued(0);
-            applyRef.current(parsed);
+            const hasPendingPacerEvents = queueRef.current.some((e) =>
+              ["forge_spec", "forge_test", "tool_call", "tool_done", "approval_needed"].includes(e.type)
+            );
+            if (hasPendingPacerEvents) {
+              enqueue([parsed]);
+            } else {
+              applyRef.current(parsed);
+            }
+          } else if (parsed.type === "call_turn") {
+            // Keep opening call_turn ordered behind queued call_start; dispatch live phone turns immediately
+            if (queueRef.current.some((e) => e.type === "call_start")) {
+              enqueue([parsed]);
+            } else {
+              applyRef.current(parsed);
+            }
           } else if (
             parsed.type === "undo_step" ||
-            parsed.type === "call_turn" ||
             parsed.type === "call_end" ||
             parsed.type === "run_done" ||
             parsed.type === "offer"
@@ -1115,6 +1141,10 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
 
   // ---------------------------------------------------------------- actions
   const clearRun = () => {
+    if (forgeFallbackTimerRef.current !== null) {
+      window.clearTimeout(forgeFallbackTimerRef.current);
+      forgeFallbackTimerRef.current = null;
+    }
     deferredApprovalRef.current = null;
     restoreDemoBaseline(false);
     queueRef.current = [];

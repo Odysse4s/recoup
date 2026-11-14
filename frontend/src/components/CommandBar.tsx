@@ -140,6 +140,11 @@ export function CommandBar({
   const [focused, setFocused] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [transcript, setTranscript] = useState("");
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
+
+  useEffect(() => {
+    if (evidenceItems.length === 0) setEvidenceOpen(false);
+  }, [evidenceItems.length]);
 
   const speech = useSpeechInput((text, final) => {
     setTranscript(text);
@@ -219,7 +224,7 @@ export function CommandBar({
           onSubmit(value.trim());
         }}
         className={cx(
-          "relative flex h-11 w-full items-center gap-2 rounded-xl border bg-surface pl-3 pr-1.5 shadow-card transition-all",
+          "relative flex h-10 w-full items-center gap-2 rounded-xl border bg-surface pl-3 pr-1.5 shadow-card transition-all",
           dragOver
             ? "border-accent bg-accent/[0.06] ring-4 ring-accent/15"
             : speech.listening
@@ -251,6 +256,110 @@ export function CommandBar({
           className="h-full min-w-0 flex-1 bg-transparent text-[14px] text-ink placeholder:text-ink-3 focus:outline-none"
         />
         {!focused && !value && !dragOver && <Kbd>⌘K</Kbd>}
+
+        {evidenceItems.length > 0 && (
+          <div className="relative shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                soundFx.playUiClick();
+                setEvidenceOpen((o) => !o);
+              }}
+              title="Click to view attached evidence findings"
+              className="flex h-8 items-center gap-1.5 rounded-lg border border-ok/40 bg-ok/10 px-2 text-[12px] font-medium text-ink transition-colors hover:bg-ok/15"
+            >
+              <Paperclip className="h-3.5 w-3.5 text-ok shrink-0" />
+              <span className="max-w-[150px] truncate font-mono text-[11px] font-semibold text-ok">
+                {evidenceItems.length === 1 ? evidenceItems[0].source : `${evidenceItems.length} attachments`}
+              </span>
+              {onDismissEvidence && (
+                <span
+                  role="button"
+                  tabIndex={0}
+                  aria-label="Dismiss evidence"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    soundFx.playUiClick();
+                    evidenceItems.forEach((ev) => onDismissEvidence(ev.source));
+                    setEvidenceOpen(false);
+                  }}
+                  className="ml-0.5 rounded p-0.5 text-ink-3 hover:text-ink hover:bg-black/10 dark:hover:bg-white/10"
+                >
+                  <X className="h-3 w-3" />
+                </span>
+              )}
+            </button>
+
+            <AnimatePresence>
+              {evidenceOpen && (
+                <motion.div
+                  initial={{ opacity: 0, y: 6, scale: 0.98 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 4, scale: 0.98 }}
+                  transition={{ duration: 0.16 }}
+                  className="absolute right-0 top-full z-40 mt-2 w-[380px] max-w-[90vw] rounded-xl border border-line bg-surface p-3 shadow-card backdrop-blur-xl"
+                >
+                  <div className="mb-2 flex items-center justify-between border-b border-line pb-2">
+                    <span className="text-[12px] font-semibold text-ink">Attached Evidence ({evidenceItems.length})</span>
+                    <button
+                      type="button"
+                      onClick={() => setEvidenceOpen(false)}
+                      className="rounded p-0.5 text-ink-3 hover:text-ink"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                  <div className="max-h-[220px] space-y-2 overflow-y-auto scroll-thin">
+                    {evidenceItems.map((ev) => (
+                      <div key={ev.source} className="rounded-lg border border-line/60 bg-sunken/50 p-2.5 text-[11.5px]">
+                        <div className="mb-1 flex items-center justify-between gap-1">
+                          <span className="truncate font-mono font-semibold text-ink">{ev.source}</span>
+                          <Chip tone={ev.kind === "photo" ? "signal" : "ok"}>
+                            {ev.kind === "photo" ? <Camera className="h-2.5 w-2.5" /> : <FileCheck2 className="h-2.5 w-2.5" />}
+                            {ev.kind}
+                          </Chip>
+                        </div>
+                        <div className="space-y-0.5 text-ink-2">
+                          {ev.findings.map((f, i) => (
+                            <div key={i} className="line-clamp-2">• {f}</div>
+                          ))}
+                        </div>
+                        <div className="mt-2 flex items-center justify-end gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              soundFx.playUiClick();
+                              onChange(
+                                "Check delivery D-1042 from Kappa Office Systems — 22 hubs arrived missing or broken and invoice INV-7781 is overcharged"
+                              );
+                              setEvidenceOpen(false);
+                              inputRef.current?.focus();
+                            }}
+                            className="rounded border border-accent/35 bg-accent/10 px-2 py-0.5 text-[10.5px] font-semibold text-accent hover:bg-accent/15"
+                          >
+                            Use in Goal
+                          </button>
+                          {onDismissEvidence && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                onDismissEvidence(ev.source);
+                                if (evidenceItems.length <= 1) setEvidenceOpen(false);
+                              }}
+                              className="rounded border border-line px-1.5 py-0.5 text-[10.5px] text-ink-3 hover:text-danger"
+                            >
+                              Dismiss
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        )}
 
         {onUploadEvidence && (
           <>
@@ -350,56 +459,6 @@ export function CommandBar({
             text={caption.text}
             progress={caption.mode === "speaking" ? captionProgress : 1}
           />
-        )}
-      </AnimatePresence>
-
-      <AnimatePresence initial={false}>
-        {evidenceItems.length > 0 && (
-          <motion.div
-            initial={{ opacity: 0, height: 0, marginTop: 0 }}
-            animate={{ opacity: 1, height: "auto", marginTop: 8 }}
-            exit={{ opacity: 0, height: 0, marginTop: 0 }}
-            className="space-y-1.5 overflow-hidden"
-          >
-            {evidenceItems.slice(0, 2).map((ev) => (
-              <div
-                key={ev.source}
-                className="flex items-center gap-2.5 rounded-xl border border-ok/35 bg-surface px-3 py-1.5 text-[12px] shadow-card"
-              >
-                <Chip tone={ev.kind === "photo" ? "signal" : "ok"}>
-                  {ev.kind === "photo" ? <Camera className="h-2.5 w-2.5" /> : <FileCheck2 className="h-2.5 w-2.5" />}
-                  {ev.kind}
-                </Chip>
-                <code className="shrink-0 font-mono text-[11px] font-semibold text-ink">{ev.source}</code>
-                <span className="min-w-0 flex-1 truncate text-ink-2">
-                  {ev.findings.join(" · ")}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    soundFx.playUiClick();
-                    onChange(
-                      "Check delivery D-1042 from Kappa Office Systems — 22 hubs arrived missing or broken and invoice INV-7781 is overcharged"
-                    );
-                    inputRef.current?.focus();
-                  }}
-                  className="shrink-0 rounded-md border border-accent/35 bg-accent/10 px-2 py-0.5 text-[11px] font-semibold text-accent hover:bg-accent/15"
-                >
-                  Use in Goal
-                </button>
-                {onDismissEvidence && (
-                  <button
-                    type="button"
-                    onClick={() => onDismissEvidence(ev.source)}
-                    aria-label={`Dismiss ${ev.source}`}
-                    className="rounded p-0.5 text-ink-3 hover:text-ink"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                )}
-              </div>
-            ))}
-          </motion.div>
         )}
       </AnimatePresence>
     </div>

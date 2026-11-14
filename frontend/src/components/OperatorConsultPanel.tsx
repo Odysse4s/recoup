@@ -1,18 +1,15 @@
 import { AnimatePresence, motion } from "framer-motion";
 import {
   CheckCircle2,
-  FileCheck2,
   Hand,
   MonitorCheck,
   PackageCheck,
   PhoneForwarded,
   PhoneIncoming,
   Radio,
-  ShieldCheck,
   Smartphone,
   Volume2,
   XCircle,
-  Zap,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ApprovalNeededPayload } from "../contracts";
@@ -199,426 +196,259 @@ export function OperatorConsultPanel({
   const resolvedChoice = inferChoice(consult, committedClaimId);
 
   const panelTitle = isConnected
-    ? `Live Grok Voice Call Connected · ${callDurationStr}`
+    ? `On Call with You · ${callDurationStr}`
     : isRinging
-    ? "Ringing Operator's iPhone · Live Call Active"
-    : pendingApproval
-    ? "Shipment D-1042 Decision Gate — Live ERP & Supplier Email Held"
-    : "Shipment D-1042 Resolution Committed";
+    ? "Calling Your iPhone…"
+    : callCompleted
+    ? "Resolution Committed"
+    : "Decision Gate";
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: -8 }}
+      initial={{ opacity: 0, y: -6 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.28 }}
+      transition={{ duration: 0.22 }}
       className="shrink-0"
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
       <Panel
         title={panelTitle}
-        icon={isConnected ? <Smartphone className="text-ok" /> : isRinging ? <PhoneIncoming className="text-signal" /> : <PhoneIncoming />}
+        icon={isConnected ? <Smartphone className="text-ok" /> : isRinging ? <Radio className="animate-pulse text-signal" /> : <PhoneIncoming className="text-signal" />}
         meta={
           isConnected ? (
-            <Chip tone="ok" className="font-mono text-[10.5px]">
-              <Dot tone="ok" live /> LIVE CALL · {callDurationStr}
+            <Chip tone="ok" className="font-mono text-[10px]">
+              <Dot tone="ok" live /> LIVE CALL
             </Chip>
           ) : isRinging ? (
-            <Chip tone="signal" className="font-mono text-[10.5px]">
-              <Dot tone="signal" live /> RINGING iPHONE
+            <Chip tone="signal" className="font-mono text-[10px]">
+              <Dot tone="signal" live /> RINGING
             </Chip>
           ) : callCompleted ? (
-            <Chip tone="ok">
-              {resolvedChoice === "redelivery" ? "AADE 9.3 staged" : "AADE 5.1 staged"} · {claimId}
+            <Chip tone="ok" className="font-mono text-[10px]">
+              RESOLVED
             </Chip>
           ) : (
-            <Chip tone="danger">
-              <Dot tone="danger" live /> decision gate · {claimId}
+            <Chip tone="danger" className="font-mono text-[10px]">
+              <Dot tone="danger" live /> DECISION GATE
             </Chip>
           )
         }
         actions={
-          <div className="flex items-center gap-1.5">
-            <Chip tone={voiceOn ? "accent" : "neutral"} className="hidden sm:inline-flex">
-              <Volume2 className="h-2.5 w-2.5" />
-              Grok Voice · fal.ai
+          voiceOn ? (
+            <Chip tone="accent" className="font-mono text-[9.5px]">
+              Voice Ready
             </Chip>
-            {(pendingApproval || !callLive) && !callCompleted && (
-              <button
-                type="button"
-                onClick={() => {
-                  soundFx.playUiClick();
-                  if (pendingApproval?.req_id) {
-                    escalatedReqIdRef.current = pendingApproval.req_id;
-                  }
-                  onEscalateToPhone(activeReqId, claimId);
-                }}
-                className={cx(btn("signal", "sm"), "h-7 px-2.5 font-semibold shadow-sm")}
-              >
-                <PhoneForwarded className="h-3.5 w-3.5" />
-                Call My iPhone Now
-              </button>
-            )}
-          </div>
+          ) : null
         }
         pulseTone={callCompleted ? "ok" : isConnected ? "ok" : isRinging ? "signal" : "danger"}
       >
-        <div className="space-y-2.5 p-3">
-          {/* Call Status Banners (Ringing, Connected, Live Action, Countdown) */}
-          <AnimatePresence initial={false}>
-            {isRinging && (
-              <motion.div
-                key="banner-ringing"
-                initial={{ opacity: 0, y: -4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, height: 0 }}
-                className="flex items-center justify-between rounded-lg border border-signal/40 bg-signal/10 px-3 py-1.5 text-[11.5px]"
-              >
-                <div className="flex items-center gap-2">
-                  <Radio className="h-3.5 w-3.5 animate-pulse text-signal" />
-                  <span className="font-mono font-bold text-ink">RINGING OPERATOR&apos;S iPHONE…</span>
-                  <span className="text-ink-2">Tap Accept on iPhone for hands-free Grok Voice</span>
-                </div>
-                <Chip tone="signal" className="font-mono text-[9.5px]">/mobile</Chip>
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          <AnimatePresence initial={false}>
-            {isConnected && (
-              <motion.div
-                key="banner-connected"
-                initial={{ opacity: 0, y: -4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, height: 0 }}
-                className="flex items-center justify-between rounded-lg border border-ok/40 bg-ok/10 px-3 py-1.5 text-[11.5px]"
-              >
-                <div className="flex items-center gap-2">
-                  <Dot tone="ok" live />
-                  <span className="font-mono font-bold text-ok">LIVE GROK VOICE CONNECTED · {callDurationStr}</span>
-                  <span className="hidden text-ink-2 md:inline">Two-way audio streaming · Desktop synced</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <VoiceOrb variant="bars" tone="ok" className="h-3.5 w-12" />
-                  <Chip tone="ok" className="font-mono text-[9.5px]">Auto-VAD</Chip>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          <AnimatePresence initial={false}>
-            {extConsult?.lastUiAction && (
-              <motion.div
-                key={`${extConsult.lastUiAction.action}-${extConsult.lastUiAction.ts}`}
-                initial={{ opacity: 0, y: -4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, height: 0 }}
-                className="flex items-center gap-2 rounded-lg border border-signal/40 bg-signal/[0.08] px-3 py-1.5 text-[11.5px]"
-              >
-                <Zap className="h-3.5 w-3.5 text-signal" />
-                <span className="min-w-0 flex-1 truncate font-medium text-ink">
-                  Live Voice Action: <strong className="text-signal">{extConsult.lastUiAction.label}</strong>
-                </span>
-                <Chip tone="signal" className="font-mono text-[9.5px]">Desktop Synced</Chip>
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          <AnimatePresence initial={false}>
-            {countdownActive && (
-              <motion.div
-                key="presence-countdown"
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                exit={{ opacity: 0, height: 0 }}
-                className="overflow-hidden rounded-lg border border-warn/40 bg-warn/[0.06] p-2"
-              >
-                <div className="flex items-center justify-between gap-2 text-[11.5px]">
-                  <span className="font-medium text-ink">
-                    {countdownPaused ? `Desktop active (${secondsLeft}s paused)` : `Calling iPhone in ${secondsLeft}s…`}
-                  </span>
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        soundFx.playUiClick();
-                        setStayAtDesk((v) => !v);
-                      }}
-                      className={cx(btn(stayAtDesk ? "ok" : "outline", "sm"), "h-6 px-2 text-[10.5px]")}
-                    >
-                      {stayAtDesk ? <MonitorCheck className="h-3 w-3" /> : <Hand className="h-3 w-3" />}
-                      At Desk
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        soundFx.playUiClick();
-                        if (pendingApproval?.req_id) escalatedReqIdRef.current = pendingApproval.req_id;
-                        onEscalateToPhone(activeReqId, claimId);
-                      }}
-                      className={cx(btn("signal", "sm"), "h-6 px-2 text-[10.5px] font-semibold")}
-                    >
-                      <Smartphone className="h-3 w-3" />
-                      Call Now
-                    </button>
-                  </div>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          {/* PRIMARY DECISION BUTTONS (RIGHT AT THE TOP OF THE PANEL) */}
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-            {/* Button 1: ✅ Enforce €587.30 Refund */}
-            <button
-              type="button"
-              disabled={callLive && Boolean(consult?.selectedChoice)}
-              onClick={() => {
-                soundFx.playUiClick();
-                onSelectResolution("refund", activeReqId, claimId);
-              }}
-              className={cx(
-                "group flex flex-col items-center justify-center gap-0.5 rounded-xl border p-2 text-center transition-all",
-                resolvedChoice === "refund"
-                  ? "border-ok bg-ok/15 text-ok ring-2 ring-ok/40"
-                  : "border-ok/45 bg-ok/[0.08] text-ink hover:border-ok hover:bg-ok/15"
-              )}
-            >
-              <div className="flex items-center gap-1.5 text-[12px] font-bold text-ok">
+        <div className="space-y-2 p-2.5">
+          {/* 1. 1-Line Live Call Banner */}
+          {isConnected ? (
+            <div className="flex h-7 items-center justify-between rounded-lg border border-ok/40 bg-ok/10 px-2.5 text-[11.5px]">
+              <div className="flex items-center gap-1.5 font-medium text-ok">
+                <Dot tone="ok" live />
+                <span>On Call with You · {callDurationStr}</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <VoiceOrb variant="bars" tone="ok" className="h-3 w-10" />
+                <span className="font-mono text-[10px] text-ink-3">Auto-VAD</span>
+              </div>
+            </div>
+          ) : isRinging ? (
+            <div className="flex h-7 items-center justify-between rounded-lg border border-signal/40 bg-signal/10 px-2.5 text-[11.5px]">
+              <div className="flex items-center gap-1.5 font-medium text-signal">
+                <Radio className="h-3.5 w-3.5 animate-pulse" />
+                <span>Calling Your iPhone…</span>
+              </div>
+              <span className="font-mono text-[10px] text-ink-3">/mobile</span>
+            </div>
+          ) : callCompleted ? (
+            <div className="flex h-7 items-center justify-between rounded-lg border border-ok/40 bg-ok/10 px-2.5 text-[11.5px]">
+              <div className="flex min-w-0 items-center gap-1.5 font-medium text-ok">
                 <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                <span>Enforce €587.30</span>
+                <span className="truncate">Resolution Committed · Claim {claimId}</span>
               </div>
-              <span className="font-mono text-[9.5px] text-ink-2">AADE 5.1 (Rec)</span>
-            </button>
-
-            {/* Button 2: 📦 Accept 22 Replacements */}
-            <button
-              type="button"
-              disabled={callLive && Boolean(consult?.selectedChoice)}
-              onClick={() => {
-                soundFx.playUiClick();
-                onSelectResolution("redelivery", activeReqId, claimId);
-              }}
-              className={cx(
-                "group flex flex-col items-center justify-center gap-0.5 rounded-xl border p-2 text-center transition-all",
-                resolvedChoice === "redelivery"
-                  ? "border-signal bg-signal/15 text-signal ring-2 ring-signal/40"
-                  : "border-line bg-sunken/60 text-ink hover:border-signal/50 hover:bg-surface"
-              )}
-            >
-              <div className="flex items-center gap-1.5 text-[12px] font-bold text-ink">
-                <PackageCheck className="h-3.5 w-3.5 shrink-0 text-signal" />
-                <span>Accept 22 Units</span>
-              </div>
-              <span className="font-mono text-[9.5px] text-ink-2">AADE 9.3</span>
-            </button>
-
-            {/* Button 3: 📞 Call iPhone */}
-            <button
-              type="button"
-              onClick={() => {
-                soundFx.playUiClick();
-                if (pendingApproval?.req_id) escalatedReqIdRef.current = pendingApproval.req_id;
-                onEscalateToPhone(activeReqId, claimId);
-              }}
-              className={cx(
-                "group flex flex-col items-center justify-center gap-0.5 rounded-xl border border-signal/40 bg-signal/[0.08] p-2 text-center transition-all hover:border-signal hover:bg-signal/15",
-                isConnected && "border-ok/50 bg-ok/10"
-              )}
-            >
-              <div className="flex items-center gap-1.5 text-[12px] font-bold text-signal">
-                <PhoneForwarded className="h-3.5 w-3.5 shrink-0" />
-                <span>{isConnected ? "Call Active" : isRinging ? "Ringing…" : "Call iPhone"}</span>
-              </div>
-              <span className="font-mono text-[9.5px] text-ink-2">Grok Voice /mobile</span>
-            </button>
-
-            {/* Button 4: ✕ Reject */}
-            {pendingApproval && onReject ? (
-              <button
-                type="button"
-                onClick={() => {
-                  soundFx.playUiClick();
-                  onReject(pendingApproval.req_id);
-                }}
-                className="group flex flex-col items-center justify-center gap-0.5 rounded-xl border border-danger/35 bg-danger/[0.06] p-2 text-center transition-all hover:border-danger hover:bg-danger/15"
-              >
-                <div className="flex items-center gap-1.5 text-[12px] font-bold text-danger">
-                  <XCircle className="h-3.5 w-3.5 shrink-0" />
-                  <span>Reject</span>
-                </div>
-                <span className="font-mono text-[9.5px] text-ink-2">Roll Back Staged</span>
-              </button>
-            ) : (
-              <div className="flex flex-col items-center justify-center gap-0.5 rounded-xl border border-line bg-sunken/40 p-2 text-center">
-                <span className="text-[12px] font-medium text-ink-3">Risk Gate</span>
-                <span className="font-mono text-[9.5px] text-ok">Authorized</span>
-              </div>
-            )}
-          </div>
-
-          {/* Compressed Executive Brief: 2 Ultra-Clean Single-Line Summary Chips */}
-          <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-            <div className="flex items-center gap-2 rounded-lg border border-danger/25 bg-danger/[0.04] px-2.5 py-1 text-[11.5px] font-medium text-ink">
-              <span className="shrink-0 rounded bg-danger/15 px-1 py-0.5 font-mono text-[9px] font-bold uppercase text-danger">1. Problem</span>
-              <span className="truncate">22 bad hubs · INV-7781 frozen · AADE XML ready</span>
+              <span className="shrink-0 font-mono text-[10px] text-ok">
+                {resolvedChoice === "redelivery" ? "AADE 9.3" : "AADE 5.1"}
+              </span>
             </div>
-            <div className="flex items-center gap-2 rounded-lg border border-ok/25 bg-ok/[0.04] px-2.5 py-1 text-[11.5px] font-medium text-ink">
-              <span className="shrink-0 rounded bg-ok/15 px-1 py-0.5 font-mono text-[9px] font-bold uppercase text-ok">2. Staged</span>
-              <span className="truncate">€587.30 full credit vs 22 replacements + €202.40 credit</span>
-            </div>
-          </div>
-
-          {/* Live Two-Way Real-Time Subtitles & Transcript (Recoup AI <-> You on iPhone) */}
-          {consult && (consult.active || consult.ringing || consult.turns.length > 0 || consult.end) && (
-            <div className="space-y-2.5 rounded-xl border border-line bg-sunken/50 p-3">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-2">
-                <div className="flex min-w-0 items-center gap-2">
-                  <span
-                    className={cx(
-                      "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-semibold",
-                      consult.activeSpeaker === "agent" || speaking
-                        ? "border-ok/50 bg-ok/15 text-ok"
-                        : "border-ok/25 bg-ok/8 text-ink"
-                    )}
-                  >
-                    <ShieldCheck className="h-3 w-3 text-ok" />
-                    {brandName} AI
-                  </span>
-                  <Chip tone="accent" className="h-4 px-1.5 text-[9.5px]">
-                    Grok Voice · fal.ai
-                  </Chip>
-                  <span className="font-mono text-[10px] text-ink-3">↔</span>
-                  <span
-                    className={cx(
-                      "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-semibold",
-                      consult.activeSpeaker === "user"
-                        ? "border-signal/50 bg-signal/15 text-signal"
-                        : "border-line bg-surface text-ink-2"
-                    )}
-                  >
-                    <Smartphone className="h-3 w-3 text-signal" />
-                    You (on iPhone)
-                  </span>
-                  <Chip tone="signal" className="h-4 px-1.5 text-[9.5px]">
-                    Wizper STT · Auto-VAD
-                  </Chip>
-                </div>
-
-                {speaking || consult.activeSpeaker ? (
-                  <VoiceOrb
-                    variant="bars"
-                    tone={consult.activeSpeaker === "user" ? "signal" : "ok"}
-                    className="h-4 w-16 shrink-0"
-                  />
-                ) : (
-                  <span className="font-mono text-[13px] font-semibold text-ink tabular">
-                    {claimId} · €{(consult.claimAmount || 587.3).toFixed(2)}
-                  </span>
-                )}
+          ) : (
+            <div className="flex h-7 items-center justify-between rounded-lg border border-warn/35 bg-warn/[0.08] px-2.5 text-[11.5px]">
+              <div className="flex min-w-0 items-center gap-1.5 font-medium text-ink">
+                <Smartphone className="h-3.5 w-3.5 shrink-0 text-signal" />
+                <span className="truncate">
+                  {countdownActive && !countdownPaused
+                    ? `Calling Your iPhone in ${secondsLeft}s…`
+                    : "Ready to Call Your iPhone"}
+                </span>
               </div>
-
-              <div
-                ref={transcriptRef}
-                className="scroll-thin max-h-[165px] space-y-2 overflow-y-auto pr-0.5"
-                aria-live="polite"
-              >
-                {consult.turns.length === 0 && (consult.ringing || consult.active) && (
-                  <div className="flex items-center justify-center gap-2 py-3 font-mono text-[12px] font-semibold text-ink">
-                    <Dot tone="signal" live />
-                    Ringing operator iPhone (/mobile) · live Grok Voice call ready…
-                  </div>
-                )}
-
-                <AnimatePresence initial={false}>
-                  {consult.turns.map((turn, idx) => {
-                    const isUser = turn.speaker === "user";
-                    const isActiveAgentTurn =
-                      !isUser &&
-                      (consult.activeSpeaker === "agent" || speaking) &&
-                      idx === consult.turns.length - 1;
-                    return (
-                      <motion.div
-                        key={`${consult.callId}-turn-${idx}`}
-                        initial={{ opacity: 0, y: 6 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.22 }}
-                        className={cx("flex flex-col", isUser ? "items-end" : "items-start")}
-                      >
-                        <div
-                          className={cx(
-                            "w-[92%] rounded-xl border px-3 py-2 text-[13px] leading-relaxed transition-colors",
-                            isUser
-                              ? "border-signal/35 bg-signal/[0.08] text-ink"
-                              : "border-ok/30 bg-ok/[0.06] text-ink",
-                            isActiveAgentTurn && "ring-2 ring-ok/30"
-                          )}
-                        >
-                          <div className="mb-1 flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-1.5 text-[10.5px] font-semibold">
-                              <span className={isUser ? "text-signal" : "text-ok"}>
-                                {isUser ? "You (on iPhone)" : `${brandName} AI`}
-                              </span>
-                              <Chip
-                                tone={isUser ? "signal" : "accent"}
-                                className="h-4 px-1.5 text-[9px]"
-                              >
-                                {isUser ? "Wizper STT" : "Grok Voice · fal.ai"}
-                              </Chip>
-                              {isActiveAgentTurn && (
-                                <VoiceOrb variant="bars" tone="ok" className="h-3.5 w-10" />
-                              )}
-                            </div>
-                            {!isUser && onReplayTurn && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  soundFx.playUiClick();
-                                  onReplayTurn(turn.text);
-                                }}
-                                title="Replay Grok Voice turn"
-                                aria-label="Replay Grok Voice turn"
-                                className="rounded p-0.5 text-ink-3 hover:bg-sunken hover:text-ink"
-                              >
-                                <Volume2 className="h-3 w-3" />
-                              </button>
-                            )}
-                          </div>
-                          <p className="text-ink-2">{turn.text}</p>
-                        </div>
-                      </motion.div>
-                    );
-                  })}
-                </AnimatePresence>
+              <div className="flex shrink-0 items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    soundFx.playUiClick();
+                    setStayAtDesk((v) => !v);
+                  }}
+                  className={cx(btn(stayAtDesk ? "ok" : "outline", "sm"), "h-5 px-1.5 text-[10px]")}
+                >
+                  {stayAtDesk ? <MonitorCheck className="h-2.5 w-2.5" /> : <Hand className="h-2.5 w-2.5" />}
+                  {stayAtDesk ? "At Desk" : "Stay"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    soundFx.playUiClick();
+                    if (pendingApproval?.req_id) escalatedReqIdRef.current = pendingApproval.req_id;
+                    onEscalateToPhone(activeReqId, claimId);
+                  }}
+                  className={cx(btn("signal", "sm"), "h-5 px-2 text-[10px] font-semibold")}
+                >
+                  <PhoneForwarded className="h-2.5 w-2.5" />
+                  Call Now
+                </button>
               </div>
             </div>
           )}
 
-          {/* Resolution Summary Banner */}
-          {(consult?.end || (!pendingApproval && committedClaimId)) && (
-            <motion.div
-              initial={{ opacity: 0, scale: 0.98 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className="flex items-start gap-2.5 rounded-xl border border-ok/40 bg-ok/10 px-3.5 py-2.5 text-[12px] text-ink"
-            >
-              <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-ok" />
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center justify-between gap-2 font-semibold">
-                  <span>
-                    {resolvedChoice === "redelivery"
-                      ? "Free Replacement Delivery (22 Units Tomorrow) + AADE 9.3 Staged"
-                      : "Enforce €587.30 Refund + AADE myDATA 5.1 Credit Note Staged"}
-                  </span>
-                  <span className="font-mono text-[10px] text-ok">
-                    {claimId} · reversible receipt ready
-                  </span>
-                </div>
-                <p className="mt-0.5 text-[11.5px] text-ink-2">
-                  {consult?.end?.summary ??
-                    `Full AP hold placed on INV-7781 and Greek AADE myDATA Type 5.1 credit note (€587.30 net / €728.25 gross) staged for ${claimId}.`}
-                </p>
+          {/* 2. Plain-English 2-Line Summary */}
+          <div className="rounded-lg border border-line bg-sunken/40 px-3 py-1.5 text-[11.5px] leading-snug text-ink">
+            <span className="font-semibold text-danger">22 hubs arrived missing/broken</span> &amp; Invoice #7781 is overbilled.{" "}
+            <span className="font-semibold text-ok">Kappa owes €587.30.</span>
+          </div>
+
+          {/* 3. 2 Big Clear Choice Buttons Side-by-Side (whenever unresolved) */}
+          {(!callCompleted || pendingApproval) && (
+            <div className="space-y-1">
+              <div className="grid grid-cols-2 gap-2">
+                {/* Button 1: ✅ Refund €587.30 */}
+                <button
+                  type="button"
+                  disabled={callLive && Boolean(consult?.selectedChoice)}
+                  onClick={() => {
+                    soundFx.playUiClick();
+                    onSelectResolution("refund", activeReqId, claimId);
+                  }}
+                  className={cx(
+                    "group flex flex-col items-center justify-center rounded-xl border p-2 text-center transition-all",
+                    resolvedChoice === "refund"
+                      ? "border-ok bg-ok/15 text-ok ring-2 ring-ok/40"
+                      : "border-ok/45 bg-ok/[0.08] text-ink hover:border-ok hover:bg-ok/15"
+                  )}
+                >
+                  <div className="flex items-center gap-1.5 text-[12.5px] font-bold text-ok">
+                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                    <span>Refund €587.30</span>
+                  </div>
+                  <span className="font-mono text-[9.5px] text-ink-2">Freeze invoice + AADE tax credit</span>
+                </button>
+
+                {/* Button 2: 📦 Replace 22 Units */}
+                <button
+                  type="button"
+                  disabled={callLive && Boolean(consult?.selectedChoice)}
+                  onClick={() => {
+                    soundFx.playUiClick();
+                    onSelectResolution("redelivery", activeReqId, claimId);
+                  }}
+                  className={cx(
+                    "group flex flex-col items-center justify-center rounded-xl border p-2 text-center transition-all",
+                    resolvedChoice === "redelivery"
+                      ? "border-signal bg-signal/15 text-signal ring-2 ring-signal/40"
+                      : "border-line bg-sunken/60 text-ink hover:border-signal/50 hover:bg-surface"
+                  )}
+                >
+                  <div className="flex items-center gap-1.5 text-[12.5px] font-bold text-ink">
+                    <PackageCheck className="h-3.5 w-3.5 shrink-0 text-signal" />
+                    <span>Replace 22 Units</span>
+                  </div>
+                  <span className="font-mono text-[9.5px] text-ink-2">Free delivery tomorrow + €202.30</span>
+                </button>
               </div>
-            </motion.div>
+
+              {pendingApproval && onReject && (
+                <div className="flex justify-end pt-0.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundFx.playUiClick();
+                      onReject(pendingApproval.req_id);
+                    }}
+                    className="inline-flex items-center gap-1 font-mono text-[10.5px] text-danger/80 hover:text-danger hover:underline"
+                  >
+                    <XCircle className="h-3 w-3" />
+                    Reject &amp; Roll Back
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 4. Compact Live Phone Chat (max-h-[120px] overflow-y-auto scroll-thin) */}
+          {consult && (consult.active || consult.ringing || consult.turns.length > 0 || consult.end) && (
+            <div
+              ref={transcriptRef}
+              className="scroll-thin max-h-[120px] space-y-1.5 overflow-y-auto rounded-lg border border-line bg-sunken/40 p-2"
+              aria-live="polite"
+            >
+              {consult.turns.length === 0 && (consult.ringing || consult.active) && (
+                <div className="flex items-center justify-center gap-1.5 py-2 font-mono text-[11px] text-ink-2">
+                  <Dot tone="signal" live />
+                  <span>Ringing your iPhone… Hands-free Grok Voice ready</span>
+                </div>
+              )}
+
+              <AnimatePresence initial={false}>
+                {consult.turns.map((turn, idx) => {
+                  const isUser = turn.speaker === "user";
+                  const isActiveAgentTurn =
+                    !isUser &&
+                    (consult.activeSpeaker === "agent" || speaking) &&
+                    idx === consult.turns.length - 1;
+                  return (
+                    <motion.div
+                      key={`${consult.callId}-turn-${idx}`}
+                      initial={{ opacity: 0, y: 4 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.18 }}
+                      className={cx("flex flex-col", isUser ? "items-end" : "items-start")}
+                    >
+                      <div
+                        className={cx(
+                          "max-w-[88%] rounded-xl px-2.5 py-1 text-[11.5px] leading-relaxed transition-colors",
+                          isUser
+                            ? "rounded-tr-xs border border-signal/30 bg-signal/[0.12] text-ink"
+                            : "rounded-tl-xs border border-ok/25 bg-ok/[0.08] text-ink",
+                          isActiveAgentTurn && "ring-1 ring-ok/40"
+                        )}
+                      >
+                        <div className="mb-0.5 flex items-center justify-between gap-1.5 text-[9.5px] font-semibold">
+                          <span className={isUser ? "text-signal" : "text-ok"}>
+                            {isUser ? "You" : brandName}
+                          </span>
+                          {!isUser && onReplayTurn && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                soundFx.playUiClick();
+                                onReplayTurn(turn.text);
+                              }}
+                              title="Replay Voice turn"
+                              aria-label="Replay Voice turn"
+                              className="rounded p-0.5 text-ink-3 hover:bg-sunken hover:text-ink"
+                            >
+                              <Volume2 className="h-2.5 w-2.5" />
+                            </button>
+                          )}
+                        </div>
+                        <p className="text-ink-2">{turn.text}</p>
+                      </div>
+                    </motion.div>
+                  );
+                })}
+              </AnimatePresence>
+            </div>
           )}
         </div>
       </Panel>

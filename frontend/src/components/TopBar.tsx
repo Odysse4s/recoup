@@ -55,23 +55,18 @@ export function TopBar({
   };
 
   return (
-    <header className="relative z-30 flex h-14 shrink-0 items-center gap-2.5 overflow-x-hidden border-b border-line bg-surface/80 px-3.5 backdrop-blur-xl xl:gap-3.5 xl:px-5">
-      <div className="flex shrink-0 items-center gap-2.5" title={r.wsState?.domain?.vertical}>
-        <RecoupMark className="h-6 w-6 shrink-0 xl:h-7 xl:w-7" />
-        <div className="leading-none">
-          <div className="flex items-center gap-1.5">
-            <span className="text-[14px] font-semibold tracking-[-0.02em] text-ink xl:text-[15px]">{r.brand.brand_name}</span>
-            <Chip tone="accent" className="hidden h-4 px-1.5 text-[9px] sm:inline-flex">
-              <ShieldCheck className="h-2.5 w-2.5" /> {domainLabel}
-            </Chip>
-          </div>
-          <div className="mt-0.5 hidden max-w-[260px] truncate text-[10.5px] text-ink-3 lg:block 2xl:max-w-[360px]">
-            {r.brand.brand_tagline}
-          </div>
+    <header className="relative z-30 flex h-11 shrink-0 items-center gap-2.5 overflow-x-hidden border-b border-line bg-surface/80 px-3.5 backdrop-blur-xl xl:gap-3.5 xl:px-4">
+      <div className="flex shrink-0 items-center gap-2" title={r.wsState?.domain?.vertical}>
+        <RecoupMark className="h-6 w-6 shrink-0" />
+        <div className="flex items-center gap-1.5 leading-none">
+          <span className="text-[14px] font-semibold tracking-[-0.02em] text-ink xl:text-[15px]">{r.brand.brand_name}</span>
+          <Chip tone="accent" className="hidden h-4 px-1.5 text-[9px] sm:inline-flex">
+            <ShieldCheck className="h-2.5 w-2.5" /> {domainLabel}
+          </Chip>
         </div>
       </div>
 
-      <div className="hidden h-5 w-px shrink-0 bg-line xl:block" />
+      <div className="hidden h-4 w-px shrink-0 bg-line xl:block" />
 
       <AnimatePresence mode="wait">
         <motion.div
@@ -80,11 +75,11 @@ export function TopBar({
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: 4 }}
           transition={{ duration: 0.18 }}
-          className="hidden shrink-0 items-center gap-2 whitespace-nowrap rounded-full border border-line bg-sunken px-2.5 py-1 text-[11.5px] font-medium text-ink-2 xl:flex"
+          className="hidden shrink-0 items-center gap-2 whitespace-nowrap rounded-full border border-line bg-sunken px-2.5 py-0.5 text-[11.5px] font-medium text-ink-2 xl:flex"
         >
           <Dot tone={status.tone} live={status.live} />
           {status.label}
-          <span className="font-mono text-[10.5px] text-ink-3">{r.wsState?.fingerprint ?? "——"}</span>
+          <span className="text-[10.5px] text-ink-3">· Safe Clone</span>
         </motion.div>
       </AnimatePresence>
 
