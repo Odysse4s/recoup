@@ -1,18 +1,34 @@
-"""Phase 3 evaluations: fal Grok Voice Realtime protocol, barge-in, outcome intelligence, and security."""
+"""Phase 3 evaluations: sandbox adversarial security, Grok Voice Realtime protocol, and governance."""
 from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import inspect
 import json
+import os
+import signal
+import subprocess
+import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import app.engine.sandbox as sandbox_mod
 import app.voice as voice_pkg
 from app.contracts import ChangeReport, ToolCall
+from app.domain_config import get_domain
 from app.engine.env import Env, fingerprint_env
 from app.engine.risk import RiskDecision, assess_risk
+from app.engine.sandbox import (
+    ForgedTool,
+    _sandbox_env,
+    run_in_sandbox,
+    validate_ast,
+    verify_and_register_forged_tool,
+)
 from app.engine.seed import populate_default_seed
 from app.engine.tools import REGISTRY
 from app.voice import (
@@ -1128,3 +1144,742 @@ class TestGovernanceAndSecretHygieneInvariants:
         assert callable(synthesize_call_turn)
         assert callable(transcribe_audio_bytes)
         assert callable(transcribe_and_decide)
+
+
+# ---------------------------------------------------------------------------
+# 7. Step 2 Sandbox Adversarial Security & Stdlib Compatibility Suite
+# ---------------------------------------------------------------------------
+
+_BACKEND_DIR = Path(__file__).resolve().parents[2]
+
+_DUMMY_PROVIDER_SECRETS: dict[str, str] = {
+    "FAL_KEY": "dummy-fal-key-0000",
+    "GEMINI_API_KEY": "dummy-gemini-key-0000",
+    "ANTHROPIC_API_KEY": "dummy-anthropic-key-0000",
+    "OPENAI_API_KEY": "dummy-openai-key-0000",
+}
+_DUMMY_HOST_HOME = "/tmp/dummy_host_home_should_not_leak"
+
+_GUARDED_CHILD_SCRIPT = """
+import json
+import resource
+import sys
+
+payload = json.loads(sys.stdin.read())
+rlimit_as = int(payload["outer_rlimit_as_bytes"])
+resource.setrlimit(resource.RLIMIT_AS, (rlimit_as, rlimit_as))
+
+from app.engine.sandbox import run_in_sandbox
+
+res = run_in_sandbox(
+    payload["code"],
+    payload["func_name"],
+    payload["args"],
+    timeout=float(payload["sandbox_timeout"]),
+)
+out = {"ok": bool(res.get("ok"))}
+if "error" in res:
+    err = str(res["error"])
+    out["error"] = err[:1_048_576]
+    out["error_len"] = len(err)
+if "output" in res:
+    out["has_output"] = True
+sys.stdout.write(json.dumps(out))
+"""
+
+
+def _run_sandbox_in_guarded_child(
+    code: str,
+    func_name: str,
+    args: dict[str, Any],
+    *,
+    sandbox_timeout: float = 2.0,
+    outer_rlimit_as_bytes: int = 1536 * 1024 * 1024,
+    outer_timeout: float = 5.0,
+) -> dict[str, Any]:
+    """Run `run_in_sandbox` inside a tightly controlled child process with an outer RLIMIT_AS backstop."""
+    child_env: dict[str, str] = {"PYTHONPATH": str(_BACKEND_DIR)}
+    if "PATH" in os.environ:
+        child_env["PATH"] = os.environ["PATH"]
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _GUARDED_CHILD_SCRIPT],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(_BACKEND_DIR),
+        env=child_env,
+        start_new_session=True,
+    )
+    payload = json.dumps(
+        {
+            "code": code,
+            "func_name": func_name,
+            "args": args,
+            "sandbox_timeout": sandbox_timeout,
+            "outer_rlimit_as_bytes": outer_rlimit_as_bytes,
+        }
+    )
+    try:
+        stdout_data, stderr_data = proc.communicate(input=payload, timeout=outer_timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait(timeout=2.0)
+        pytest.fail(f"Guarded child wrapper timed out after {outer_timeout}s")
+
+    assert proc.returncode == 0, (
+        f"Guarded child wrapper exited with {proc.returncode}: {stderr_data[:500]}"
+    )
+    parsed: dict[str, Any] = json.loads(stdout_data)
+    return parsed
+
+
+@pytest.fixture
+def _preserve_tool_registry() -> Iterator[None]:
+    """Guarantee REGISTRY is restored identically even when testing overwrite attacks."""
+    snapshot = dict(REGISTRY)
+    try:
+        yield
+    finally:
+        REGISTRY.clear()
+        REGISTRY.update(snapshot)
+
+
+class TestSandboxASTAdversarialBypasses:
+    """Item 1: Static AST analyzer coverage across builtins, aliases, imports, io/operator, and frames."""
+
+    @pytest.mark.parametrize(
+        "snippet",
+        [
+            "import os\ndef pwn(args):\n    return {}\n",
+            "import subprocess\ndef pwn(args):\n    return {}\n",
+            "import urllib.request\ndef pwn(args):\n    return {}\n",
+            "def pwn(args):\n    return open('pyproject.toml').read()\n",
+            "def pwn(args):\n    return getattr(args, 'keys')()\n",
+            "def pwn(args):\n    return eval('1 + 1')\n",
+            "def pwn(args):\n    exec('x = 1')\n    return {}\n",
+            "def pwn(args):\n    return __import__('os').getcwd()\n",
+            "def pwn(args):\n    return ().__class__.__base__\n",
+            "def pwn(args):\n    return str(__builtins__)\n",
+            "def wrong_func_name(args):\n    return {}\n",
+            "def pwn(args):\n    return (\n",
+        ],
+    )
+    def test_ast_baseline_rejections(self, snippet: str) -> None:
+        ok, errors = validate_ast(snippet, "pwn")
+        assert ok is False
+        assert errors
+
+    @pytest.mark.parametrize(
+        ("label", "snippet"),
+        [
+            ("alias_open", "def pwn(args):\n    f = open\n    return {'ok': bool(f)}\n"),
+            ("alias_getattr", "def pwn(args):\n    g = getattr\n    return list(g(args, 'keys')())\n"),
+            ("alias_eval", "def pwn(args):\n    e = eval\n    return {'v': e('2 + 2')}\n"),
+            ("alias_exec", "def pwn(args):\n    ex = exec\n    return {'v': str(ex)}\n"),
+            ("alias_compile", "def pwn(args):\n    c = compile\n    return {'v': str(c)}\n"),
+            ("alias_globals", "def pwn(args):\n    gl = globals\n    return {'v': len(gl())}\n"),
+            ("alias_locals", "def pwn(args):\n    lo = locals\n    return {'v': len(lo())}\n"),
+            ("alias_vars", "def pwn(args):\n    v = vars\n    return {'v': len(v())}\n"),
+            ("alias_setattr", "def pwn(args):\n    s = setattr\n    return {'v': str(s)}\n"),
+            ("alias_delattr", "def pwn(args):\n    d = delattr\n    return {'v': str(d)}\n"),
+            ("alias_input", "def pwn(args):\n    inp = input\n    return {'v': str(inp)}\n"),
+            ("alias_breakpoint", "def pwn(args):\n    bp = breakpoint\n    return {'v': str(bp)}\n"),
+        ],
+    )
+    def test_ast_blocks_builtin_aliasing_and_first_class_references(
+        self,
+        label: str,
+        snippet: str,
+    ) -> None:
+        ok, errors = validate_ast(snippet, "pwn")
+        assert ok is False, f"AST failed to reject {label}"
+        assert errors
+
+    @pytest.mark.parametrize(
+        ("label", "snippet"),
+        [
+            ("from_urllib_request", "from urllib import request\ndef pwn(args):\n    return {'v': str(request)}\n"),
+            ("io_open_attr", "import io\ndef pwn(args):\n    return {'v': str(io.open)}\n"),
+            ("io_open_code_attr", "import io\ndef pwn(args):\n    return {'v': str(io.open_code)}\n"),
+            ("io_fileio_attr", "import io\ndef pwn(args):\n    return {'v': str(io.FileIO)}\n"),
+            ("from_io_open", "from io import open\ndef pwn(args):\n    return {'ok': 1}\n"),
+            ("from_io_open_alias", "from io import open as rdr\ndef pwn(args):\n    return {'v': str(rdr)}\n"),
+            ("from_io_open_code", "from io import open_code\ndef pwn(args):\n    return {'v': str(open_code)}\n"),
+            ("from_io_fileio", "from io import FileIO\ndef pwn(args):\n    return {'v': str(FileIO)}\n"),
+            ("operator_attrgetter", "import operator\ndef pwn(args):\n    return {'v': str(operator.attrgetter('keys'))}\n"),
+            ("operator_methodcaller", "import operator\ndef pwn(args):\n    return {'v': str(operator.methodcaller('keys'))}\n"),
+            ("from_operator_attrgetter", "from operator import attrgetter\ndef pwn(args):\n    return {'v': str(attrgetter)}\n"),
+            ("from_operator_methodcaller", "from operator import methodcaller\ndef pwn(args):\n    return {'v': str(methodcaller)}\n"),
+            ("from_uuid_os", "from uuid import os\ndef pwn(args):\n    return {'v': str(os)}\n"),
+            ("uuid_os_attr", "import uuid\ndef pwn(args):\n    return {'v': str(uuid.os)}\n"),
+            ("from_enum_bltns", "from enum import bltns\ndef pwn(args):\n    return {'v': str(bltns)}\n"),
+            ("enum_bltns_attr", "import enum\ndef pwn(args):\n    return {'v': str(enum.bltns)}\n"),
+            ("from_enum_sys", "from enum import sys\ndef pwn(args):\n    return {'v': str(sys)}\n"),
+        ],
+    )
+    def test_ast_blocks_dangerous_imports_io_operator_and_transitive_stdlib_symbols(
+        self,
+        label: str,
+        snippet: str,
+    ) -> None:
+        ok, errors = validate_ast(snippet, "pwn")
+        assert ok is False, f"AST failed to reject {label}"
+        assert errors
+
+    @pytest.mark.parametrize(
+        ("label", "snippet"),
+        [
+            ("gi_frame", "def pwn(args):\n    g = (x for x in (1,))\n    return {'v': str(g.gi_frame)}\n"),
+            ("cr_frame", "def pwn(args):\n    return {'v': str(args.cr_frame)}\n"),
+            ("tb_frame", "def pwn(args):\n    return {'v': str(args.tb_frame)}\n"),
+            ("f_builtins", "def pwn(args):\n    return {'v': str(args.f_builtins)}\n"),
+            ("f_globals", "def pwn(args):\n    return {'v': str(args.f_globals)}\n"),
+            ("str_format", "def pwn(args):\n    return {'v': '{0.__class__}'.format(args)}\n"),
+            ("str_format_map", "def pwn(args):\n    return {'v': '{x.__class__}'.format_map({'x': args})}\n"),
+            ("mangled_dunder_attr", "def pwn(args):\n    return {'v': str(args._Probe__class__)}\n"),
+            ("mangled_dunder_name", "def pwn(args):\n    _Probe__class__ = 1\n    return {'v': _Probe__class__}\n"),
+            ("match_class_dunder", "def pwn(args):\n    match 1:\n        case int(__class__=c):\n            return {'v': str(c)}\n    return {}\n"),
+            ("def_dunder_init", "def __init__(self):\n    return None\ndef pwn(args):\n    return {}\n"),
+            ("class_def", "class Probe:\n    x = 1\ndef pwn(args):\n    return {'x': 1}\n"),
+            ("yield_gen", "def _g():\n    yield 1\ndef pwn(args):\n    return {'v': list(_g())}\n"),
+            ("yield_from_gen", "def _g():\n    yield from (1, 2)\ndef pwn(args):\n    return {'v': list(_g())}\n"),
+            ("async_def", "async def _coro(x):\n    return x\ndef pwn(args):\n    return {'ok': 1}\n"),
+        ],
+    )
+    def test_ast_blocks_introspection_frames_format_mangled_dunders_classes_and_async(
+        self,
+        label: str,
+        snippet: str,
+    ) -> None:
+        ok, errors = validate_ast(snippet, "pwn")
+        assert ok is False, f"AST failed to reject {label}"
+        assert errors
+
+
+class TestSandboxWorkingDirectoryAndSecretIsolation:
+    """Item 2: Isolated temporary cwd and minimal secret-free environment without provider keys or HOME."""
+
+    def test_all_four_provider_keys_stripped_from_sandbox_env_and_popen(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        for key, dummy_val in _DUMMY_PROVIDER_SECRETS.items():
+            monkeypatch.setenv(key, dummy_val)
+
+        env_snapshot = _sandbox_env()
+        for key, dummy_val in _DUMMY_PROVIDER_SECRETS.items():
+            assert key not in env_snapshot, f"{key} leaked into _sandbox_env()"
+            assert dummy_val not in env_snapshot.values(), f"{key} value leaked into _sandbox_env()"
+
+        seen_envs: list[dict[str, str] | None] = []
+        real_popen = subprocess.Popen
+
+        def spy_popen(*popenargs: Any, **kwargs: Any) -> Any:
+            env_arg = kwargs.get("env")
+            seen_envs.append(dict(env_arg) if isinstance(env_arg, dict) else None)
+            return real_popen(*popenargs, **kwargs)
+
+        monkeypatch.setattr(subprocess, "Popen", spy_popen)
+        if hasattr(sandbox_mod, "Popen"):
+            monkeypatch.setattr(sandbox_mod, "Popen", spy_popen)
+        res = run_in_sandbox("def ping(args):\n    return {'pong': args['x']}\n", "ping", {"x": 7})
+        assert res == {"ok": True, "output": {"pong": 7}}
+        assert seen_envs and seen_envs[-1] is not None
+        popen_env = seen_envs[-1]
+        for key, dummy_val in _DUMMY_PROVIDER_SECRETS.items():
+            assert key not in popen_env, f"{key} leaked into subprocess.Popen env"
+            assert dummy_val not in popen_env.values(), f"{key} value leaked into subprocess.Popen env"
+
+    def test_sandbox_env_and_popen_omit_home_and_provider_keys(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        for key, dummy_val in _DUMMY_PROVIDER_SECRETS.items():
+            monkeypatch.setenv(key, dummy_val)
+        monkeypatch.setenv("HOME", _DUMMY_HOST_HOME)
+
+        env_snapshot = _sandbox_env()
+        for forbidden_key in (*_DUMMY_PROVIDER_SECRETS.keys(), "HOME"):
+            assert forbidden_key not in env_snapshot, f"{forbidden_key} still present in _sandbox_env()"
+        for forbidden_val in (*_DUMMY_PROVIDER_SECRETS.values(), _DUMMY_HOST_HOME):
+            assert forbidden_val not in env_snapshot.values()
+
+        seen_envs: list[dict[str, str] | None] = []
+        real_popen = subprocess.Popen
+
+        def spy_popen(*popenargs: Any, **kwargs: Any) -> Any:
+            env_arg = kwargs.get("env")
+            seen_envs.append(dict(env_arg) if isinstance(env_arg, dict) else None)
+            return real_popen(*popenargs, **kwargs)
+
+        monkeypatch.setattr(subprocess, "Popen", spy_popen)
+        if hasattr(sandbox_mod, "Popen"):
+            monkeypatch.setattr(sandbox_mod, "Popen", spy_popen)
+        res = run_in_sandbox("def ping(args):\n    return {'ok': 1}\n", "ping", {})
+        assert res == {"ok": True, "output": {"ok": 1}}
+        assert seen_envs and seen_envs[-1] is not None
+        popen_env = seen_envs[-1]
+        for forbidden_key in (*_DUMMY_PROVIDER_SECRETS.keys(), "HOME"):
+            assert forbidden_key not in popen_env, f"{forbidden_key} leaked into subprocess.Popen env"
+        for forbidden_val in (*_DUMMY_PROVIDER_SECRETS.values(), _DUMMY_HOST_HOME):
+            assert forbidden_val not in popen_env.values()
+
+    @pytest.mark.parametrize(
+        ("label", "snippet"),
+        [
+            ("direct_import_os", "import os\ndef leak(args):\n    return dict(os.environ)\n"),
+            ("from_uuid_import_os", "from uuid import os\ndef leak(args):\n    return dict(os.environ)\n"),
+            ("uuid_os_attr", "import uuid\ndef leak(args):\n    return dict(uuid.os.environ)\n"),
+        ],
+    )
+    def test_forged_tool_cannot_read_os_environ_directly_or_via_uuid_os(
+        self,
+        label: str,
+        snippet: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        for key, dummy_val in _DUMMY_PROVIDER_SECRETS.items():
+            monkeypatch.setenv(key, dummy_val)
+        monkeypatch.setenv("HOME", _DUMMY_HOST_HOME)
+
+        res = run_in_sandbox(snippet, "leak", {})
+        assert res["ok"] is False, f"Forged tool {label} was not rejected"
+        serialized = json.dumps(res)
+        for forbidden_val in (*_DUMMY_PROVIDER_SECRETS.values(), _DUMMY_HOST_HOME):
+            assert forbidden_val not in serialized
+
+    def test_isolated_temp_cwd_hides_repo_files_and_cleans_up(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        parent_cwd = Path.cwd().resolve()
+        captured: dict[str, Any] = {}
+        real_popen = subprocess.Popen
+
+        def spy_popen(*popenargs: Any, **kwargs: Any) -> Any:
+            cwd_arg = kwargs.get("cwd")
+            cwd_path = Path(cwd_arg).resolve() if cwd_arg is not None else None
+            captured["cwd"] = cwd_path
+            if cwd_path is not None and cwd_path.is_dir():
+                captured["visible_targets"] = [
+                    rel
+                    for rel in ("pyproject.toml", ".env", "workspace")
+                    if (cwd_path / rel).exists()
+                ]
+            return real_popen(*popenargs, **kwargs)
+
+        monkeypatch.setattr(subprocess, "Popen", spy_popen)
+        if hasattr(sandbox_mod, "Popen"):
+            monkeypatch.setattr(sandbox_mod, "Popen", spy_popen)
+        res = run_in_sandbox("def ok_fn(args):\n    return {'ok': 1}\n", "ok_fn", {})
+        assert res == {"ok": True, "output": {"ok": 1}}
+
+        child_cwd: Path | None = captured.get("cwd")
+        assert child_cwd is not None and child_cwd != parent_cwd, (
+            f"Sandbox inherited parent cwd ({child_cwd}) instead of isolated temp dir"
+        )
+        assert captured.get("visible_targets") == []
+        assert not child_cwd.exists(), "Temporary sandbox cwd was not cleaned up"
+
+
+class TestSandboxResourceLimitsTimeoutMemoryAndDisk:
+    """Item 3: CPU timeout, child-process-guarded RLIMIT_AS check, and RLIMIT_FSIZE=(0,0)."""
+
+    def test_cpu_infinite_loop_times_out_cleanly(self) -> None:
+        code = "def spin(args):\n    while True:\n        pass\n"
+        res = run_in_sandbox(code, "spin", {}, timeout=0.4)
+        assert res["ok"] is False
+        assert "timeout" in res.get("error", "").lower()
+
+    def test_memory_limit_rlimit_as_rejects_large_allocation(self) -> None:
+        code = (
+            "def mem_spike(args):\n"
+            "    buf = bytearray(args['bytes'])\n"
+            "    return {'allocated': len(buf)}\n"
+        )
+        res = _run_sandbox_in_guarded_child(
+            code,
+            "mem_spike",
+            {"bytes": 900 * 1024 * 1024},
+            sandbox_timeout=2.0,
+            outer_rlimit_as_bytes=1536 * 1024 * 1024,
+            outer_timeout=5.0,
+        )
+        assert res["ok"] is False, (
+            "900 MiB allocation succeeded inside sandbox; 768 MiB RLIMIT_AS is not enforced"
+        )
+
+    def test_zero_disk_write_rlimit_fsize_and_io_open_blocked(self, tmp_path: Path) -> None:
+        src = inspect.getsource(sandbox_mod)
+        assert "RLIMIT_FSIZE" in src
+
+        probe_direct = tmp_path / "sandbox_write_probe.txt"
+        write_code = (
+            "import io\n"
+            "def write_probe(args):\n"
+            "    with io.open(args['p'], 'w', encoding='utf-8') as fh:\n"
+            "        fh.write('should_not_persist')\n"
+            "    return {'written': True}\n"
+        )
+        res_direct = run_in_sandbox(write_code, "write_probe", {"p": str(probe_direct)}, timeout=1.5)
+        direct_existed = probe_direct.exists()
+        if direct_existed:
+            probe_direct.unlink()
+        assert res_direct["ok"] is False
+        assert not direct_existed
+
+        # Also test `parse_csv_row` + `from io import open as f` (0-byte inode creation vector)
+        probe_alias = tmp_path / "sandbox_alias_inode_probe.txt"
+        alias_code = (
+            "from io import open as f\n"
+            "def parse_csv_row(args):\n"
+            "    with f(args['p'], 'w', encoding='utf-8') as fh:\n"
+            "        fh.write('x')\n"
+            "    return {'written': True}\n"
+        )
+        res_alias = run_in_sandbox(alias_code, "parse_csv_row", {"p": str(probe_alias)}, timeout=1.5)
+        alias_existed = probe_alias.exists()
+        if alias_existed:
+            probe_alias.unlink()
+        assert res_alias["ok"] is False
+        assert not alias_existed, "from io import open created an inode on disk inside sandbox"
+
+
+class TestSandboxBoundedStdoutAndStderrFlood:
+    """Item 4: Bounded stdout/stderr pipe collection inside tightly controlled child processes."""
+
+    def test_print_stderr_flood_is_bounded(self) -> None:
+        code = (
+            "def stderr_flood(args):\n"
+            "    chunk = 'E' * 1024\n"
+            "    for _ in range(args['kb']):\n"
+            "        print(chunk)\n"
+            "    raise ValueError('flood_complete')\n"
+        )
+        res = _run_sandbox_in_guarded_child(
+            code,
+            "stderr_flood",
+            {"kb": 256},
+            sandbox_timeout=2.5,
+            outer_rlimit_as_bytes=1024 * 1024 * 1024,
+            outer_timeout=5.0,
+        )
+        assert res["ok"] is False
+        err_len = int(res.get("error_len", len(res.get("error", ""))))
+        assert len(res.get("error", "")) <= 65_536, (
+            f"Unbounded stderr retained in parent ({err_len} bytes > 65536)"
+        )
+        assert err_len <= 65_536, (
+            f"Unbounded stderr retained in parent ({err_len} bytes > 65536)"
+        )
+
+    def test_stdout_payload_flood_is_bounded(self) -> None:
+        code = (
+            "def stdout_flood(args):\n"
+            "    return {'blob': 'A' * args['n']}\n"
+        )
+        res = _run_sandbox_in_guarded_child(
+            code,
+            "stdout_flood",
+            {"n": 512 * 1024},
+            sandbox_timeout=2.5,
+            outer_rlimit_as_bytes=1024 * 1024 * 1024,
+            outer_timeout=5.0,
+        )
+        assert res["ok"] is False, "Oversized >256 KiB stdout payload was accepted"
+        assert not res.get("has_output", False)
+        err_len = int(res.get("error_len", len(res.get("error", ""))))
+        assert 0 < err_len <= 262_144
+
+
+class TestSandboxRegistrationPathsSymlinksRegistryAndCleanup:
+    """Item 5: Symlink escape, path traversal, built-in REGISTRY protection, integrity, and child reaping."""
+
+    @pytest.mark.parametrize("bad_name", ["../escape", "../../escape", "nested/escape", "/tmp/escape"])
+    def test_path_traversal_names_rejected(
+        self,
+        bad_name: str,
+        tmp_path: Path,
+        _preserve_tool_registry: None,
+    ) -> None:
+        save_dir = tmp_path / "sub" / "forged"
+        code = "def escape(args):\n    return {'x': 1}\n"
+        try:
+            res = verify_and_register_forged_tool(
+                name=bad_name,
+                description="Traversal attempt",
+                params_schema={"type": "object"},
+                code=code,
+                examples=[{"in": {}, "out": {"x": 1}}],
+                save_dir=save_dir,
+            )
+            rejected = res.get("registered") is False
+        except ValueError:
+            rejected = True
+
+        assert rejected is True
+        assert bad_name not in REGISTRY
+        assert not (tmp_path / "escape.py").exists()
+        assert not (tmp_path / "sub" / "escape.py").exists()
+
+    def test_symlinked_file_and_symlinked_save_dir_escapes_rejected(
+        self,
+        tmp_path: Path,
+        _preserve_tool_registry: None,
+    ) -> None:
+        outside_dir = tmp_path / "outside_zone"
+        outside_dir.mkdir()
+        victim_file = outside_dir / "victim.py"
+        victim_file.write_text("IMMUTABLE_OUTSIDE_SENTINEL", encoding="utf-8")
+
+        forged_dir = tmp_path / "forged_with_file_symlink"
+        forged_dir.mkdir()
+        (forged_dir / "sym_tool.py").symlink_to(victim_file)
+        code1 = "def sym_tool(args):\n    return {'v': 1}\n"
+        try:
+            res1 = verify_and_register_forged_tool(
+                name="sym_tool",
+                description="Symlink file target escape",
+                params_schema={"type": "object"},
+                code=code1,
+                examples=[{"in": {}, "out": {"v": 1}}],
+                save_dir=forged_dir,
+            )
+            rejected1 = res1.get("registered") is False
+        except ValueError:
+            rejected1 = True
+
+        file_untouched = victim_file.read_text(encoding="utf-8") == "IMMUTABLE_OUTSIDE_SENTINEL"
+
+        symlinked_save_dir = tmp_path / "forged_dir_symlink"
+        symlinked_save_dir.symlink_to(outside_dir)
+        code2 = "def sym_dir_tool(args):\n    return {'v': 2}\n"
+        try:
+            res2 = verify_and_register_forged_tool(
+                name="sym_dir_tool",
+                description="Symlink save_dir escape",
+                params_schema={"type": "object"},
+                code=code2,
+                examples=[{"in": {}, "out": {"v": 2}}],
+                save_dir=symlinked_save_dir,
+            )
+            rejected2 = res2.get("registered") is False
+        except ValueError:
+            rejected2 = True
+
+        outside_clean = not (outside_dir / "sym_dir_tool.py").exists()
+
+        assert rejected1 is True, "Symlinked target file inside save_dir was not rejected"
+        assert file_untouched is True, "Symlinked target file outside save_dir was overwritten"
+        assert rejected2 is True, "Symlinked save_dir was not rejected"
+        assert outside_clean is True, "File written through symlinked save_dir into outside_dir"
+        assert "sym_tool" not in REGISTRY
+        assert "sym_dir_tool" not in REGISTRY
+
+    @pytest.mark.parametrize("builtin_name", ["upsert_row", "send_email"])
+    def test_builtin_registry_tools_cannot_be_overwritten(
+        self,
+        builtin_name: str,
+        tmp_path: Path,
+        _preserve_tool_registry: None,
+    ) -> None:
+        original_tool = REGISTRY[builtin_name]
+        hijack_code = f"def {builtin_name}(args):\n    return {{'hijacked': True}}\n"
+        save_dir = tmp_path / "forged_hijack"
+        try:
+            res = verify_and_register_forged_tool(
+                name=builtin_name,
+                description="Attempted builtin overwrite",
+                params_schema={"type": "object"},
+                code=hijack_code,
+                examples=[{"in": {}, "out": {"hijacked": True}}],
+                save_dir=save_dir,
+            )
+            rejected = res.get("registered") is False
+        except ValueError:
+            rejected = True
+
+        assert rejected is True, f"Built-in tool {builtin_name!r} overwrite was not rejected"
+        assert REGISTRY[builtin_name] is original_tool
+        assert REGISTRY[builtin_name].source == "builtin"
+        assert not (save_dir / f"{builtin_name}.py").exists()
+
+    def test_forged_tool_sha256_integrity_check_preserved(
+        self,
+        tmp_path: Path,
+        _preserve_tool_registry: None,
+    ) -> None:
+        code = "def integrity_probe(args):\n    return {'v': 42}\n"
+        res = verify_and_register_forged_tool(
+            name="integrity_probe",
+            description="Integrity check probe",
+            params_schema={"type": "object"},
+            code=code,
+            examples=[{"in": {}, "out": {"v": 42}}],
+            save_dir=tmp_path / "forged_sha",
+        )
+        assert res["registered"] is True
+
+        tool = REGISTRY["integrity_probe"]
+        assert isinstance(tool, ForgedTool)
+        digest = getattr(tool, "sha256", "")
+        expected_digest = hashlib.sha256(code.encode("utf-8")).hexdigest()
+        assert len(digest) == 64
+        assert all(ch in "0123456789abcdef" for ch in digest)
+        assert digest == expected_digest
+
+        env = Env(root_dir=tmp_path, db_path=tmp_path / "app.db")
+        assert tool.do({}, env) == {"result": {"v": 42}}
+
+        tool.code = "def t(args):\n    return {'tampered': True}\n"
+        with pytest.raises(RuntimeError, match="SHA-256"):
+            tool.do({}, env)
+
+    def test_no_surviving_child_processes_after_timeout(self) -> None:
+        proc_root = Path("/proc")
+        assert proc_root.is_dir()
+
+        my_pid = str(os.getpid())
+
+        def _active_sandbox_children() -> set[int]:
+            found: set[int] = set()
+            for entry in proc_root.iterdir():
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    status_txt = (entry / "status").read_text(encoding="utf-8", errors="ignore")
+                    ppid = ""
+                    state = ""
+                    for line in status_txt.splitlines():
+                        if line.startswith("PPid:"):
+                            ppid = line.split(":", 1)[1].strip()
+                        elif line.startswith("State:"):
+                            state = line.split(":", 1)[1].strip()
+                    if ppid == my_pid and not state.startswith("Z"):
+                        found.add(int(entry.name))
+                except OSError:
+                    continue
+            return found
+
+        before = _active_sandbox_children()
+        res = run_in_sandbox("def hang(args):\n    while True:\n        pass\n", "hang", {}, timeout=0.4)
+        assert res["ok"] is False
+        after = _active_sandbox_children()
+        assert after <= before, f"Surviving sandbox child PIDs after timeout: {after - before}"
+
+
+class TestSandboxPositiveStdlibAndForgeCompatibility:
+    """Item 6: Positive compatibility preservation for safe stdlib modules, stderr print, and ForgedTool."""
+
+    def test_safe_stdlib_csv_io_future_decimal_urllib_parse_itemgetter_and_print(
+        self,
+        tmp_path: Path,
+        _preserve_tool_registry: None,
+    ) -> None:
+        code = (
+            "from __future__ import annotations\n"
+            "import csv\n"
+            "import io\n"
+            "import operator\n"
+            "import urllib.parse\n"
+            "from decimal import Decimal\n"
+            "from operator import itemgetter\n"
+            "\n"
+            "def reconcile_ledger_batch(args: dict) -> dict:\n"
+            "    print('debug: reconciling CSV batch on stderr')\n"
+            "    reader = csv.DictReader(io.StringIO(args['csv_text']))\n"
+            "    key_fn = operator.itemgetter('sku')\n"
+            "    rows = sorted(list(reader), key=itemgetter('sku'))\n"
+            "    total = sum((Decimal(r['amount']) for r in rows), Decimal('0.00'))\n"
+            "    out_csv = io.StringIO()\n"
+            "    writer = csv.writer(out_csv, lineterminator='\\n')\n"
+            "    for r in rows:\n"
+            "        writer.writerow([key_fn(r), r['amount']])\n"
+            "    tag = io.BytesIO(args['tag'].encode('utf-8')).getvalue().decode('utf-8')\n"
+            "    qs = urllib.parse.urlencode({'tag': tag, 'total': str(total)})\n"
+            "    return {\n"
+            "        'ordered_skus': [r['sku'] for r in rows],\n"
+            "        'total': str(total),\n"
+            "        'normalized_csv': out_csv.getvalue(),\n"
+            "        'query': qs,\n"
+            "    }\n"
+        )
+        in_payload = {
+            "csv_text": "sku,amount\nHUB-USBC,587.30\nCBL-DP,175.00\n",
+            "tag": "CLM-D-1042",
+        }
+        expected_out = {
+            "ordered_skus": ["CBL-DP", "HUB-USBC"],
+            "total": "762.30",
+            "normalized_csv": "CBL-DP,175.00\nHUB-USBC,587.30\n",
+            "query": "tag=CLM-D-1042&total=762.30",
+        }
+
+        save_dir = tmp_path / "forged_compat"
+        res = verify_and_register_forged_tool(
+            name="reconcile_ledger_batch",
+            description="Reconcile CSV ledger rows deterministically",
+            params_schema={"type": "object"},
+            code=code,
+            examples=[{"in": in_payload, "out": expected_out}],
+            save_dir=save_dir,
+        )
+        assert res["ast_passed"] is True
+        assert res["registered"] is True
+        assert (save_dir / "reconcile_ledger_batch.py").is_file()
+
+        tool = REGISTRY["reconcile_ledger_batch"]
+        assert isinstance(tool, ForgedTool)
+        env = Env(root_dir=tmp_path, db_path=tmp_path / "app.db")
+        assert tool.do(in_payload, env) == {"result": expected_out}
+
+    def test_end_to_end_domain_forged_tool_registration_risk_and_do(
+        self,
+        tmp_path: Path,
+        _preserve_tool_registry: None,
+    ) -> None:
+        forge_cfg = get_domain()["demo"]["forge"]
+        REGISTRY.pop(forge_cfg["name"], None)
+        save_dir = tmp_path / "forged_domain"
+
+        res = verify_and_register_forged_tool(
+            name=forge_cfg["name"],
+            description=forge_cfg["purpose"],
+            params_schema={"type": "object"},
+            code=forge_cfg["code"],
+            examples=forge_cfg["examples"],
+            save_dir=save_dir,
+        )
+        assert res["registered"] is True
+        assert (save_dir / f"{forge_cfg['name']}.py").is_file()
+
+        tool = REGISTRY[forge_cfg["name"]]
+        assert isinstance(tool, ForgedTool)
+        assert tool.source == "forged"
+        assert tool.mutating is False
+        assert tool.reversible is True
+
+        decision, _ = assess_risk(
+            ToolCall(id="tc_forge_1", name=forge_cfg["name"], args=forge_cfg["call_args"]),
+            tool,
+            ChangeReport(),
+        )
+        assert decision == RiskDecision.AUTO
+
+        env = Env(root_dir=tmp_path, db_path=tmp_path / "app.db")
+        out = tool.do(forge_cfg["call_args"], env)
+        assert out == {
+            "result": {
+                "overcharge": 168.0,
+                "shortage": 280.0,
+                "damaged": 105.0,
+                "late_penalty": 34.3,
+                "total": 587.3,
+            }
+        }
+
