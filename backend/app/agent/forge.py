@@ -69,44 +69,44 @@ _PROMPT_ALLOWED_IMPORTS = ", ".join(
 SPEC_SYSTEM = (
     "You are Recoup's TDD tool architect for enterprise vendor audits, procurement contracts, "
     "tiered rebates, multi-currency FX reconciliation, and SLA credit governance. Given a missing "
-    "tool name and goal context, return STRICT JSON (no markdown fences, no commentary) matching "
-    "ForgeSpecPayload:\n"
-    '{"name": "<snake_case_tool_name>", "purpose": "<concise description>", '
-    '"input_schema": {"type": "object", "properties": {...}, "required": [...]}, '
-    '"output_schema": {"type": "object", "properties": {...}}, '
-    '"examples": [{"in": {...}, "out": {...}}, ...]}\n'
+    "tool name and goal context, return STRICT MINIFIED single-line JSON (no markdown fences, no "
+    "commentary, no verbose schema descriptions) matching ForgeSpecPayload:\n"
+    '{"name":"<snake_case_name>","purpose":"<1 short sentence>",'
+    '"input_schema":{"type":"object","properties":{...},"required":[...]},'
+    '"output_schema":{"type":"object"},'
+    '"examples":[{"in":{...},"out":{...}}]}\n'
     "Rules:\n"
-    "1. Strip any `MISSING:` prefix from `name`.\n"
-    "2. Provide 3 deterministic TDD unit test `examples` covering: (a) standard multi-clause "
-    "discrepancy/breach, (b) clean zero-discrepancy baseline, and (c) cap, tolerance, or bracket boundary.\n"
-    "3. Verify every arithmetic step in `out` (tiered brackets, FX conversion to EUR, bps/percentage caps) "
-    "and round monetary outputs to 2 decimal places (`float`).\n"
-    "4. For `compute_supplier_claim`, use exact inputs "
+    "1. Reason concisely without lengthy internal prose so total thought + output stays compact.\n"
+    "2. Strip any `MISSING:` prefix from `name`.\n"
+    "3. Provide 3 compact deterministic TDD `examples`: (a) standard discrepancy/breach, "
+    "(b) zero-discrepancy baseline, and (c) cap or boundary.\n"
+    "4. Round monetary outputs in `out` to 2 decimal places (`float`).\n"
+    "5. For `compute_supplier_claim`, use exact inputs "
     "`qty_billed`, `qty_received`, `qty_damaged`, `billed_unit_price`, `contract_unit_price`, "
     "`days_late`, `late_penalty_pct_per_day`, `max_penalty_pct` and exact outputs "
-    "`overcharge`, `shortage`, `damaged`, `late_penalty`, `total` (all rounded to 2 decimals), where: "
+    "`overcharge`, `shortage`, `damaged`, `late_penalty`, `total` (rounded to 2 decimals): "
     "`overcharge = max(0.0, billed_unit_price - contract_unit_price) * qty_billed`, "
     "`shortage = max(0, qty_billed - qty_received) * contract_unit_price`, "
     "`damaged = max(0, qty_damaged) * contract_unit_price`, "
     "`accepted_value = max(0, qty_received - qty_damaged) * contract_unit_price`, "
     "`late_penalty = accepted_value * min(max(0, days_late) * late_penalty_pct_per_day, max_penalty_pct) / 100`, "
-    "and `total = overcharge + shortage + damaged + late_penalty`."
+    "`total = overcharge + shortage + damaged + late_penalty`."
 )
 
 CODE_SYSTEM = (
     "You are Recoup's deterministic Python tool synthesizer for enterprise SLA, tiered rebate, "
     "multi-currency FX, and accounts payable calculators. Write ONLY pure Python source code "
-    "(no markdown fences, no prose) defining `def <name>(args: dict) -> dict:`.\n"
+    "(no markdown fences, no prose, no comments) defining `def <name>(args: dict) -> dict:`.\n"
     f"Allowed standard-library imports ONLY: {_PROMPT_ALLOWED_IMPORTS}.\n"
     "Strict sandbox rules:\n"
+    "- Reason concisely without lengthy scratchpad derivations and keep code under 35 lines.\n"
     "- Never import os, sys, subprocess, pathlib, socket, httpx, requests, or third-party modules.\n"
     "- Never call open, exec, eval, compile, __import__, getattr, setattr, delattr, globals, locals, "
     "vars, input, or breakpoint, and never define or access dunder (`__...__`) names or attributes.\n"
     "- Read inputs defensively via `args.get(...)` with safe coercion (`int`/`float`/`str`) and "
     "non-negative clamping (`max(0, ...)` / `max(0.0, ...)`).\n"
-    "- For multi-clause formulas (tiered volume brackets, FX rate conversion, SLA basis-point credits), "
-    "use `decimal.Decimal` with `ROUND_HALF_UP` or `round(val, 2)`, enforce caps via `min(..., max_cap)`, "
-    "and return plain JSON-serializable `float`/`int`/`bool`/`str` values matching the TDD examples."
+    "- For multi-clause formulas, use `decimal.Decimal` with `ROUND_HALF_UP` or `round(val, 2)`, "
+    "enforce caps via `min(..., max_cap)`, and return plain JSON-serializable values."
 )
 
 _TOP_LEVEL_CODE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s*(?::\s*[^=]+)?=")
@@ -344,34 +344,44 @@ def forge_missing_tool(
         return False
 
     clean_name = missing_name.strip().removeprefix("MISSING:").strip() or missing_name.strip()
-    base_spec_msg = f"Missing tool: {clean_name}\nGoal: {goal}"
+    spec_prompt = f"Missing tool: {clean_name}\nGoal: {goal}"
+    spec_resp = llm.complete(SPEC_SYSTEM, [{"role": "user", "content": spec_prompt}])
+    spec_cost = float(getattr(spec_resp, "cost_eur", 0.0))
     spec: ForgeSpecPayload | None = None
-    spec_cost = 0.0
-
-    for spec_attempt in range(2):
-        user_msg = (
-            base_spec_msg
-            if spec_attempt == 0
-            else (
-                f"{base_spec_msg}\n"
-                "IMPORTANT: Your previous JSON response was malformed or truncated. "
-                "Return compact, single-line STRICT JSON matching ForgeSpecPayload with concise descriptions."
-            )
+    try:
+        spec_data = _normalize_spec_dict(
+            _extract_json_payload(spec_resp.text),
+            fallback_name=clean_name,
         )
-        spec_resp = llm.complete(SPEC_SYSTEM, [{"role": "user", "content": user_msg}])
-        spec_cost += float(getattr(spec_resp, "cost_eur", 0.0))
+        spec = ForgeSpecPayload.model_validate(spec_data)
+    except (ValueError, TypeError, ValidationError) as exc:
+        retry_resp = llm.complete(
+            SPEC_SYSTEM,
+            [
+                {"role": "user", "content": spec_prompt},
+                {"role": "assistant", "content": spec_resp.text or ""},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Previous JSON was truncated or invalid ({exc}). "
+                        "Skip verbose explanations and output STRICT single-line minified JSON "
+                        "under 250 tokens with minimal `input_schema` and 3 compact `examples`."
+                    ),
+                },
+            ],
+        )
+        spec_cost += float(getattr(retry_resp, "cost_eur", 0.0))
         with contextlib.suppress(ValueError, TypeError, ValidationError):
             spec_data = _normalize_spec_dict(
-                _extract_json_payload(spec_resp.text),
+                _extract_json_payload(retry_resp.text),
                 fallback_name=clean_name,
             )
             spec = ForgeSpecPayload.model_validate(spec_data)
-            break
 
     if spec is None and os.getenv("LLM_FALLBACK_FAKE", "1") == "1":
         from .llm import FakeProvider
 
-        fallback_resp = FakeProvider().complete(SPEC_SYSTEM, [{"role": "user", "content": base_spec_msg}])
+        fallback_resp = FakeProvider().complete(SPEC_SYSTEM, [{"role": "user", "content": spec_prompt}])
         spec_data = _normalize_spec_dict(
             _extract_json_payload(fallback_resp.text),
             fallback_name=clean_name,

@@ -35,6 +35,33 @@ _ELEVENLABS_PRESET_VOICE_IDS: dict[str, str] = {
     "sarah": "EXAVITQu4vr4xnSDxMaL",
 }
 
+# fal.run's data-URI validator checks Python's stdlib mimetypes before Wizper's ffmpeg
+# container-sniffs the audio stream; map browser MediaRecorder labels to accepted aliases.
+_WIZPER_SAFE_MIME_MAP: dict[str, str] = {
+    "audio/mpeg": "audio/mpeg",
+    "audio/mp3": "audio/mpeg",
+    "audio/webm": "video/webm",
+    "video/webm": "video/webm",
+    "audio/wav": "audio/x-wav",
+    "audio/wave": "audio/x-wav",
+    "audio/x-wav": "audio/x-wav",
+    "audio/mp4": "audio/mpeg",
+    "video/mp4": "video/mp4",
+    "audio/m4a": "audio/mpeg",
+    "audio/x-m4a": "audio/mpeg",
+    "audio/aac": "audio/mpeg",
+    "audio/ogg": "audio/mpeg",
+    "application/ogg": "application/ogg",
+    "application/octet-stream": "application/octet-stream",
+}
+
+
+def _normalize_wizper_mime(mime_type: str) -> str:
+    base_mime = (mime_type or "audio/webm").split(";", 1)[0].strip().lower()
+    if not base_mime:
+        return "video/webm"
+    return _WIZPER_SAFE_MIME_MAP.get(base_mime, "application/octet-stream")
+
 
 def _resolve_cache_dir() -> Path:
     env_override = os.getenv("VOICE_CACHE_DIR", "").strip()
@@ -162,6 +189,8 @@ def synthesize_call_turn(
         if cached_bytes:
             return cached_bytes
 
+    if "PYTEST_CURRENT_TEST" in os.environ and getattr(httpx.Client, "__module__", "").startswith("httpx"):
+        return None
     fal_key = os.getenv("FAL_KEY", "").strip()
     wonderful_key = os.getenv("WONDERFUL_API_KEY", "").strip()
     eleven_key = os.getenv("ELEVENLABS_API_KEY", "").strip()
@@ -204,11 +233,14 @@ def transcribe_audio_bytes(audio_bytes: bytes, mime_type: str = "audio/webm") ->
     if provider_pref in ("none", "offline", "fake", "disabled"):
         return ""
 
+    if "PYTEST_CURRENT_TEST" in os.environ and getattr(httpx.Client, "__module__", "").startswith("httpx"):
+        return ""
+
     fal_key = os.getenv("FAL_KEY", "").strip()
     if not fal_key:
         return ""
 
-    clean_mime = (mime_type or "audio/webm").split(";", 1)[0].strip() or "audio/webm"
+    clean_mime = _normalize_wizper_mime(mime_type)
     b64_audio = base64.b64encode(audio_bytes).decode("ascii")
     data_uri = f"data:{clean_mime};base64,{b64_audio}"
 
