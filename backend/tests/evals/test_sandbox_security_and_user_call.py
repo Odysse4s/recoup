@@ -1162,12 +1162,15 @@ _DUMMY_HOST_HOME = "/tmp/dummy_host_home_should_not_leak"
 
 _GUARDED_CHILD_SCRIPT = """
 import json
-import resource
 import sys
 
 payload = json.loads(sys.stdin.read())
-rlimit_as = int(payload["outer_rlimit_as_bytes"])
-resource.setrlimit(resource.RLIMIT_AS, (rlimit_as, rlimit_as))
+try:
+    import resource
+    rlimit_as = int(payload["outer_rlimit_as_bytes"])
+    resource.setrlimit(resource.RLIMIT_AS, (rlimit_as, rlimit_as))
+except Exception:
+    pass
 
 from app.engine.sandbox import run_in_sandbox
 
@@ -1497,6 +1500,8 @@ class TestSandboxResourceLimitsTimeoutMemoryAndDisk:
         assert "timeout" in res.get("error", "").lower()
 
     def test_memory_limit_rlimit_as_rejects_large_allocation(self) -> None:
+        if sys.platform == "win32":
+            pytest.skip("RLIMIT_AS requires POSIX resource module (runs in Linux container)")
         code = (
             "def mem_spike(args):\n"
             "    buf = bytearray(args['bytes'])\n"
@@ -1639,7 +1644,12 @@ class TestSandboxRegistrationPathsSymlinksRegistryAndCleanup:
 
         forged_dir = tmp_path / "forged_with_file_symlink"
         forged_dir.mkdir()
-        (forged_dir / "sym_tool.py").symlink_to(victim_file)
+        try:
+            (forged_dir / "sym_tool.py").symlink_to(victim_file)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows requires developer mode/admin privilege for symlinks")
+            raise
         code1 = "def sym_tool(args):\n    return {'v': 1}\n"
         try:
             res1 = verify_and_register_forged_tool(
@@ -1742,7 +1752,8 @@ class TestSandboxRegistrationPathsSymlinksRegistryAndCleanup:
 
     def test_no_surviving_child_processes_after_timeout(self) -> None:
         proc_root = Path("/proc")
-        assert proc_root.is_dir()
+        if not proc_root.is_dir():
+            pytest.skip("Requires Linux /proc filesystem")
 
         my_pid = str(os.getpid())
 

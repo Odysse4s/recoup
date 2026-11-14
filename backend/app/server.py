@@ -611,19 +611,21 @@ async def _run_stage_demo(
             step=3,
             thought="Synthesizing missing enterprise claim calculator `compute_supplier_claim`.",
         )
-        forge_sleep_1 = 0.005 if "PYTEST_CURRENT_TEST" in os.environ else 1.3
-        await asyncio.sleep(forge_sleep_1)
+        if pace_ms > 0 and "PYTEST_CURRENT_TEST" not in os.environ:
+            await asyncio.sleep(1.3)
 
         registered_ok = False
-        with contextlib.suppress(Exception):
-            reg_res = verify_and_register_forged_tool(
-                name="compute_supplier_claim",
-                description="Calculate itemized supplier claim breakdown (overbill, shortfall, damaged units, SLA delay penalty)",
-                params_schema=forge_spec.input_schema,
-                code=FORGED_SUPPLIER_CLAIM_CODE,
-                examples=[ex.model_dump() for ex in forge_spec.examples],
-            )
-            registered_ok = bool(reg_res.get("registered"))
+        if pace_ms > 0:
+            with contextlib.suppress(Exception):
+                reg_res = await asyncio.to_thread(
+                    verify_and_register_forged_tool,
+                    name="compute_supplier_claim",
+                    description="Calculate itemized supplier claim breakdown (overbill, shortfall, damaged units, SLA delay penalty)",
+                    params_schema=forge_spec.input_schema,
+                    code=FORGED_SUPPLIER_CLAIM_CODE,
+                    examples=[ex.model_dump() for ex in forge_spec.examples],
+                )
+                registered_ok = bool(reg_res.get("registered"))
         if not registered_ok:
             REGISTRY["compute_supplier_claim"] = ForgedTool(
                 name="compute_supplier_claim",
@@ -669,8 +671,8 @@ async def _run_stage_demo(
             step=3,
             thought="Registered `compute_supplier_claim` into runtime tool registry.",
         )
-        forge_sleep_2 = 0.005 if "PYTEST_CURRENT_TEST" in os.environ else 1.2
-        await asyncio.sleep(forge_sleep_2)
+        if pace_ms > 0 and "PYTEST_CURRENT_TEST" not in os.environ:
+            await asyncio.sleep(1.2)
 
         # Step 4: compute_supplier_claim
         claim_calc_args = {"overcharge": 168.0, "shortfall": 280.0, "damaged": 105.0, "late_penalty": 34.3}
