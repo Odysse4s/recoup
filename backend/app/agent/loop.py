@@ -382,6 +382,12 @@ async def run_agent_loop(
     for _ in range(max_steps):
         tools = [t.spec() for t in REGISTRY.values()]
         resp = await asyncio.to_thread(llm.complete, react_system, messages, tools)
+        if resp.tool_calls:
+            # One LLM call can decide on several tool calls at once; attribute the whole turn's
+            # real cost to the first one so it still reaches the live HUD total via whichever
+            # event (TOOL_CALL or TOOL_ERROR) ends up carrying that call, without double-counting
+            # across the other calls produced by the same turn.
+            resp.tool_calls[0].cost_eur = resp.cost_eur
         if not resp.tool_calls:
             # Edge-case guard: if live LLM stops early with unverified criteria, give 1 remediation turn
             if shadow_env is not None and not critic_remediation_attempted and done:
@@ -422,7 +428,7 @@ async def run_agent_loop(
                         EventType.TOOL_ERROR,
                         {"call": call.model_dump(), "error": critic_err},
                         critic_err,
-                        0.0,
+                        call.cost_eur,
                     )
             else:
                 result = await execute(call)
