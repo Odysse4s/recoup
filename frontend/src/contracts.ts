@@ -117,6 +117,31 @@ export interface UiActionPayload {
   label?: string;
 }
 
+export interface OumiIrisGate {
+  live: boolean;
+  model: string;
+  latency_ms: number;
+  gate_probability: number;
+  route: string;
+  route_confidence: number;
+  risk_score: number;
+  risk_max: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+export interface OumiIrisIntent {
+  live: boolean;
+  model: string;
+  latency_ms: number;
+  intent: string;
+  confidence: number;
+  probabilities?: Record<string, number>;
+  is_binding_authorization: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
 export interface CallStartPayload {
   call_id: string;
   mode?: "vendor" | "user_consult";
@@ -128,6 +153,8 @@ export interface CallStartPayload {
   opening_pct?: number | null;
   floor_pct?: number | null;
   call_status?: "ringing" | "connected" | "ended";
+  iris_gate?: OumiIrisGate | null;
+  irisGate?: OumiIrisGate | null;
 }
 
 export interface CallTurnPayload {
@@ -139,6 +166,8 @@ export interface CallTurnPayload {
   keep_call_open?: boolean;
   call_status?: "ringing" | "connected" | "ended" | null;
   ui_action?: UiActionPayload | null;
+  iris_intent?: OumiIrisIntent | null;
+  irisIntent?: OumiIrisIntent | null;
 }
 
 export interface CallEndPayload {

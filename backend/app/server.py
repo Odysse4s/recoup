@@ -66,6 +66,7 @@ from .engine.sandbox import ForgedTool, verify_and_register_forged_tool
 from .engine.seed import populate_default_seed
 from .engine.tools import REGISTRY
 from .engine.undo import UndoLog
+from .oumi_iris import classify_voice_turn_with_iris, evaluate_gate_with_iris
 
 try:
     from .voice.call_audio import (
@@ -137,9 +138,26 @@ ANTICIPATE_TASK: asyncio.Task[Any] | None = None
 STAGE_DEMO_TASK: asyncio.Task[Any] | None = None
 GOAL_RUN_TASK: asyncio.Task[Any] | None = None
 ACTIVE_CALL: dict[str, Any] | None = None
+LATEST_IRIS_GATE: dict[str, Any] | None = None
+IRIS_USAGE_STATS: dict[str, int] = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
 SHUTDOWN_EVENT: asyncio.Event | None = None
 _EXTRA_VOICE_COST_EUR: float = 0.0
 RECENTLY_RESOLVED_APPROVALS: dict[str, bool] = {}
+
+
+def _record_iris_usage(res: dict[str, Any] | None) -> None:
+    if not isinstance(res, dict):
+        return
+    IRIS_USAGE_STATS["calls"] += 1
+    IRIS_USAGE_STATS["input_tokens"] += int(res.get("input_tokens", 0) or 0)
+    IRIS_USAGE_STATS["output_tokens"] += int(res.get("output_tokens", 0) or 0)
+
+
+def _append_user_turn(call_turns: list[dict[str, Any]], transcript: str, iris_res: dict[str, Any] | None) -> None:
+    entry: dict[str, Any] = {"speaker": "user", "text": transcript, "audio_url": None, "ts": time.time()}
+    if iris_res is not None:
+        entry["iris_intent"] = iris_res
+    call_turns.append(entry)
 
 
 def _is_live_fal_voice_active() -> bool:
@@ -245,6 +263,8 @@ def health():
         "tools": list(REGISTRY),
         "fingerprint": fingerprint_env(REAL)[:12],
         "tts_mem_cache_size": len(mem_cache) if hasattr(mem_cache, "__len__") else 0,
+        "iris_gate": LATEST_IRIS_GATE,
+        "iris_usage": IRIS_USAGE_STATS,
     }
 
 
@@ -386,6 +406,8 @@ def _workspace_snapshot() -> dict[str, Any]:
         "pending_approvals": pending_list,
         "pending_approval": _get_active_pending_approval(),
         "active_call": ACTIVE_CALL,
+        "iris_gate": LATEST_IRIS_GATE,
+        "iris_usage": IRIS_USAGE_STATS,
         "pending_offers": [_format_offer(o) for o in PENDING_OFFERS.values()],
         "latest_offer": _format_offer(list(PENDING_OFFERS.values())[-1]) if PENDING_OFFERS else None,
         "metrics": {
@@ -442,8 +464,13 @@ async def events(request: Request):
 
 
 async def _run(goal: str, run_id: str, anticipate_after: bool = True):
-    global ANTICIPATE_TASK
+    global ANTICIPATE_TASK, LATEST_IRIS_GATE
     try:
+        iris_gate = await evaluate_gate_with_iris(f"Goal: {goal}")
+        LATEST_IRIS_GATE = iris_gate
+        _record_iris_usage(iris_gate)
+        if ACTIVE_CALL is not None:
+            ACTIVE_CALL["iris_gate"] = iris_gate
         plan, report, fp, previews = await rehearse(goal, REAL, run_id)
         status = await replay(run_id, plan, report, fp, previews, REAL, LOG)
         BUS.emit(
@@ -838,6 +865,18 @@ async def _run_stage_demo(
         fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         PENDING[req_id] = fut
 
+        # Step 4: Evaluate Risk Gate with live Oumi Iris System-1
+        state_summary = (
+            f"Claim CLM-D-1042 missing hubs: EUR 587.30 staged actions: "
+            f"email to {email_args.get('to')}, AADE tax credit draft, claim updates."
+        )
+        iris_gate = await evaluate_gate_with_iris(state_summary)
+        global LATEST_IRIS_GATE
+        LATEST_IRIS_GATE = iris_gate
+        _record_iris_usage(iris_gate)
+        if ACTIVE_CALL is not None:
+            ACTIVE_CALL["iris_gate"] = iris_gate
+
         gate_payload = ApprovalNeededPayload(
             req_id=req_id,
             tool_name="send_email",
@@ -1141,11 +1180,13 @@ async def undo(req: UndoRequest | None = None):
 @app.post("/api/reset")
 async def reset():
     """Restore workspace to deterministic Recoup baseline seed."""
-    global _EXTRA_VOICE_COST_EUR, STAGE_DEMO_TASK, ACTIVE_CALL, GOAL_RUN_TASK
+    global _EXTRA_VOICE_COST_EUR, STAGE_DEMO_TASK, ACTIVE_CALL, GOAL_RUN_TASK, LATEST_IRIS_GATE, IRIS_USAGE_STATS
     if STAGE_DEMO_TASK and not STAGE_DEMO_TASK.done():
         STAGE_DEMO_TASK.cancel()
     STAGE_DEMO_TASK = None
     ACTIVE_CALL = None
+    LATEST_IRIS_GATE = None
+    IRIS_USAGE_STATS = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
     if ANTICIPATE_TASK and not ANTICIPATE_TASK.done():
         ANTICIPATE_TASK.cancel()
     if GOAL_RUN_TASK and not GOAL_RUN_TASK.done():
@@ -2719,6 +2760,7 @@ async def call_pickup(request: Request):
             "claim_id": claim_id,
             "claim_amount": claim_amount,
             "counterparty": "Operator Mobile",
+            "iris_gate": LATEST_IRIS_GATE,
             "turns": [],
             "selected_choice": None,
             "end": None,
@@ -2729,6 +2771,8 @@ async def call_pickup(request: Request):
         ACTIVE_CALL["ringing"] = False
         ACTIVE_CALL["call_status"] = "connected"
         ACTIVE_CALL["connected_at"] = now_ts
+        if LATEST_IRIS_GATE is not None:
+            ACTIVE_CALL["iris_gate"] = LATEST_IRIS_GATE
         if req_id and not ACTIVE_CALL.get("req_id"):
             ACTIVE_CALL["req_id"] = req_id
 
@@ -2755,6 +2799,18 @@ async def call_pickup(request: Request):
         "call_status": "connected",
         "claim_id": claim_id,
         "req_id": req_id,
+        "iris_gate": LATEST_IRIS_GATE,
+    }
+
+
+@app.get("/api/call/status")
+async def call_status():
+    """Return active consult call status and Oumi Iris System-1 telemetry."""
+    return {
+        "ok": True,
+        "active_call": ACTIVE_CALL,
+        "iris_gate": LATEST_IRIS_GATE,
+        "iris_usage": IRIS_USAGE_STATS,
     }
 
 
@@ -2847,7 +2903,13 @@ async def start_user_consult_call(request: Request):
         cost_eur=_voice_micro_cost(opening_text),
     )
 
-    global ACTIVE_CALL
+    global ACTIVE_CALL, LATEST_IRIS_GATE
+    if LATEST_IRIS_GATE is None:
+        state_summary = f"Claim {claim_id}: EUR {claim_amount:.2f} staged hold needing operator decision."
+        iris_gate = await evaluate_gate_with_iris(state_summary)
+        LATEST_IRIS_GATE = iris_gate
+        _record_iris_usage(iris_gate)
+
     ACTIVE_CALL = {
         "active": True,
         "ringing": True,
@@ -2859,6 +2921,7 @@ async def start_user_consult_call(request: Request):
         "claim_id": claim_id,
         "claim_amount": claim_amount,
         "counterparty": "Operator Mobile",
+        "iris_gate": LATEST_IRIS_GATE,
         "turns": [
             {
                 "speaker": "agent",
@@ -2880,6 +2943,7 @@ async def start_user_consult_call(request: Request):
         "claim_id": claim_id,
         "claim_amount": claim_amount,
         "opening_text": opening_text,
+        "iris_gate": LATEST_IRIS_GATE,
     }
 
 
@@ -3017,6 +3081,9 @@ async def handle_user_consult_response(request: Request):
         ACTIVE_CALL["ringing"] = False
         ACTIVE_CALL["call_status"] = "connected"
 
+    if LATEST_IRIS_GATE is not None:
+        ACTIVE_CALL["iris_gate"] = LATEST_IRIS_GATE
+
     lowered = (transcript or "").lower().strip()
 
     # Live Auto-VAD noise guard: when raw audio was uploaded without explicit_choice/ui_command/hangup,
@@ -3038,6 +3105,22 @@ async def handle_user_consult_response(request: Request):
     # Intent 1: Hang Up Intent FIRST
     has_committed = bool(ACTIVE_CALL and ACTIVE_CALL.get("selected_choice") in ("refund", "redelivery"))
     is_escalated_choice = explicit_choice == "escalated"
+
+    iris_res: dict[str, Any] | None = None
+    if transcript:
+        iris_res = await classify_voice_turn_with_iris(
+            transcript,
+            {"claim_id": claim_id, "has_committed": has_committed},
+        )
+        _record_iris_usage(iris_res)
+
+    iris_intent = str((iris_res.get("intent") or "") if iris_res else "")
+    iris_conf = float((iris_res.get("confidence", 0.0) or 0.0) if iris_res else 0.0)
+    iris_probs = (iris_res.get("probabilities") or {}) if iris_res else {}
+    iris_prob = float(iris_probs.get(iris_intent, iris_conf)) if isinstance(iris_probs, dict) else iris_conf
+    iris_binding = float((iris_res.get("is_binding_authorization", 0.0) or 0.0) if iris_res else 0.0)
+    iris_high_conf = (iris_conf >= 0.75 or iris_prob >= 0.75)
+
     has_commit_words = bool(
         explicit_choice in ("refund", "redelivery")
         or _COMMIT_REFUND_RE.search(lowered)
@@ -3045,7 +3128,11 @@ async def handle_user_consult_response(request: Request):
         or _COMMIT_REDELIVERY_RE.search(lowered)
     )
     is_hangup_text = bool(_HANGUP_INTENT_RE.search(lowered)) if lowered else False
-    is_pure_hangup = is_escalated_choice or ((hangup and not has_commit_words) or (is_hangup_text and not has_commit_words))
+    is_pure_hangup = (
+        is_escalated_choice
+        or ((hangup and not has_commit_words) or (is_hangup_text and not has_commit_words))
+        or (iris_high_conf and iris_intent == "hangup" and not has_commit_words)
+    )
 
     if is_pure_hangup:
         if is_escalated_choice:
@@ -3115,7 +3202,7 @@ async def handle_user_consult_response(request: Request):
         ACTIVE_CALL["end"] = end_ev.model_dump()
         call_turns = ACTIVE_CALL.setdefault("turns", [])
         if transcript:
-            call_turns.append({"speaker": "user", "text": transcript, "audio_url": None, "ts": time.time()})
+            _append_user_turn(call_turns, transcript, iris_res)
         call_turns.append(
             {
                 "speaker": "agent",
@@ -3137,6 +3224,7 @@ async def handle_user_consult_response(request: Request):
             "confirmation_text": hangup_reply,
             "agreed_amount": agreed_amount,
             "ui_action": None,
+            "iris_intent": iris_res,
         }
 
     # Questions & UI Exploration (only if not an explicit button commit)
@@ -3199,7 +3287,7 @@ async def handle_user_consult_response(request: Request):
             ACTIVE_CALL["call_status"] = "connected"
             ACTIVE_CALL["last_ui_action"] = ui_action
             call_turns = ACTIVE_CALL.setdefault("turns", [])
-            call_turns.append({"speaker": "user", "text": transcript, "audio_url": None, "ts": time.time()})
+            _append_user_turn(call_turns, transcript, iris_res)
             call_turns.append(
                 {
                     "speaker": "agent",
@@ -3223,6 +3311,7 @@ async def handle_user_consult_response(request: Request):
                 "agreed_amount": None,
                 "aade_xml_path": f"aade/mydata_{claim_id}.xml",
                 "ui_action": ui_action,
+                "iris_intent": iris_res,
             }
 
         # Intent 3: Why 587 / Proof / Missing / Broken
@@ -3283,7 +3372,7 @@ async def handle_user_consult_response(request: Request):
             ACTIVE_CALL["call_status"] = "connected"
             ACTIVE_CALL["last_ui_action"] = ui_action
             call_turns = ACTIVE_CALL.setdefault("turns", [])
-            call_turns.append({"speaker": "user", "text": transcript, "audio_url": None, "ts": time.time()})
+            _append_user_turn(call_turns, transcript, iris_res)
             call_turns.append(
                 {
                     "speaker": "agent",
@@ -3307,6 +3396,7 @@ async def handle_user_consult_response(request: Request):
                 "agreed_amount": None,
                 "aade_xml_path": f"aade/mydata_{claim_id}.xml",
                 "ui_action": ui_action,
+                "iris_intent": iris_res,
             }
 
     # Intent 4: Commit Refund or Replacement (check BEFORE show email/show aade when commit words are present)
@@ -3330,6 +3420,11 @@ async def handle_user_consult_response(request: Request):
             bool(re.search(r"\b587\b", lowered)) and not _WHY_INTENT_RE.search(lowered)
         ):
             choice = "refund"
+        elif iris_high_conf and iris_binding >= 0.65:
+            if iris_intent == "commit_refund":
+                choice = "refund"
+            elif iris_intent == "commit_replacement":
+                choice = "redelivery"
 
     if choice is not None:
         if not transcript:
@@ -3546,14 +3641,7 @@ async def handle_user_consult_response(request: Request):
         ACTIVE_CALL["aade_xml_path"] = aade_xml_path
 
         call_turns = ACTIVE_CALL.setdefault("turns", [])
-        call_turns.append(
-            {
-                "speaker": "user",
-                "text": transcript,
-                "audio_url": None,
-                "ts": time.time(),
-            }
-        )
+        _append_user_turn(call_turns, transcript, iris_res)
         call_turns.append(
             {
                 "speaker": "agent",
@@ -3577,6 +3665,7 @@ async def handle_user_consult_response(request: Request):
             "agreed_amount": agreed_amount,
             "aade_xml_path": aade_xml_path,
             "transcript": transcript,
+            "iris_intent": iris_res,
         }
 
     # Intent 5: Taxes / AADE / XML / Email / Invoice (staged info)
@@ -3654,7 +3743,7 @@ async def handle_user_consult_response(request: Request):
         ACTIVE_CALL["call_status"] = "connected"
         ACTIVE_CALL["last_ui_action"] = ui_action
         call_turns = ACTIVE_CALL.setdefault("turns", [])
-        call_turns.append({"speaker": "user", "text": transcript, "audio_url": None, "ts": time.time()})
+        _append_user_turn(call_turns, transcript, iris_res)
         call_turns.append(
             {
                 "speaker": "agent",
@@ -3678,7 +3767,193 @@ async def handle_user_consult_response(request: Request):
             "agreed_amount": None,
             "aade_xml_path": f"aade/mydata_{claim_id}.xml",
             "ui_action": ui_action,
+            "iris_intent": iris_res,
         }
+
+    # Iris System-1 Decision fallback when explicit regex keywords didn't match a decision/question
+    if iris_res and iris_high_conf:
+        if iris_intent == "explain_options":
+            ui_action = UiActionPayload(
+                action="switch_view",
+                view="db",
+                table="invoices",
+                label="Comparing options in Ledger",
+            ).model_dump(exclude_none=True)
+            user_turn = CallTurnPayload(
+                call_id=call_id,
+                speaker="user",
+                text=transcript,
+                keep_call_open=True,
+                call_status="connected",
+            )
+            BUS.emit(
+                run_id,
+                EventType.CALL_TURN,
+                user_turn.model_dump(),
+                step=2,
+                thought=f"Operator: {transcript}",
+                cost_eur=_voice_micro_cost(transcript) if stt_ran else 0.0,
+            )
+            reply_text = (
+                "Full refund gets us 587 euros cash back today and freezes their invoice. "
+                "Or they ship 22 free hubs tomorrow plus a 202 euro credit. Which one?"
+            )
+            agent_turn = CallTurnPayload(
+                call_id=call_id,
+                speaker="agent",
+                text=reply_text,
+                audio_url="/api/voice/turn-audio",
+                keep_call_open=True,
+                call_status="connected",
+                ui_action=ui_action,
+            )
+            BUS.emit(
+                run_id,
+                EventType.CALL_TURN,
+                agent_turn.model_dump(),
+                step=3,
+                thought=f"Recoup Agent: {reply_text}",
+                cost_eur=_voice_micro_cost(reply_text),
+            )
+            ACTIVE_CALL["active"] = True
+            ACTIVE_CALL["ringing"] = False
+            ACTIVE_CALL["call_status"] = "connected"
+            ACTIVE_CALL["last_ui_action"] = ui_action
+            call_turns = ACTIVE_CALL.setdefault("turns", [])
+            _append_user_turn(call_turns, transcript, iris_res)
+            call_turns.append(
+                {
+                    "speaker": "agent",
+                    "text": reply_text,
+                    "audio_url": "/api/voice/turn-audio",
+                    "ts": time.time(),
+                    "ui_action": ui_action,
+                }
+            )
+            return {
+                "ok": True,
+                "call_id": call_id,
+                "keep_call_open": True,
+                "call_status": "connected",
+                "choice": None,
+                "outcome": None,
+                "transcript": transcript,
+                "reply_text": reply_text,
+                "confirmation_text": reply_text,
+                "agreed_amount": None,
+                "aade_xml_path": f"aade/mydata_{claim_id}.xml",
+                "ui_action": ui_action,
+                "iris_intent": iris_res,
+            }
+        if iris_intent == "explain_math":
+            ui_action = UiActionPayload(
+                action="open_file",
+                path="deliveries/D-1042_receiving_note.md",
+                label="Opening delivery receiving note",
+            ).model_dump(exclude_none=True)
+            user_turn = CallTurnPayload(
+                call_id=call_id,
+                speaker="user",
+                text=transcript,
+                keep_call_open=True,
+                call_status="connected",
+            )
+            BUS.emit(
+                run_id,
+                EventType.CALL_TURN,
+                user_turn.model_dump(),
+                step=2,
+                thought=f"Operator: {transcript}",
+                cost_eur=_voice_micro_cost(transcript) if stt_ran else 0.0,
+            )
+            reply_text = (
+                "Sixteen missing hubs, six broken, unit overbilling on invoice 7781, "
+                "plus a two-day late penalty—totaling 587 euros and 30 cents. Refund or replacements?"
+            )
+            agent_turn = CallTurnPayload(
+                call_id=call_id,
+                speaker="agent",
+                text=reply_text,
+                audio_url="/api/voice/turn-audio",
+                keep_call_open=True,
+                call_status="connected",
+                ui_action=ui_action,
+            )
+            BUS.emit(
+                run_id,
+                EventType.CALL_TURN,
+                agent_turn.model_dump(),
+                step=3,
+                thought=f"Recoup Agent: {reply_text}",
+                cost_eur=_voice_micro_cost(reply_text),
+            )
+            ACTIVE_CALL["active"] = True
+            ACTIVE_CALL["ringing"] = False
+            ACTIVE_CALL["call_status"] = "connected"
+            ACTIVE_CALL["last_ui_action"] = ui_action
+            call_turns = ACTIVE_CALL.setdefault("turns", [])
+            _append_user_turn(call_turns, transcript, iris_res)
+            call_turns.append(
+                {
+                    "speaker": "agent",
+                    "text": reply_text,
+                    "audio_url": "/api/voice/turn-audio",
+                    "ts": time.time(),
+                    "ui_action": ui_action,
+                }
+            )
+            return {
+                "ok": True,
+                "call_id": call_id,
+                "keep_call_open": True,
+                "call_status": "connected",
+                "choice": None,
+                "outcome": None,
+                "transcript": transcript,
+                "reply_text": reply_text,
+                "confirmation_text": reply_text,
+                "agreed_amount": None,
+                "aade_xml_path": f"aade/mydata_{claim_id}.xml",
+                "ui_action": ui_action,
+                "iris_intent": iris_res,
+            }
+        if iris_intent == "reject_rollback" and iris_binding >= 0.65:
+            reply_text = "Understood. Pausing the proposed settlement and keeping everything safely unchanged."
+            end_ev = CallEndPayload(
+                call_id=call_id,
+                outcome="rejected",
+                agreed_amount=None,
+                summary="Settlement rejected by operator; kept safely paused.",
+            )
+            BUS.emit(run_id, EventType.CALL_END, end_ev.model_dump(), thought=end_ev.summary)
+            ACTIVE_CALL["active"] = False
+            ACTIVE_CALL["ringing"] = False
+            ACTIVE_CALL["call_status"] = "ended"
+            ACTIVE_CALL["end"] = end_ev.model_dump()
+            call_turns = ACTIVE_CALL.setdefault("turns", [])
+            _append_user_turn(call_turns, transcript, iris_res)
+            call_turns.append(
+                {
+                    "speaker": "agent",
+                    "text": reply_text,
+                    "audio_url": "/api/voice/turn-audio",
+                    "ts": time.time(),
+                }
+            )
+            return {
+                "ok": True,
+                "call_id": call_id,
+                "keep_call_open": False,
+                "call_status": "ended",
+                "choice": None,
+                "outcome": "rejected",
+                "transcript": transcript,
+                "reply_text": reply_text,
+                "confirmation_text": reply_text,
+                "agreed_amount": None,
+                "ui_action": None,
+                "iris_intent": iris_res,
+            }
 
     # Intent 6: Fallback / unclear turn
     fallback_reply = (
@@ -3721,7 +3996,7 @@ async def handle_user_consult_response(request: Request):
     ACTIVE_CALL["ringing"] = False
     ACTIVE_CALL["call_status"] = "connected"
     call_turns = ACTIVE_CALL.setdefault("turns", [])
-    call_turns.append({"speaker": "user", "text": transcript, "audio_url": None, "ts": time.time()})
+    _append_user_turn(call_turns, transcript, iris_res)
     call_turns.append(
         {
             "speaker": "agent",
@@ -3743,6 +4018,7 @@ async def handle_user_consult_response(request: Request):
         "confirmation_text": fallback_reply,
         "agreed_amount": None,
         "ui_action": None,
+        "iris_intent": iris_res,
     }
 
 

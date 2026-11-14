@@ -372,6 +372,11 @@ function OperatorEscalationCall({
 
   const callKey = sessionKey;
 
+  const irisGate =
+    (consult as unknown as { irisGate?: { gate_probability?: number; live?: boolean } })?.irisGate ||
+    ((r as { operatorConsult?: unknown })?.operatorConsult as { irisGate?: { gate_probability?: number; live?: boolean } } | undefined)?.irisGate ||
+    (r.wsState as unknown as { iris_gate?: { gate_probability?: number; live?: boolean } })?.iris_gate;
+
   const committedChoiceInCall = committedChoice || consult?.selectedChoice || null;
 
   const openingText = useMemo(() => {
@@ -737,6 +742,10 @@ function OperatorEscalationCall({
     enabled: answered && !resolvedEnd && !submitting,
     agentSpeaking: agentSpeaking || r.speaking,
     muted: isMuted,
+    onBargeIn: () => {
+      stopSpeaking();
+      setAgentSpeaking(false);
+    },
     onUtterance: (blob, mimeType, ext) => {
       handleUtteranceBlob(blob, mimeType, ext);
     },
@@ -999,6 +1008,12 @@ function OperatorEscalationCall({
             RECOUP EXECUTIVE LINE · GROK REALTIME VOICE
           </div>
 
+          {irisGate && typeof irisGate.gate_probability === "number" && (
+            <div className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-signal/40 bg-signal/15 px-2.5 py-0.5 text-[11px] font-semibold text-signal shadow-sm">
+              <span>⚡ Oumi Iris · {Math.round(irisGate.gate_probability * 100)}% Gate · 0 out-tok</span>
+            </div>
+          )}
+
           <div className="mt-6 text-[13px] font-semibold uppercase tracking-widest text-emerald-400/80">
             Incoming Executive Escalation
           </div>
@@ -1125,6 +1140,12 @@ function OperatorEscalationCall({
               {String(Math.floor(secs / 60)).padStart(2, "0")}:{String(secs % 60).padStart(2, "0")}
             </span>
           </div>
+
+          {irisGate && typeof irisGate.gate_probability === "number" && (
+            <div className="mt-1.5 inline-flex items-center gap-1.5 rounded-full border border-signal/40 bg-signal/15 px-2.5 py-0.5 text-[11px] font-semibold text-signal shadow-sm">
+              <span>⚡ Oumi Iris · {Math.round(irisGate.gate_probability * 100)}% Gate · 0 out-tok</span>
+            </div>
+          )}
 
           <h2 className="mt-1 text-[21px] font-bold tracking-tight text-ink">
             {r.brand.brand_name} AI · D-1042
@@ -1275,13 +1296,11 @@ function OperatorEscalationCall({
             <p className="mt-1.5 max-w-[320px] text-[12px] font-medium text-ink-2">
               {resolvedEnd
                 ? "ERP staged and vendor email ready · reversible receipt below"
-                : isSpeaking
-                ? "Grok Realtime Voice audio active · tap orb to interrupt"
                 : (isHearing || vad.manualRecording)
                 ? "Auto-sends on pause · or tap orb to send now"
                 : isSyncing
                 ? "Wizper STT & desktop synchronization in progress…"
-                : "Hands-free Auto-VAD · or tap orb to talk / send"}
+                : "Live Full-Duplex · Speak anytime to interrupt"}
             </p>
           </div>
         </div>
@@ -1841,8 +1860,21 @@ function GateHome({
           </div>
         </div>
 
-        <div className="flex justify-center">
+        <div className="flex flex-col items-center gap-1.5 justify-center">
           <VoicePill r={r} compact />
+          {(() => {
+            const iris =
+              ((r as { operatorConsult?: unknown })?.operatorConsult as { irisGate?: { gate_probability?: number; live?: boolean } } | undefined)?.irisGate ||
+              (r.wsState as unknown as { iris_gate?: { gate_probability?: number; live?: boolean } })?.iris_gate;
+            if (iris && typeof iris.gate_probability === "number") {
+              return (
+                <div className="inline-flex items-center gap-1.5 rounded-full border border-signal/40 bg-signal/15 px-2.5 py-0.5 text-[11px] font-semibold text-signal shadow-sm">
+                  <span>⚡ Oumi Iris · {Math.round(iris.gate_probability * 100)}% Gate · 0 out-tok</span>
+                </div>
+              );
+            }
+            return null;
+          })()}
         </div>
 
         {/* Tier-1 Push Notification Card: Next Prompt Suggestion */}

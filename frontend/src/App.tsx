@@ -176,6 +176,8 @@ export default function App() {
             onSelectResolution={r.respondOperatorConsult}
             onReject={(reqId) => r.decide(reqId, false)}
             onReplayTurn={r.replayConsultTurn}
+            irisGate={r.wsState?.iris_gate ?? r.wsState?.active_call?.iris_gate}
+            activeCall={r.wsState?.active_call}
           />
           <DiffStack
             report={r.report}
@@ -188,7 +190,7 @@ export default function App() {
             onOpenOutbox={r.openOutbox}
           />
           <AnticipateCard offer={r.offer} onAccept={r.acceptOffer} onDismiss={r.dismissOffer} brandName={brand_name} />
-          <CostMonitor events={r.events} totalCost={r.totalCost} />
+          <CostMonitor events={r.events} totalCost={r.totalCost} irisUsage={r.wsState?.iris_usage} />
         </div>
       </main>
 

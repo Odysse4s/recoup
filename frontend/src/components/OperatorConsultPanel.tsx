@@ -4,7 +4,7 @@ import {
   Hand,
   MonitorCheck,
   PackageCheck,
-  PhoneForwarded,
+  PhoneCall,
   PhoneIncoming,
   Radio,
   Smartphone,
@@ -12,7 +12,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ApprovalNeededPayload } from "../contracts";
+import type { ApprovalNeededPayload, OumiIrisGate, OumiIrisIntent } from "../contracts";
 import { soundFx } from "../lib/sound";
 import type { OperatorChoice, OperatorConsultState } from "../lib/types";
 import { btn, Chip, cx, Dot, Panel } from "./ui";
@@ -39,6 +39,19 @@ export interface OperatorConsultPanelProps {
   onSelectResolution: (choice: OperatorChoice, reqId?: string | null, claimId?: string) => void;
   onReject?: (reqId: string) => void;
   onReplayTurn?: (text: string) => void;
+  irisGate?: OumiIrisGate | null;
+  activeCall?: {
+    turns?: {
+      speaker: string;
+      text: string;
+      audio_url?: string | null;
+      ts: number;
+      iris_intent?: OumiIrisIntent | null;
+      irisIntent?: OumiIrisIntent | null;
+    }[];
+    iris_gate?: OumiIrisGate | null;
+    irisGate?: OumiIrisGate | null;
+  } | null;
 }
 
 function inferChoice(consult: OperatorConsultState | null, committedClaimId?: string | null): OperatorChoice | null {
@@ -71,8 +84,26 @@ export function OperatorConsultPanel({
   onSelectResolution,
   onReject,
   onReplayTurn,
+  irisGate: propsIrisGate,
+  activeCall,
 }: OperatorConsultPanelProps) {
   const extConsult = consult as ExtendedConsultState | null;
+  const irisGate =
+    propsIrisGate ??
+    extConsult?.irisGate ??
+    extConsult?.iris_gate ??
+    activeCall?.irisGate ??
+    activeCall?.iris_gate ??
+    null;
+
+  const routeLabel = useMemo(() => {
+    if (!irisGate?.route) return "iPhone Voice";
+    if (irisGate.route === "iphone_voice_call") return "iPhone Voice";
+    if (irisGate.route === "desktop_queue") return "Desktop Queue";
+    if (irisGate.route === "auto_execute") return "Auto Execute";
+    return irisGate.route;
+  }, [irisGate?.route]);
+
   const transcriptRef = useRef<HTMLDivElement>(null);
   const escalatedReqIdRef = useRef<string | null>(null);
   const connectedMomentRef = useRef<number | null>(null);
@@ -231,16 +262,27 @@ export function OperatorConsultPanel({
 
   const sanitizedTurns = useMemo(() => {
     if (!consult?.turns) return [];
-    return consult.turns.map((turn) => {
+    return consult.turns.map((turn, idx) => {
+      const activeCallTurn = activeCall?.turns?.[idx];
+      const irisIntent =
+        turn.irisIntent ??
+        turn.iris_intent ??
+        activeCallTurn?.irisIntent ??
+        activeCallTurn?.iris_intent ??
+        null;
       if (turn.speaker === "agent" && !hasCommitted && /saved with one-click undo/i.test(turn.text)) {
         return {
           ...turn,
           text: "No problem—I'll keep everything safely paused until you're back at your desk. Talk soon!",
+          irisIntent,
         };
       }
-      return turn;
+      return {
+        ...turn,
+        irisIntent,
+      };
     });
-  }, [consult?.turns, hasCommitted]);
+  }, [consult?.turns, hasCommitted, activeCall?.turns]);
 
   const turnsCount = sanitizedTurns.length;
   useEffect(() => {
@@ -338,6 +380,39 @@ export function OperatorConsultPanel({
         }
       >
         <div className="space-y-2 p-2.5">
+          {/* Oumi Iris System-1 Scorecard */}
+          {irisGate && (
+            <div className="flex h-6 items-center justify-between rounded border border-emerald-500/30 bg-emerald-950/25 px-2 font-mono text-[10.5px]">
+              <div className="flex items-center gap-1.5 truncate">
+                <span className="font-bold tracking-tight text-emerald-400">⚡ OUMI IRIS · SYSTEM-1</span>
+                <span className="text-ink-3">·</span>
+                <span className="text-ink-2">
+                  Hold Gate: <span className="font-semibold text-emerald-300">{(irisGate.gate_probability * 100).toFixed(1)}%</span>
+                </span>
+                <span className="text-ink-3">·</span>
+                <span className="text-ink-2">
+                  Route: <span className="font-semibold text-ink">{routeLabel}</span>
+                </span>
+                <span className="text-ink-3">·</span>
+                <span className="text-ink-2">
+                  Risk: <span className="font-semibold text-amber-400">{irisGate.risk_score.toFixed(1)}/{irisGate.risk_max}</span>
+                </span>
+              </div>
+              <div className="ml-1.5 shrink-0">
+                {irisGate.live ? (
+                  <span className="inline-flex items-center gap-1 rounded bg-emerald-500/20 px-1.5 py-0.5 text-[9.5px] font-medium text-emerald-300 ring-1 ring-emerald-500/40">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    LIVE · 0 OUT-TOK · {irisGate.latency_ms}ms
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 rounded bg-sunken px-1.5 py-0.5 text-[9.5px] font-medium text-ink-3 ring-1 ring-line">
+                    FALLBACK · 0 OUT-TOK
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* 1. 1-Line Live Call Banner */}
           {isExecutedLive ? (
             <div className="flex h-7 items-center justify-between rounded-lg border border-ok/70 bg-ok/15 px-2.5 text-[11.5px] shadow-[0_0_12px_rgba(16,185,129,0.25)]">
@@ -373,7 +448,7 @@ export function OperatorConsultPanel({
                   }}
                   className={cx(btn("signal", "sm"), "h-5 px-2 text-[10px] font-semibold")}
                 >
-                  <PhoneForwarded className="h-2.5 w-2.5" />
+                  <PhoneCall className="h-2.5 w-2.5" />
                   Call Again
                 </button>
               </div>
@@ -438,7 +513,7 @@ export function OperatorConsultPanel({
                   }}
                   className={cx(btn("signal", "sm"), "h-5 px-2 text-[10px] font-semibold")}
                 >
-                  <PhoneForwarded className="h-2.5 w-2.5" />
+                  <PhoneCall className="h-2.5 w-2.5" />
                   Call Now
                 </button>
               </div>
@@ -580,6 +655,11 @@ export function OperatorConsultPanel({
                           )}
                         </div>
                         <p className="text-ink-2">{turn.text}</p>
+                        {isUser && turn.irisIntent && (
+                          <div className="mt-1 flex items-center gap-1 font-mono text-[9px] text-emerald-400">
+                            <span>⚡ Iris → {turn.irisIntent.intent} ({Math.round(turn.irisIntent.confidence * 100)}%) · 0 out-tok</span>
+                          </div>
+                        )}
                       </div>
                     </motion.div>
                   );

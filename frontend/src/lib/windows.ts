@@ -67,7 +67,7 @@ export function forgeSpecWindow(spec: ForgeSpecPayload): LiveWin {
         "guard imports & dunders",
         "spawn python -I",
         `run ${spec.examples.length} unit tests`,
-        "register in vault",
+        "register in toolbox",
       ],
     },
   };
@@ -109,7 +109,7 @@ export function forgeWindow(ft: ForgeTestPayload, latencyMs?: number): LiveWin {
         "guard imports & dunders",
         "spawn python -I",
         `run ${ft.test_results.length} unit tests`,
-        ft.registered ? "register in vault" : "reject & repair",
+        ft.registered ? "register in toolbox" : "reject & repair",
       ],
     },
   };
@@ -128,7 +128,7 @@ export function toolWindow(
 
   // STEP 1: read_file
   if (name === "read_file") {
-    const filePath = String(a.path ?? "docs/receiving_notes/D-1042.txt");
+    const filePath = String(a.path ?? "docs/receiving_notes/D-1042_receiving_note.md");
     const code = [
       "DELIVERY NOTE D-1042 · LOGISTICS INTAKE RECEIPT",
       "Carrier: Hellenic Cargo Express | Date: 2024-11-12",
@@ -394,7 +394,7 @@ export function toolWindow(
     kind: "exec",
     categoryBadge: "STEP 7 · OUTBOX SAFETY GATE",
     title: execTitle,
-    path: `${name}()`,
+    path: name === "send_email" ? `send_email → ${String(a.to ?? a.recipient ?? "accounts@kappaoffice.example")}` : `${name}()`,
     liveLabel: external ? "INTERCEPTING SIDE-EFFECT…" : "EXECUTING IN SANDBOX…",
     doneLabel: external ? "HELD IN DRY-RUN OUTBOX" : "VERIFIED OUTPUT",
     code: [`$ recoup exec --rehearse --tool ${name}`, ...argLines, external ? "→ dry_run_external = true" : "→ ok"].join("\n"),
@@ -540,7 +540,7 @@ export function outboxWindow(item: Record<string, unknown>, index: number): Live
       ? "📞 Holding Supplier Call for Your Approval"
       : "Outbox Payload Inspector",
     path: isMail
-      ? `send_email → ${String(item.to ?? "")}`
+      ? `send_email → ${String(item.to ?? "accounts@kappaoffice.example")}`
       : isCall
       ? `place_call → ${String(item.counterparty ?? item.phone ?? "")}`
       : `trigger_webhook → ${String(item.endpoint ?? "")}`,

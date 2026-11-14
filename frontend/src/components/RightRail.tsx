@@ -658,7 +658,15 @@ function fmtEur(v: number): string {
   return v < 0.1 ? `€${v.toFixed(4)}` : `€${v.toFixed(2)}`;
 }
 
-export function CostMonitor({ events, totalCost }: { events: ServerEvent[]; totalCost: number }) {
+export function CostMonitor({
+  events,
+  totalCost,
+  irisUsage,
+}: {
+  events: ServerEvent[];
+  totalCost: number;
+  irisUsage?: { calls: number; input_tokens: number; output_tokens: number } | null;
+}) {
   const { reasoningCost, voiceCost, billedCount } = useMemo(() => {
     let reasoning = 0;
     let voice = 0;
@@ -671,6 +679,9 @@ export function CostMonitor({ events, totalCost }: { events: ServerEvent[]; tota
     }
     return { reasoningCost: reasoning, voiceCost: voice, billedCount: billed };
   }, [events]);
+
+  const irisCalls = irisUsage?.calls ?? 0;
+  const inputTokens = irisUsage?.input_tokens ?? 0;
 
   const breakdownTotal = reasoningCost + voiceCost;
   const reasoningPct = breakdownTotal > 0 ? (reasoningCost / breakdownTotal) * 100 : 0;
@@ -723,6 +734,14 @@ export function CostMonitor({ events, totalCost }: { events: ServerEvent[]; tota
             <span className="h-2 w-2 shrink-0 rounded-full bg-signal" /> Voice &amp; Calls
           </span>
           <span className="font-mono tabular text-ink">{fmtEur(voiceCost)}</span>
+        </div>
+        <div className="flex items-center justify-between text-[11.5px]">
+          <span className="flex items-center gap-1.5 text-ink-2">
+            <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-400" /> ⚡ Oumi Iris (System-1 · 0 out-tok)
+          </span>
+          <span className="font-mono tabular text-emerald-400">
+            {irisCalls} evals · {inputTokens} in / 0 out tok
+          </span>
         </div>
       </div>
     </Drawer>

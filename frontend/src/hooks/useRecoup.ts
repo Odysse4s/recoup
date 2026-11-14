@@ -28,6 +28,7 @@ import {
   type LiveWin,
   type OperatorChoice,
   type OperatorConsultState,
+  type OperatorConsultTurn,
   type RewindState,
   type Row,
   type RowMark,
@@ -81,7 +82,11 @@ const EVENT_TYPES = [
   "run_done",
 ] as const;
 
-const MAX_LIVE_WINDOWS = 3;
+const checkIsMobileRoute = (): boolean =>
+  typeof window !== "undefined" &&
+  (window.location.pathname.startsWith("/mobile") || window.location.hash === "#mobile");
+
+const MAX_LIVE_WINDOWS = 4;
 const sleep = (ms: number) => new Promise((r) => window.setTimeout(r, ms));
 
 export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }) {
@@ -112,6 +117,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   const windowsRef = useRef<LiveWin[]>([]);
   windowsRef.current = windows;
   const forgeFallbackTimerRef = useRef<number | null>(null);
+  const forgeHeroUntilRef = useRef<number>(0);
+  const forgeTestReceivedRef = useRef<boolean>(false);
   const [pulses, setPulses] = useState<Record<DockTarget, number>>({ vault: 0, diff: 0, db: 0 });
   const [rowMarks, setRowMarks] = useState<Record<string, RowMark>>({});
   const [ghostRows, setGhostRows] = useState<Record<string, Row[]>>({});
@@ -217,8 +224,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     (text: string, kind: string, interrupt = false) => {
       setLastBriefing(text);
       if (!voiceRef.current) return;
-      if (isMobileCallManagingAudio()) return;
-      if (windowsEnabledRef.current && phoneCallActiveRef.current) return;
+      if (checkIsMobileRoute() || !windowsEnabledRef.current || isMobileCallManagingAudio()) return;
+      if (phoneCallActiveRef.current) return;
       speakBriefing(text, kind, speechHooks(text), interrupt);
     },
     [speechHooks]
@@ -226,8 +233,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
 
   const replayBriefing = useCallback(() => {
     if (!lastBriefing) return;
-    if (isMobileCallManagingAudio()) return;
-    if (windowsEnabledRef.current && phoneCallActiveRef.current) return;
+    if (checkIsMobileRoute() || !windowsEnabledRef.current || isMobileCallManagingAudio()) return;
+    if (phoneCallActiveRef.current) return;
     speakBriefing(lastBriefing, "replay", speechHooks(lastBriefing), true);
   }, [lastBriefing, speechHooks]);
 
@@ -332,16 +339,18 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         // Hydrate active call
         if (data.active_call) {
           const ac = data.active_call;
-          const mappedTurns = (ac.turns ?? []).map((t) => ({
+          const mappedTurns: OperatorConsultTurn[] = (ac.turns ?? []).map((t) => ({
             speaker: t.speaker,
             text: t.text,
             audioUrl: t.audio_url ?? null,
             ts: t.ts ?? Date.now() / 1000,
+            irisIntent: t.iris_intent ?? null,
           }));
           const isConnected = ac.call_status === "connected" || (!ac.ringing && ac.active);
           setOperatorConsult((prev) => {
             const prevCount = prev?.turns.length ?? 0;
-            if (!windowsEnabledRef.current && voiceRef.current && !isMobileCallManagingAudio() && mappedTurns.length > prevCount) {
+            const isMobileAudio = checkIsMobileRoute() || !windowsEnabledRef.current || isMobileCallManagingAudio();
+            if (!isMobileAudio && voiceRef.current && !ac.ringing && ac.call_status === "connected" && mappedTurns.length > prevCount) {
               const newTurn = mappedTurns[mappedTurns.length - 1];
               if (newTurn && newTurn.speaker === "agent" && newTurn.text) {
                 speakCallTurn("agent", newTurn.text, {
@@ -373,7 +382,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
                   }
                 : (prev?.lastUiAction ?? null),
               end: ac.end ?? null,
-            };
+              irisGate: (ac as Record<string, unknown>)?.iris_gate ?? (data as unknown as Record<string, unknown>)?.iris_gate ?? null,
+            } as OperatorConsultState;
           });
 
           if (ac.last_ui_action) {
@@ -504,9 +514,27 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   // ---------------------------------------------------------------- windows
   const spawnWindow = useCallback((w: LiveWin | null | undefined) => {
     if (!w || !windowsEnabledRef.current || (w.skipAutoPop && !w.manual)) return;
-    if (!w.manual) liveCountRef.current += 1;
     if (w.toolName && !w.manual) setLanding((l) => [...l, w.toolName!]);
-    setWindows((ws) => [...ws, w]);
+    setWindows((ws) => {
+      const withoutDup = ws.filter((x) => x.id !== w.id);
+      let nextList = [...withoutDup, w];
+      const nonManualUnpinned = nextList.filter((x) => !x.manual && !x.pinned);
+      if (nonManualUnpinned.length > MAX_LIVE_WINDOWS) {
+        const oldestTrimmableIdx = nextList.findIndex(
+          (x) => !x.manual && !x.pinned && x.kind !== "forge" && x.id !== w.id
+        );
+        if (oldestTrimmableIdx >= 0) {
+          nextList = nextList.filter((_, idx) => idx !== oldestTrimmableIdx);
+        } else {
+          const oldestIdx = nextList.findIndex((x) => !x.pinned && x.id !== w.id);
+          if (oldestIdx >= 0) {
+            nextList = nextList.filter((_, idx) => idx !== oldestIdx);
+          }
+        }
+      }
+      liveCountRef.current = nextList.filter((x) => !x.pinned && !x.manual).length;
+      return nextList;
+    });
     soundFx.playWindowPop();
   }, []);
 
@@ -516,7 +544,9 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       const w = ws.find((x) => x.id === id);
       if (w) existed = true;
       if (w?.toolName && !w.manual) setLanding((l) => l.filter((n) => n !== w.toolName));
-      return ws.filter((x) => x.id !== id);
+      const next = ws.filter((x) => x.id !== id);
+      liveCountRef.current = next.filter((x) => !x.pinned && !x.manual).length;
+      return next;
     });
     if (target && existed) {
       setPulses((p) => ({ ...p, [target]: p[target] + 1 }));
@@ -549,14 +579,14 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       spawnWindow(win1);
       window.setTimeout(() => {
         dockWindow(win1.id, "db");
-      }, 2100);
+      }, 15000);
     }
     if (win2) {
       window.setTimeout(() => {
         spawnWindow(win2);
         window.setTimeout(() => {
           dockWindow(win2.id, "diff");
-        }, 2300);
+        }, 15000);
       }, 950);
     }
   }, [operatorConsult?.selectedChoice, spawnWindow, dockWindow]);
@@ -700,7 +730,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         ev.type === "approval_needed" &&
         ((ev.payload as unknown as ApprovalNeededPayload)?.channel === "voice_call" ||
           phoneCallActiveRef.current);
-      if (windowsEnabledRef.current && (phoneCallActiveRef.current || isVoiceCallApproval)) {
+      if (checkIsMobileRoute() || !windowsEnabledRef.current || isMobileCallManagingAudio() || phoneCallActiveRef.current || isVoiceCallApproval) {
         setLastBriefing(b);
       } else {
         brief(b, ev.type, ev.type === "approval_needed");
@@ -756,7 +786,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           selectedChoice: prev?.selectedChoice ?? null,
           lastUiAction: prev?.lastUiAction ?? null,
           end: null,
-        }));
+          irisGate: (p as unknown as Record<string, unknown>)?.iris_gate ?? (prev as unknown as Record<string, unknown>)?.irisGate ?? null,
+        } as OperatorConsultState));
         if (!windowsEnabledRef.current && !isConnected) {
           soundFx.playIncomingCall();
         }
@@ -796,7 +827,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             selectedChoice: null,
             lastUiAction: null,
             end: null,
-          };
+            irisGate: (turn as unknown as Record<string, unknown>)?.iris_gate ?? null,
+          } as OperatorConsultState;
           const nextConnected = isConnected || base.callStatus === "connected" || !base.ringing;
           return {
             ...base,
@@ -805,6 +837,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             callStatus: turn.call_status ?? (nextConnected ? "connected" : base.callStatus),
             connectedAt: nextConnected ? (base.connectedAt ?? Date.now()) : base.connectedAt,
             selectedChoice: inferredChoice ?? base.selectedChoice,
+            irisGate: (turn as unknown as Record<string, unknown>)?.iris_gate ?? (base as unknown as Record<string, unknown>)?.irisGate ?? null,
             turns: [
               ...base.turns,
               {
@@ -812,22 +845,24 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
                 text: turn.text,
                 audioUrl: turn.audio_url ?? null,
                 ts: ev.ts || Date.now() / 1000,
-              },
+                irisIntent: ((turn as unknown as Record<string, unknown>)?.iris_intent as string | null) ?? null,
+              } as OperatorConsultTurn,
             ],
-          };
+          } as OperatorConsultState;
         });
 
         if (turn.ui_action) {
           executeUiAction(turn.ui_action);
         }
 
+        const isMobileAudio = checkIsMobileRoute() || !windowsEnabledRef.current || isMobileCallManagingAudio();
         const shouldAutoSpeakTurn =
+          !isMobileAudio &&
           voiceRef.current &&
           turn.speaker === "agent" &&
           Boolean(turn.text) &&
-          !windowsEnabledRef.current &&
-          !isMobileCallManagingAudio() &&
-          isConnected; // never auto-speak while the call is still ringing - the user hasn't picked up yet
+          isConnected &&
+          turn.call_status === "connected"; // never auto-speak while the call is still ringing or on mobile route
 
         if (shouldAutoSpeakTurn && turn.text) {
           speakCallTurn("agent", turn.text, {
@@ -893,6 +928,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         setForgeSpec(spec);
         setForgeTest(null);
         setStage("forge");
+        forgeTestReceivedRef.current = false;
         soundFx.playForgeStart();
         if (windowsEnabledRef.current && spec?.name) {
           const liveId = `forge-live-${spec.name}`;
@@ -908,9 +944,10 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             forgeFallbackTimerRef.current = null;
           }
           forgeFallbackTimerRef.current = window.setTimeout(() => {
-            dockWindow(liveId, "vault");
+            const target = windowsRef.current.find((w) => w.id === liveId)?.target ?? null;
+            dockWindow(liveId, target);
             forgeFallbackTimerRef.current = null;
-          }, 12000);
+          }, 15000);
         }
         break;
       }
@@ -919,6 +956,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         setForgeTest(ft);
         setForgedCode((m) => ({ ...m, [ft.name]: ft }));
         setStage("forge");
+        forgeTestReceivedRef.current = true;
+        forgeHeroUntilRef.current = Date.now() + 1800;
         if (forgeFallbackTimerRef.current !== null) {
           window.clearTimeout(forgeFallbackTimerRef.current);
           forgeFallbackTimerRef.current = null;
@@ -948,9 +987,6 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
                   : w
               )
             );
-            window.setTimeout(() => {
-              dockWindow(liveId, "vault");
-            }, 2900);
           } else {
             const winToSpawn = {
               ...fresh,
@@ -958,10 +994,13 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
               pinned: false,
             };
             spawnWindow(winToSpawn);
-            window.setTimeout(() => {
-              dockWindow(liveId, "vault");
-            }, 2900);
           }
+
+          forgeFallbackTimerRef.current = window.setTimeout(() => {
+            const target = windowsRef.current.find((w) => w.id === liveId)?.target ?? null;
+            dockWindow(liveId, target);
+            forgeFallbackTimerRef.current = null;
+          }, 14000);
         }
         break;
       }
@@ -1086,12 +1125,13 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
 
   // ---------------------------------------------------------------- pacer
   useEffect(() => {
+    const pacerInterval = Math.max(PACE[speed].eventMs, speed === "1x" ? 950 : 0);
     const timer = window.setInterval(() => {
       const next = queueRef.current[0];
       if (!next) {
         if (deferredApprovalRef.current && windowsEnabledRef.current) {
           const forgeActive = windowsRef.current.some((w) => w.kind === "forge" && !w.manual);
-          if (forgeActive) return;
+          if (forgeActive || Date.now() < forgeHeroUntilRef.current) return;
 
           const deferred = deferredApprovalRef.current;
           deferredApprovalRef.current = null;
@@ -1101,13 +1141,19 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         }
         return;
       }
-      // If a forge window is actively open, wait for it to finish docking before popping subsequent steps or approval_needed
-      // (Exception: allow forge_test to pop through immediately so it can update forge_spec in-place)
+      // While forge_spec is waiting for forge_test, allow forge_test through immediately.
+      // Once forge_test has updated the window, wait ~1800ms before subsequent step cards cascade.
       const forgeActive = windowsRef.current.some((w) => w.kind === "forge" && !w.manual);
-      if (forgeActive && next.type !== "forge_test") {
+      if (forgeActive && !forgeTestReceivedRef.current && next.type !== "forge_test") {
+        return;
+      }
+      if (Date.now() < forgeHeroUntilRef.current && next.type !== "forge_test") {
         return;
       }
       if (next.type === "approval_needed") {
+        if (forgeActive || Date.now() < forgeHeroUntilRef.current) {
+          return;
+        }
         queueRef.current.shift();
         setQueued(queueRef.current.length);
         deferredApprovalRef.current = null;
@@ -1125,11 +1171,11 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         next.type === "forge_spec" ||
         next.type === "tool_call";
       const unpinnedCount = windowsRef.current.filter((w) => !w.pinned).length;
-      if (spawns && unpinnedCount >= MAX_LIVE_WINDOWS) return;
+      if (spawns && unpinnedCount >= MAX_LIVE_WINDOWS && next.type !== "forge_test") return;
       queueRef.current.shift();
       setQueued(queueRef.current.length);
       applyRef.current(next);
-    }, PACE[speed].eventMs);
+    }, pacerInterval);
     return () => window.clearInterval(timer);
   }, [speed]);
 
@@ -1206,6 +1252,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   // ---------------------------------------------------------------- actions
   const clearRun = () => {
     commitCelebratedRef.current = false;
+    forgeTestReceivedRef.current = false;
+    forgeHeroUntilRef.current = 0;
     if (forgeFallbackTimerRef.current !== null) {
       window.clearTimeout(forgeFallbackTimerRef.current);
       forgeFallbackTimerRef.current = null;
@@ -1522,6 +1570,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   };
 
   const replayConsultTurn = (text: string) => {
+    if (checkIsMobileRoute() || !windowsEnabledRef.current || isMobileCallManagingAudio()) return;
     speakCallTurn(
       "agent",
       text,
@@ -1540,6 +1589,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   };
 
   const replayTurnAudio = (speaker: "agent" | "counterparty" | "user", text: string) => {
+    if (checkIsMobileRoute() || !windowsEnabledRef.current || isMobileCallManagingAudio()) return;
     speakCallTurn(
       speaker,
       text,

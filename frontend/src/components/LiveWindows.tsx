@@ -1,6 +1,7 @@
-import { AnimatePresence, motion, useAnimate, useDragControls } from "framer-motion";
+import { AnimatePresence, motion, useAnimate } from "framer-motion";
 import {
   Activity,
+  BadgeCheck,
   Braces,
   Check,
   CheckCircle2,
@@ -8,9 +9,9 @@ import {
   Database,
   FileCode2,
   FileSpreadsheet,
+  Lock,
   Pin,
   PinOff,
-  ShieldCheck,
   Sparkles,
   SquareTerminal,
   XCircle,
@@ -119,29 +120,95 @@ function extractSqliteTable(path: string): string {
   return path.trim() || "ledger";
 }
 
+/** Extract clean basename / table target for high-contrast mono pill (<0.2s recognition). */
+function extractTargetPill(win: LiveWin): { icon: string; label: string } {
+  if (win.kind === "sqlite") {
+    if (win.dbMutation) {
+      return {
+        icon: "🗄️",
+        label: `${win.dbMutation.table} · ${win.dbMutation.pk}`,
+      };
+    }
+    const t = extractSqliteTable(win.path);
+    if (t.includes("invoice")) {
+      return { icon: "🗄️", label: "invoices · INV-7781" };
+    }
+    if (t.includes("claim")) {
+      return { icon: "🗄️", label: "claims · CLM-D-1042" };
+    }
+    return { icon: "🗄️", label: t };
+  }
+
+  if (win.kind === "forge") {
+    const raw = win.toolName || win.path.split("/").pop()?.replace(/\.py$/, "") || "compute_supplier_claim";
+    const name = raw.endsWith(".py") ? raw : `${raw}.py`;
+    return {
+      icon: "⚒️",
+      label: name,
+    };
+  }
+
+  if (win.kind === "exec") {
+    if (win.path.includes("@") || win.path.includes("send_email")) {
+      const match = win.path.match(/[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}/);
+      const email = match ? match[0] : "accounts@kappaoffice.example";
+      return {
+        icon: "📧",
+        label: email,
+      };
+    }
+    if (win.path.includes("place_call")) {
+      return {
+        icon: "📞",
+        label: win.path.split("→").pop()?.trim() || "supplier",
+      };
+    }
+    const raw = win.toolName || win.path.replace(/^staged:\/\//, "").replace(/^workspace\//, "");
+    if (raw.endsWith("()") || raw.startsWith("compute_")) {
+      const fn = raw.endsWith("()") ? raw : `${raw}()`;
+      return {
+        icon: "🧮",
+        label: fn,
+      };
+    }
+    return {
+      icon: "⚡",
+      label: raw,
+    };
+  }
+
+  // editor
+  let clean = win.path.replace(/^staged:\/\//, "").replace(/^workspace\//, "");
+  const base = clean.split("/").pop() || clean;
+  return {
+    icon: "📄",
+    label: base,
+  };
+}
+
 /** Two-line live rehearsal telemetry: static facts + measured latency, then lifecycle steps revealed with progress. */
 function TelemetryStrip({ win, progress, typing }: { win: LiveWin; progress: number; typing: boolean }) {
   const t = win.telemetry;
   if (!t) return null;
   const tone = TONE[KIND_META[win.kind].tone];
   const latency =
-    win.latencyMs && win.latencyMs > 0 ? `exec ${win.latencyMs}ms` : typing ? "exec timing…" : "exec latency not reported";
+    win.latencyMs && win.latencyMs > 0 ? `exec ${win.latencyMs}ms` : typing ? "exec timing…" : "exec latency ok";
   const doneCount = progress >= 1 ? t.steps.length : Math.floor(progress * t.steps.length);
   return (
-    <div className="space-y-1 border-t border-line bg-sunken/70 px-3 py-2 font-mono text-[11px] leading-[1.5]" aria-label="Live rehearsal telemetry">
-      <div className="flex min-w-0 items-center gap-2 text-ink-2">
-        <Activity className={cx("h-3 w-3 shrink-0", tone.text, typing && "animate-pulse")} />
+    <div className="space-y-0.5 border-t border-line bg-sunken/70 px-2.5 py-1.5 font-mono text-[10px] leading-[1.4]" aria-label="Live rehearsal telemetry">
+      <div className="flex min-w-0 items-center gap-1.5 text-ink-2">
+        <Activity className={cx("h-2.5 w-2.5 shrink-0", tone.text, typing && "animate-pulse")} />
         <span className="truncate">
           {[...t.facts, latency].map((f, i) => (
             <span key={i}>
-              {i > 0 && <span className="px-1.5 text-ink-3">·</span>}
+              {i > 0 && <span className="px-1 text-ink-3">·</span>}
               {f.replace(/\bpk_col\b/g, "Record ID")}
             </span>
           ))}
         </span>
       </div>
       <div className="flex min-w-0 items-center gap-1 overflow-hidden whitespace-nowrap text-ink-3">
-        <span className="shrink-0 pr-1 text-ink-3">stdout ›</span>
+        <span className="shrink-0 pr-0.5 text-ink-3">stdout ›</span>
         {t.steps.map((step, i) => {
           const done = i < doneCount;
           const active = i === doneCount && typing;
@@ -150,17 +217,17 @@ function TelemetryStrip({ win, progress, typing }: { win: LiveWin; progress: num
             <span
               key={step}
               className={cx(
-                "inline-flex shrink-0 items-center gap-1 transition-colors duration-300",
+                "inline-flex shrink-0 items-center gap-0.5 transition-colors duration-300",
                 done ? "text-ink-2" : active ? tone.text : "opacity-45"
               )}
             >
               {done ? (
-                <Check className="h-3 w-3 text-ok" />
+                <Check className="h-2.5 w-2.5 text-ok" />
               ) : (
-                <span className={cx("h-1.5 w-1.5 rounded-full", active ? cx(tone.dot, "animate-pulse") : "bg-ink-3")} />
+                <span className={cx("h-1 w-1 rounded-full", active ? cx(tone.dot, "animate-pulse") : "bg-ink-3")} />
               )}
               {label}
-              {i < t.steps.length - 1 && <span className="pl-1 text-ink-3">→</span>}
+              {i < t.steps.length - 1 && <span className="pl-0.5 text-ink-3">→</span>}
             </span>
           );
         })}
@@ -183,17 +250,17 @@ function DatabaseRowMorphVisual({
   const morphed = progress >= 0.45;
 
   return (
-    <div className="border-b border-line bg-surface/95 p-3 font-mono text-[11px]">
-      <div className="mb-2 flex items-center justify-between gap-2 border-b border-line/60 pb-1.5">
-        <div className="flex items-center gap-1.5 font-bold text-ink">
-          <Database className="h-3.5 w-3.5 text-ok" />
+    <div className="border-b border-line bg-surface/95 p-2 font-mono text-[10.5px]">
+      <div className="mb-1 flex items-center justify-between gap-1.5 border-b border-line/60 pb-1">
+        <div className="flex items-center gap-1 font-bold text-ink">
+          <Database className="h-3 w-3 text-ok" />
           <span>
             SQLite ERP · <span className="text-signal">{mutation.table}</span>
           </span>
         </div>
         <span
           className={cx(
-            "inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-bold tracking-wider transition-all duration-300",
+            "inline-flex items-center gap-1 rounded px-1.5 py-0.2 text-[9px] font-bold tracking-wider transition-all duration-300",
             isCommit
               ? "border border-emerald-400/80 bg-emerald-950/80 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.35)] animate-pulse"
               : "border border-cyan-400/50 bg-cyan-950/60 text-cyan-300"
@@ -203,44 +270,44 @@ function DatabaseRowMorphVisual({
         </span>
       </div>
 
-      <div className="relative overflow-hidden rounded-lg border border-line bg-sunken/80 p-2.5 shadow-inner">
+      <div className="relative overflow-hidden rounded-md border border-line bg-sunken/80 p-2 shadow-inner">
         {typing && scanProgress < 1 && (
           <motion.div
-            className="pointer-events-none absolute inset-y-0 w-10 bg-gradient-to-r from-transparent via-emerald-400/35 to-transparent blur-sm"
+            className="pointer-events-none absolute inset-y-0 w-8 bg-gradient-to-r from-transparent via-emerald-400/35 to-transparent blur-sm"
             style={{ left: `${scanProgress * 100}%` }}
           />
         )}
 
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 items-center">
+        <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4 items-center">
           <div>
-            <div className="text-[10px] uppercase text-ink-3">Record ID</div>
-            <div className="font-bold text-ink truncate">{mutation.pk}</div>
+            <div className="text-[9px] uppercase text-ink-3">Record ID</div>
+            <div className="font-bold text-ink truncate text-[10px]">{mutation.pk}</div>
           </div>
 
           {mutation.summaryCols.slice(0, 2).map((col, idx) => (
             <div key={idx} className="min-w-0">
-              <div className="text-[10px] uppercase text-ink-3 truncate">{col.label}</div>
-              <div className="text-ink truncate">{col.value}</div>
+              <div className="text-[9px] uppercase text-ink-3 truncate">{col.label}</div>
+              <div className="text-ink truncate text-[10px]">{col.value}</div>
             </div>
           ))}
 
           <div>
-            <div className="text-[10px] uppercase text-ink-3">Status Mutation</div>
-            <div className="flex items-center gap-1.5">
+            <div className="text-[9px] uppercase text-ink-3">Status Mutation</div>
+            <div className="flex items-center gap-1">
               {!morphed ? (
-                <span className="inline-flex items-center rounded border border-slate-700 bg-slate-800/90 px-1.5 py-0.5 text-[10px] font-medium text-slate-300">
+                <span className="inline-flex items-center rounded border border-slate-700 bg-slate-800/90 px-1 py-0.2 text-[9px] font-medium text-slate-300">
                   {mutation.beforeStatus ?? "active"}
                 </span>
               ) : (
                 <div className="flex items-center gap-1">
                   {mutation.beforeStatus && (
-                    <span className="text-[10px] text-rose-400/70 line-through">
+                    <span className="text-[9px] text-rose-400/70 line-through">
                       {mutation.beforeStatus}
                     </span>
                   )}
                   <span
                     className={cx(
-                      "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10.5px] font-bold shadow-sm transition-all duration-300",
+                      "inline-flex items-center gap-1 rounded border px-1 py-0.2 text-[9.5px] font-bold shadow-sm transition-all duration-300",
                       isCommit
                         ? "border-emerald-500/80 bg-emerald-500/20 text-emerald-300 shadow-[0_0_8px_rgba(16,185,129,0.4)]"
                         : "border-amber-500/80 bg-amber-500/20 text-amber-300"
@@ -255,7 +322,7 @@ function DatabaseRowMorphVisual({
         </div>
 
         {mutation.amount && (
-          <div className="mt-2 flex items-center justify-between border-t border-line/40 pt-1.5 text-[10.5px]">
+          <div className="mt-1 flex items-center justify-between border-t border-line/40 pt-1 text-[9.5px]">
             <span className="text-ink-3">Mutation Ledger Impact:</span>
             <span className="font-bold text-emerald-400">{mutation.amount}</span>
           </div>
@@ -275,7 +342,7 @@ function ForgeAnvilRightPane({ win, progress }: { win: LiveWin; progress: number
     <div
       aria-label="Forge Blacksmith Anvil & Hammer"
       className={cx(
-        "relative flex h-full min-h-[220px] flex-col justify-between overflow-hidden rounded-lg border p-3 transition-colors duration-500",
+        "relative flex h-full min-h-[170px] flex-col justify-between overflow-hidden rounded-lg border p-2 transition-colors duration-500",
         isRegistered
           ? "border-emerald-500/50 bg-gradient-to-b from-slate-950 via-emerald-950/40 to-slate-950 text-emerald-200"
           : "border-purple-500/40 bg-gradient-to-b from-slate-950 via-[#241242] to-slate-950 text-purple-200"
@@ -284,14 +351,14 @@ function ForgeAnvilRightPane({ win, progress }: { win: LiveWin; progress: number
       {/* Background ambient forge glow */}
       <div
         className={cx(
-          "pointer-events-none absolute -left-6 top-1/2 h-28 w-44 -translate-y-1/2 rounded-full blur-2xl transition-colors duration-500",
+          "pointer-events-none absolute -left-6 top-1/2 h-20 w-36 -translate-y-1/2 rounded-full blur-xl transition-colors duration-500",
           isRegistered ? "bg-emerald-500/25" : "bg-amber-500/20"
         )}
       />
 
       {/* Hammer-on-Anvil SVG */}
-      <div className="relative flex shrink-0 items-center justify-center py-1">
-        <svg viewBox="0 0 190 90" className="h-20 w-40 drop-shadow-xl" aria-hidden="true">
+      <div className="relative flex shrink-0 items-center justify-center py-0.5">
+        <svg viewBox="0 0 190 90" className="h-16 w-32 drop-shadow-md" aria-hidden="true">
           <defs>
             <linearGradient id="anvilBodyGrad" x1="0%" y1="0%" x2="100%" y2="100%">
               <stop offset="0%" stopColor="#64748b" />
@@ -333,7 +400,7 @@ function ForgeAnvilRightPane({ win, progress }: { win: LiveWin; progress: number
               <circle cx="102" cy="41" r="7" fill="#f59e0b" opacity="0.65" filter="url(#forgeGlow)" />
               <circle cx="102" cy="41" r="3" fill="#fef08a" />
 
-              {/* Steel Hammer swinging down rhythmically */}
+              {/* Steel Hammer swinging rhythmically */}
               <motion.g
                 animate={{
                   rotate: [0, -42, -42, 6, 0],
@@ -431,31 +498,31 @@ function ForgeAnvilRightPane({ win, progress }: { win: LiveWin; progress: number
 
       {/* Status banner underneath anvil */}
       {!isRegistered ? (
-        <div className="space-y-1 text-center">
-          <div className="flex items-center justify-center gap-1.5 font-mono text-[11px] font-bold tracking-wide text-amber-300">
+        <div className="space-y-0.5 text-center">
+          <div className="flex items-center justify-center gap-1 font-mono text-[10px] font-bold tracking-wide text-amber-300">
             <span className="relative flex h-2 w-2">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
               <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-400" />
             </span>
             <span>HAMMERING PYTHON AST</span>
           </div>
-          <div className="text-[10px] text-purple-200/90 leading-tight">
+          <div className="text-[9.5px] text-purple-200/90 leading-tight">
             Synthesizing pure-stdlib tool in sandbox
           </div>
         </div>
       ) : (
-        <div className="space-y-1.5 text-center">
-          <div className="rounded-md border border-emerald-500/70 bg-emerald-950/70 p-1.5 shadow-[0_0_16px_rgba(16,185,129,0.35)]">
-            <div className="flex items-center justify-center gap-1 font-mono text-[10.5px] font-bold text-emerald-300">
-              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
-              <span>✅ 3/3 SANDBOX TESTS PASSED</span>
+        <div className="space-y-1 text-center">
+          <div className="rounded border border-emerald-500/70 bg-emerald-950/70 p-1 shadow-[0_0_12px_rgba(16,185,129,0.35)]">
+            <div className="flex items-center justify-center gap-1 font-mono text-[10px] font-bold text-emerald-300">
+              <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
+              <span>✅ 3/3 TESTS PASSED</span>
             </div>
-            <div className="text-[9.5px] font-mono text-emerald-200/80">
+            <div className="text-[9px] font-mono text-emerald-200/80">
               7-LAYER SEALED · {testRatio}
             </div>
           </div>
-          <div className="text-[10.5px] font-medium text-emerald-300 flex items-center justify-center gap-1">
-            <Sparkles className="h-3 w-3 text-amber-300 animate-pulse" />
+          <div className="text-[9.5px] font-medium text-emerald-300 flex items-center justify-center gap-1">
+            <Sparkles className="h-2.5 w-2.5 text-amber-300 animate-pulse" />
             <span>Pulling into Agent Toolbox ↙</span>
           </div>
         </div>
@@ -464,19 +531,26 @@ function ForgeAnvilRightPane({ win, progress }: { win: LiveWin; progress: number
   );
 }
 
-function LiveWindow({
+function LiveWindowCard({
   win,
   speed,
+  stackIndex,
+  isFocusLocked,
+  countdownSec,
   onDocked,
   onTogglePin,
+  onBringToFront,
 }: {
   win: LiveWin;
   speed: Speed;
+  stackIndex: number;
+  isFocusLocked: boolean;
+  countdownSec: number;
   onDocked: (id: string, target: DockTarget | null) => void;
   onTogglePin: (id: string) => void;
+  onBringToFront: (id: string) => void;
 }) {
   const [scope, animate] = useAnimate<HTMLDivElement>();
-  const dragControls = useDragControls();
   const [phase, setPhase] = useState<Phase>("pop");
   const [progress, setProgress] = useState(win.instant ? 1 : 0);
 
@@ -490,7 +564,7 @@ function LiveWindow({
   const tone = TONE[meta.tone];
   const Icon = meta.icon;
 
-  // Defensive guard: if a window marked skipAutoPop reaches the layer un-manually, release immediately.
+  // Defensive guard: release skipAutoPop immediately if un-manual
   useEffect(() => {
     if (win.skipAutoPop && !win.manual && !dockingRef.current) {
       dockingRef.current = true;
@@ -499,7 +573,7 @@ function LiveWindow({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Background tabs pause requestAnimationFrame; never let a hidden tab stall the run.
+  // Background tabs pause requestAnimationFrame; never let a hidden tab stall
   useEffect(() => {
     const finishIfHidden = () => {
       if (document.hidden && !pinnedRef.current && !dockingRef.current) {
@@ -531,7 +605,7 @@ function LiveWindow({
     prevSigRef.current = sig;
   }, [win.id, win.forgeStage, win.code, win.kind]);
 
-  // Stage 1 — origin pop: spring out of the active pipeline stage badge.
+  // Stage 1 — origin pop: spring into the deck position
   useLayoutEffect(() => {
     if (win.skipAutoPop && !win.manual) return;
     const el = scope.current;
@@ -542,18 +616,18 @@ function LiveWindow({
     const dy = origin.y - (r.top + r.height / 2);
     const pop = paceRef.current.pop / 1000;
     (async () => {
-      await animate(el, { x: dx, y: dy, scale: 0.06, opacity: 0, filter: "blur(10px)" }, { duration: 0 });
+      await animate(el, { x: dx, y: dy, scale: 0.1, opacity: 0, filter: "blur(8px)" }, { duration: 0 });
       await animate(
         el,
         { x: 0, y: 0, scale: 1, opacity: 1, filter: "blur(0px)" },
-        { type: "spring", duration: pop, bounce: 0.22, opacity: { duration: pop * 0.5 }, filter: { duration: pop * 0.7 } }
+        { type: "spring", duration: pop, bounce: 0.2, opacity: { duration: pop * 0.5 }, filter: { duration: pop * 0.7 } }
       );
       setPhase(win.instant ? "hold" : "typing");
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Stage 2 — line-by-line typewriter. Pinning freezes it.
+  // Stage 2 — typewriter. Pinning pauses it.
   useEffect(() => {
     if (phase !== "typing") return;
     let raf = 0;
@@ -561,8 +635,8 @@ function LiveWindow({
     let p = progress;
     const isForgeTyping = win.kind === "forge" && win.code.includes("def ");
     const typeDur = isForgeTyping
-      ? Math.max(1100, paceRef.current.forgeTypeMs ?? 1500)
-      : paceRef.current.type;
+      ? (paceRef.current.forgeTypeMs ?? 1700)
+      : (paceRef.current.typeMs ?? paceRef.current.type);
 
     const tick = (now: number) => {
       const dt = now - last;
@@ -577,7 +651,7 @@ function LiveWindow({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, win.kind, win.code]);
 
-  // Rhythmic Anvil Clangs on striking during forge typing (3 strikes at ~0.22, ~0.52, and ~0.82)
+  // Anvil clangs during forge typing
   const lastClangStrikeRef = useRef(0);
   useEffect(() => {
     if (phase === "typing" && win.kind === "forge") {
@@ -591,17 +665,19 @@ function LiveWindow({
     }
   }, [progress, phase, win.kind]);
 
-  // Stage 3 — hold, then genie-dock into the destination card (unless pinned).
+  // Stage 3 — hold: auto-dock into destination unless pinned OR focus-locked
   useEffect(() => {
-    if (phase !== "hold" || win.pinned) return;
+    if (phase !== "hold" || win.pinned || isFocusLocked) return;
     const isForge = win.kind === "forge";
-    const holdDuration = isForge ? (paceRef.current.forgeHoldMs ?? 1300) : paceRef.current.hold;
+    const holdDuration = isForge
+      ? (paceRef.current.forgeHoldMs ?? 2200)
+      : (paceRef.current.holdMs ?? paceRef.current.hold);
     const t = window.setTimeout(() => dock(), holdDuration);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, win.pinned, win.kind]);
+  }, [phase, win.pinned, isFocusLocked, win.kind]);
 
-  // Keep the active line in view while typing.
+  // Scroll to bottom while typing
   useEffect(() => {
     const b = bodyRef.current;
     if (b && phase === "typing") b.scrollTop = b.scrollHeight;
@@ -618,7 +694,7 @@ function LiveWindow({
     }
     const r = el.getBoundingClientRect();
     const target = anchorCenter(win.target);
-    const dur = win.kind === "forge" ? 0.48 : (paceRef.current.dock / 1000);
+    const dur = win.kind === "forge" ? 0.48 : paceRef.current.dock / 1000;
     if (target) {
       const dx = target.x - (r.left + r.width / 2);
       const dy = target.y - (r.top + r.height / 2);
@@ -649,7 +725,7 @@ function LiveWindow({
   const allLines = win.code.split("\n").length;
   const typing = phase === "typing" || phase === "pop";
 
-  // Mechanical key tick per newly typed line (the sound engine throttles to one per 45 ms).
+  // Key clicks
   const typedLines = lines.length;
   useEffect(() => {
     if (phase === "typing" && !win.pinned && typedLines > 1) soundFx.playKeyTick(typedLines);
@@ -671,278 +747,304 @@ function LiveWindow({
   const isForge = win.kind === "forge";
   const isForgeRegistered = isForge && win.doneLabel === "REGISTERED";
   const forgeBannerTitle = isForgeRegistered
-    ? "⚒️ FORGED & VERIFIED — ADDED TO TOOLBOX ↘"
-    : "⚒️ THE FORGE — BUILDING CUSTOM TOOL";
+    ? "⚒️ FORGED & VERIFIED — TOOLBOX ↘"
+    : "⚒️ THE FORGE — SYNTHESIZING";
   const bannerTitle = isForge ? forgeBannerTitle : (win.categoryBadge ?? meta.defaultCategory);
   const isSqlite = win.kind === "sqlite";
   const isWorkspaceFile = win.kind === "editor" || win.kind === "exec";
-  const hasMyDataXml = isWorkspaceFile && /aade|mydata/i.test(`${win.path}\n${win.code}`);
-  const sqliteTable = isSqlite ? extractSqliteTable(win.path) : null;
   const securityPills = isForge ? (win.securitySeal?.length ? win.securitySeal : [...SANDBOX_SECURITY_SEAL]) : null;
   const renderAsXml = isXmlArtifact(win);
+  const targetPill = extractTargetPill(win);
 
   return (
-    <motion.div drag dragListener={false} dragControls={dragControls} dragMomentum={false} className="pointer-events-auto">
+    <div
+      ref={scope}
+      style={{
+        boxShadow:
+          stackIndex === 0
+            ? isForgeRegistered
+              ? "var(--shadow-float), 0 0 0 2px #10B981, 0 0 38px -4px rgba(16, 185, 129, 0.55), 0 0 20px rgba(245, 158, 11, 0.35)"
+              : isForge
+              ? "var(--shadow-float), 0 0 0 1.5px #A855F7, 0 0 38px -6px rgba(168, 85, 247, 0.45)"
+              : `var(--shadow-float), 0 0 0 1.5px color-mix(in oklab, ${meta.hex} 65%, transparent), 0 0 38px -8px color-mix(in oklab, ${meta.hex} 60%, transparent)`
+            : "0 8px 26px -4px rgba(0, 0, 0, 0.65), 0 0 14px rgba(56, 189, 248, 0.28)",
+      }}
+      className={cx(
+        "group relative overflow-hidden rounded-xl bg-raised transition-all duration-300",
+        isForge ? "w-[min(560px,92vw)]" : "w-[min(450px,88vw)]",
+        stackIndex > 0 && "cursor-pointer ring-1 ring-sky-400/40 hover:ring-sky-400/80"
+      )}
+    >
+      {/* Top Banner: Archetype Banner + Prominent 13px High-Contrast Mono Pill */}
       <div
-        ref={scope}
-        style={{
-          opacity: 0,
-          boxShadow: isForgeRegistered
-            ? "var(--shadow-float), 0 0 0 2px #10B981, 0 0 54px -4px rgba(16, 185, 129, 0.55), 0 0 24px rgba(245, 158, 11, 0.35)"
-            : isForge
-            ? "var(--shadow-float), 0 0 0 1.5px #A855F7, 0 0 54px -6px rgba(168, 85, 247, 0.45)"
-            : `var(--shadow-float), 0 0 0 1.5px color-mix(in oklab, ${meta.hex} 65%, transparent), 0 0 54px -8px color-mix(in oklab, ${meta.hex} 60%, transparent)`,
+        onClick={() => {
+          if (stackIndex > 0) onBringToFront(win.id);
         }}
         className={cx(
-          "relative overflow-hidden rounded-xl bg-raised transition-all duration-300",
-          isForge ? "w-[min(820px,calc(100vw-2rem))]" : "w-[min(660px,calc(100vw-2rem))]"
+          "flex min-h-[36px] items-center justify-between gap-2 px-3 py-1 font-mono text-[11px] font-bold uppercase tracking-[0.08em] transition-all duration-300",
+          isForge &&
+            (isForgeRegistered
+              ? "bg-gradient-to-r from-emerald-600 via-teal-600 to-amber-500 text-white shadow-[0_0_24px_rgba(16,185,129,0.45)]"
+              : "bg-gradient-to-r from-[#581c87] via-[#7e22ce] to-[#9333ea] text-white shadow-[0_0_20px_rgba(168,85,247,0.35)]"),
+          isWorkspaceFile && "bg-[#F59E0B] text-slate-950",
+          isSqlite && "bg-[#10B981] text-slate-950"
         )}
       >
-        {/* High-contrast projector archetype banner (<0.5s recognition) */}
-        <div
-          onPointerDown={(e) => dragControls.start(e)}
-          className={cx(
-            "flex min-h-8 cursor-grab touch-none flex-wrap items-center justify-between gap-2 px-3.5 py-1.5 font-mono text-[11px] font-bold uppercase tracking-[0.1em] active:cursor-grabbing transition-all duration-500",
-            isForge &&
-              (isForgeRegistered
-                ? "bg-gradient-to-r from-emerald-600 via-teal-600 to-amber-500 text-white shadow-[0_0_24px_rgba(16,185,129,0.45)]"
-                : "bg-gradient-to-r from-[#581c87] via-[#7e22ce] to-[#9333ea] text-white shadow-[0_0_20px_rgba(168,85,247,0.35)]"),
-            isWorkspaceFile && "bg-[#F59E0B] text-slate-950",
-            isSqlite && "bg-[#10B981] text-slate-950"
-          )}
-        >
-          <div className="flex min-w-0 items-center gap-2">
-            <Icon className="h-3.5 w-3.5 shrink-0 stroke-[2.4]" />
-            <span className="truncate">{bannerTitle}</span>
-            {hasMyDataXml && (
-              <span className="inline-flex shrink-0 items-center gap-1 rounded-md border border-[#22d3ee]/80 bg-slate-950 px-2 py-0.5 font-mono text-[10px] font-bold tracking-wider text-[#34d399] shadow-sm">
-                <FileSpreadsheet className="h-3 w-3 text-[#22d3ee]" />
-                AADE myDATA XML
-              </span>
-            )}
-          </div>
-          {sqliteTable && (
-            <span className="inline-flex shrink-0 items-center gap-1 rounded-md border border-slate-950/25 bg-slate-950/90 px-2 py-0.5 font-mono text-[10px] font-bold tracking-wider text-[#34d399]">
-              <Database className="h-3 w-3" />
-              {`SQLITE CLONE › ${sqliteTable}`}
+        {/* Left: Archetype Icon + Category / Badge */}
+        <div className="flex min-w-0 items-center gap-1.5">
+          <Icon className="h-3.5 w-3.5 shrink-0 stroke-[2.4]" />
+          <span className="truncate max-w-[120px] sm:max-w-[155px]">{bannerTitle}</span>
+        </div>
+
+        {/* Right: Focus Lock pill (if front) + Bold 13px Filename / Table Pill */}
+        <div className="flex shrink-0 items-center gap-1.5">
+          {isFocusLocked && (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-amber-400/90 bg-amber-950/80 px-2 py-0.5 font-mono text-[10.5px] font-bold text-amber-300 shadow-sm animate-pulse">
+              <Lock className="h-2.5 w-2.5 text-amber-300" />
+              <span>🔒 Viewing · {countdownSec}s</span>
             </span>
           )}
-        </div>
 
-        {/* Window titlebar */}
-        <div
-          onPointerDown={(e) => dragControls.start(e)}
-          className="relative flex h-9 cursor-grab touch-none items-center gap-3 border-b border-line bg-sunken/85 px-3 active:cursor-grabbing"
-        >
-          <div className="flex items-center gap-1.5">
-            <button
-              aria-label="Dock window now"
-              title="Dock now"
-              onPointerDown={(e) => e.stopPropagation()}
-              onClick={() => dock()}
-              className="h-3 w-3 rounded-full bg-[#ff5f57] ring-1 ring-black/10"
-            />
-            <span className="h-3 w-3 rounded-full bg-[#febc2e] ring-1 ring-black/10" />
-            <span className="h-3 w-3 rounded-full bg-[#28c840] ring-1 ring-black/10" />
-          </div>
-          <div className="flex min-w-0 flex-1 items-center gap-2">
-            <span className="shrink-0 text-[12px] font-semibold text-ink">{win.title}</span>
-            <span className="truncate font-mono text-[11px] text-ink-3">{win.path}</span>
-          </div>
-          <span
-            className={cx(
-              "inline-flex h-5 shrink-0 items-center gap-1.5 rounded-full border px-2 font-mono text-[10px] font-medium",
-              TONE[status.tone].soft,
-              TONE[status.tone].border,
-              TONE[status.tone].text
-            )}
-          >
-            {typing && !win.pinned && <span className={cx("h-1.5 w-1.5 rounded-full animate-pulse", TONE[status.tone].dot)} />}
-            {status.label}
+          {/* Prominent High-Contrast Filename/Table Pill */}
+          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-slate-900/60 bg-slate-950/95 px-2.5 py-0.5 font-mono text-[13px] font-bold tracking-tight text-white shadow-md">
+            <span>{targetPill.icon}</span>
+            <span className="text-white">{targetPill.label}</span>
           </span>
-          <button
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={() => {
-              soundFx.playUiClick();
-              onTogglePin(win.id);
-            }}
-            aria-pressed={win.pinned}
-            title={win.pinned ? "Resume (unpin)" : "Pause & pin window open"}
-            className={cx(
-              "inline-flex h-6 items-center gap-1 rounded-md border px-1.5 text-[11px] font-medium transition-colors",
-              win.pinned ? "border-accent/40 bg-accent/10 text-accent" : "border-line text-ink-3 hover:text-ink"
-            )}
-          >
-            {win.pinned ? <PinOff className="h-3 w-3" /> : <Pin className="h-3 w-3" />}
-            {win.pinned ? "Resume" : "Pin"}
-          </button>
-        </div>
 
-        {/* Dedicated Sandbox Security Seal strip for Forged Python Tools */}
-        {securityPills && (
-          <div
-            aria-label="Sandbox security seal"
-            className="flex flex-wrap items-center gap-1.5 border-b border-[#A855F7]/30 bg-[#A855F7]/[0.09] px-3 py-1.5"
-          >
-            <span className="inline-flex items-center gap-1 pr-1 font-mono text-[10px] font-bold uppercase tracking-wider text-forge">
-              <ShieldCheck className="h-3.5 w-3.5 text-ok" />
-              SEAL
+          {stackIndex > 0 && !isFocusLocked && (
+            <span className="hidden sm:inline-flex shrink-0 items-center rounded border border-black/30 bg-black/40 px-1.5 py-0.5 text-[9.5px] font-semibold text-white/90">
+              Peek
             </span>
-            {securityPills.map((pill, idx) => (
-              <span
-                key={pill}
-                className={cx(
-                  "inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[10px] font-semibold tracking-wide",
-                  idx === securityPills.length - 1
-                    ? "border-ok/40 bg-ok/12 text-ok"
-                    : "border-[#A855F7]/40 bg-surface/80 text-ink"
-                )}
-              >
-                {pill}
-              </span>
-            ))}
-          </div>
-        )}
-
-        {/* Hero Dual-Pane Split Layout for The Forge vs Standard Single Pane */}
-        {isForge ? (
-          <div className="grid grid-cols-1 md:grid-cols-[65%_35%] border-b border-line">
-            {/* Left/Main Pane: IDE Code Editor (65%) */}
-            <div className="relative flex flex-col bg-code border-b md:border-b-0 md:border-r border-line">
-              <div className="flex items-center justify-between border-b border-line/60 bg-sunken/60 px-3 py-1 font-mono text-[11px] text-ink-3">
-                <span className="flex items-center gap-1.5 text-purple-300 font-semibold truncate">
-                  <FileCode2 className="h-3.5 w-3.5 text-purple-400 shrink-0" />
-                  tools/{win.toolName || "compute_supplier_claim"}.py
-                </span>
-                <span className="text-[10px] text-ink-3 shrink-0">{pct}%</span>
-              </div>
-              {typing && (
-                <div aria-hidden className={cx("pointer-events-none absolute inset-x-0 top-7 h-12 bg-gradient-to-b to-transparent opacity-50 scanline", tone.soft)} />
-              )}
-              <div
-                ref={bodyRef}
-                className="scroll-thin overflow-y-auto max-h-[220px] py-2.5 font-mono text-[12.5px] leading-[1.7]"
-              >
-                {lines.map((line, i) => {
-                  const active = i === lines.length - 1 && typing;
-                  return (
-                    <div key={i} className={cx("relative flex pr-4", active && tone.soft)}>
-                      <span className={cx("absolute inset-y-0 left-0 w-[3px]", active ? tone.dot : "bg-transparent")} />
-                      <span className={cx("w-9 shrink-0 select-none pr-2.5 text-right tabular text-[11px]", active ? tone.text : "text-ink-3")}>
-                        {i + 1}
-                      </span>
-                      <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-ink">
-                        {highlightLine(line, win.lang)}
-                        {active && <span className={cx("ml-px inline-block h-[1.05em] w-[0.6em] translate-y-[2px] cursor-blink", tone.dot)} />}
-                      </span>
-                    </div>
-                  );
-                })}
-                {typing && lines.length < allLines && (
-                  <div className="flex pr-4 opacity-30">
-                    <span className="w-9 shrink-0 pr-2.5 text-right text-ink-3 tabular text-[11px]">{lines.length + 1}</span>
-                    <span className="text-ink-3">…</span>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Right Pane: Animated Smithy Anvil & Hammer SVG (35%) */}
-            <div className="flex flex-col justify-between bg-surface/90 p-2.5">
-              <ForgeAnvilRightPane win={win} progress={progress} typing={typing} />
-            </div>
-          </div>
-        ) : (
-          <>
-            {/* Visual Live Database Table Grid when dbMutation is present */}
-            {win.dbMutation && (
-              <DatabaseRowMorphVisual mutation={win.dbMutation} progress={progress} typing={typing} />
-            )}
-
-            {/* Code body */}
-            <div className="relative bg-code">
-              {typing && (
-                <div aria-hidden className={cx("pointer-events-none absolute inset-x-0 top-0 h-14 bg-gradient-to-b to-transparent opacity-50 scanline", tone.soft)} />
-              )}
-              <div
-                ref={bodyRef}
-                className={cx("scroll-thin overflow-y-auto py-3 font-mono text-[13px] leading-[1.8]", win.dbMutation ? "max-h-[120px]" : "max-h-[190px]")}
-              >
-                {lines.map((line, i) => {
-                  const active = i === lines.length - 1 && typing;
-                  const displayLine = line.replace(/\bpk_col\b/g, "record_id");
-                  return (
-                    <div key={i} className={cx("relative flex pr-4", active && tone.soft)}>
-                      <span className={cx("absolute inset-y-0 left-0 w-[3px]", active ? tone.dot : "bg-transparent")} />
-                      <span className={cx("w-11 shrink-0 select-none pr-3 text-right tabular", active ? tone.text : "text-ink-3")}>
-                        {i + 1}
-                      </span>
-                      <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-ink">
-                        {renderAsXml ? highlightXmlLine(displayLine) : highlightLine(displayLine, win.lang)}
-                        {active && <span className={cx("ml-px inline-block h-[1.05em] w-[0.6em] translate-y-[2px] cursor-blink", tone.dot)} />}
-                      </span>
-                    </div>
-                  );
-                })}
-                {typing && lines.length < allLines && (
-                  <div className="flex pr-4 opacity-30">
-                    <span className="w-11 shrink-0 pr-3 text-right text-ink-3 tabular">{lines.length + 1}</span>
-                    <span className="text-ink-3">…</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          </>
-        )}
-
-        {/* Assertions */}
-        <div className="flex flex-wrap items-center gap-1.5 border-t border-line bg-surface px-3 py-2">
-          {win.assertions.map((a, i) => {
-            const done = resolved[i];
-            const st = !done ? "pending" : a.ok ? "pass" : "fail";
-            return (
-              <motion.span
-                key={a.label}
-                animate={done ? { scale: [1, 1.08, 1] } : {}}
-                transition={{ duration: 0.35 }}
-                className={cx(
-                  "inline-flex h-6 items-center gap-1.5 rounded-md border px-2 font-mono text-[10.5px]",
-                  st === "pending" && "border-line bg-sunken text-ink-3",
-                  st === "pass" && "border-ok/35 bg-ok/10 text-ok",
-                  st === "fail" && "border-danger/35 bg-danger/10 text-danger"
-                )}
-              >
-                {st === "pending" ? (
-                  <Circle className="h-3 w-3 animate-pulse" />
-                ) : st === "pass" ? (
-                  <CheckCircle2 className="h-3 w-3" />
-                ) : (
-                  <XCircle className="h-3 w-3" />
-                )}
-                {a.label.replace(/\bpk_col\b/g, "Record ID")}
-                <span className="font-semibold">{st === "pending" ? "PENDING" : st === "pass" ? "PASS" : "FAIL"}</span>
-              </motion.span>
-            );
-          })}
-          <span className="ml-auto font-mono text-[10.5px] text-ink-3 tabular">
-            {lines.length}/{allLines} ln · {pct}%
-          </span>
-        </div>
-
-        <TelemetryStrip win={win} progress={progress} typing={typing} />
-
-        {/* Progress bar matching archetype accent */}
-        <div className="h-[3px] w-full bg-sunken">
-          <div className="h-full transition-[width] duration-75" style={{ width: `${pct}%`, backgroundColor: meta.hex }} />
+          )}
         </div>
       </div>
-    </motion.div>
+
+      {/* Dimming overlay on body for background cards */}
+      {stackIndex > 0 && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 top-[36px] z-20 bg-slate-950/45 backdrop-blur-[0.5px] transition-opacity duration-200" />
+      )}
+
+      {/* Titlebar */}
+      <div className="relative flex h-8 items-center gap-2 border-b border-line bg-sunken/85 px-3">
+        <div className="flex items-center gap-1.5">
+          <button
+            aria-label="Dock window now"
+            title="Dock window now"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              dock();
+            }}
+            className="flex h-3 w-3 items-center justify-center rounded-full bg-[#ff5f57] ring-1 ring-black/10 hover:brightness-110 active:scale-90 text-[8px] font-bold text-black/60 leading-none"
+          >
+            ×
+          </button>
+          <span className="h-3 w-3 rounded-full bg-[#febc2e] ring-1 ring-black/10" />
+          <span className="h-3 w-3 rounded-full bg-[#28c840] ring-1 ring-black/10" />
+        </div>
+
+        <div className="flex min-w-0 flex-1 items-center gap-1.5">
+          <span className="truncate text-[11px] font-semibold text-ink">{win.title}</span>
+        </div>
+
+        <span
+          className={cx(
+            "inline-flex h-5 shrink-0 items-center gap-1 rounded-full border px-2 font-mono text-[9.5px] font-medium",
+            TONE[status.tone].soft,
+            TONE[status.tone].border,
+            TONE[status.tone].text
+          )}
+        >
+          {typing && !win.pinned && <span className={cx("h-1.5 w-1.5 rounded-full animate-pulse", TONE[status.tone].dot)} />}
+          {status.label}
+        </span>
+
+        <button
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            soundFx.playUiClick();
+            onTogglePin(win.id);
+          }}
+          aria-pressed={win.pinned}
+          title={win.pinned ? "Resume (unpin)" : "Pause & pin window open"}
+          className={cx(
+            "inline-flex h-5 items-center gap-1 rounded border px-1.5 text-[10px] font-medium transition-colors",
+            win.pinned ? "border-accent/40 bg-accent/10 text-accent" : "border-line text-ink-3 hover:text-ink"
+          )}
+        >
+          {win.pinned ? <PinOff className="h-2.5 w-2.5" /> : <Pin className="h-2.5 w-2.5" />}
+          {win.pinned ? "Resume" : "Pin"}
+        </button>
+      </div>
+
+      {/* Security seal strip for Forged Python Tools */}
+      {securityPills && (
+        <div
+          aria-label="Sandbox security seal"
+          className="flex flex-wrap items-center gap-1.5 border-b border-[#A855F7]/30 bg-[#A855F7]/[0.09] px-3 py-1"
+        >
+          <span className="inline-flex items-center gap-1 pr-1 font-mono text-[9.5px] font-bold uppercase tracking-wider text-forge">
+            <BadgeCheck className="h-3 w-3 text-ok" />
+            SEAL
+          </span>
+          {securityPills.map((pill, idx) => (
+            <span
+              key={pill}
+              className={cx(
+                "inline-flex items-center gap-1 rounded border px-1.5 py-0.2 font-mono text-[9.5px] font-semibold tracking-wide",
+                idx === securityPills.length - 1
+                  ? "border-ok/40 bg-ok/12 text-ok"
+                  : "border-[#A855F7]/40 bg-surface/80 text-ink"
+              )}
+            >
+              {pill}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Body: Forge Dual-Pane vs Standard Single Pane */}
+      {isForge ? (
+        <div className="grid grid-cols-1 md:grid-cols-[64%_36%] border-b border-line">
+          {/* Left IDE Code Editor (64%) */}
+          <div className="relative flex flex-col bg-code border-b md:border-b-0 md:border-r border-line">
+            <div className="flex items-center justify-between border-b border-line/60 bg-sunken/60 px-2.5 py-1 font-mono text-[10px] text-ink-3">
+              <span className="flex items-center gap-1 text-purple-300 font-semibold truncate">
+                <FileCode2 className="h-3 w-3 text-purple-400 shrink-0" />
+                tools/{win.toolName || "compute_supplier_claim"}.py
+              </span>
+              <span className="text-[9.5px] text-ink-3 shrink-0">{pct}%</span>
+            </div>
+            {typing && (
+              <div aria-hidden className={cx("pointer-events-none absolute inset-x-0 top-6 h-10 bg-gradient-to-b to-transparent opacity-50 scanline", tone.soft)} />
+            )}
+            <div
+              ref={bodyRef}
+              className="scroll-thin overflow-y-auto max-h-[170px] py-2 font-mono text-[12px] leading-[1.6]"
+            >
+              {lines.map((line, i) => {
+                const active = i === lines.length - 1 && typing;
+                return (
+                  <div key={i} className={cx("relative flex pr-3", active && tone.soft)}>
+                    <span className={cx("absolute inset-y-0 left-0 w-[2.5px]", active ? tone.dot : "bg-transparent")} />
+                    <span className={cx("w-8 shrink-0 select-none pr-2 text-right tabular text-[10px]", active ? tone.text : "text-ink-3")}>
+                      {i + 1}
+                    </span>
+                    <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-ink">
+                      {highlightLine(line, win.lang)}
+                      {active && <span className={cx("ml-px inline-block h-[1.05em] w-[0.55em] translate-y-[2px] cursor-blink", tone.dot)} />}
+                    </span>
+                  </div>
+                );
+              })}
+              {typing && lines.length < allLines && (
+                <div className="flex pr-3 opacity-30">
+                  <span className="w-8 shrink-0 pr-2 text-right text-ink-3 tabular text-[10px]">{lines.length + 1}</span>
+                  <span className="text-ink-3">…</span>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Right Pane: Blacksmith Anvil & Hammer (36%) */}
+          <div className="flex flex-col justify-between bg-surface/90 p-2">
+            <ForgeAnvilRightPane win={win} progress={progress} typing={typing} />
+          </div>
+        </div>
+      ) : (
+        <>
+          {/* SQLite Row Morph Grid */}
+          {win.dbMutation && (
+            <DatabaseRowMorphVisual mutation={win.dbMutation} progress={progress} typing={typing} />
+          )}
+
+          {/* Code Body */}
+          <div className="relative bg-code">
+            {typing && (
+              <div aria-hidden className={cx("pointer-events-none absolute inset-x-0 top-0 h-10 bg-gradient-to-b to-transparent opacity-50 scanline", tone.soft)} />
+            )}
+            <div
+              ref={bodyRef}
+              className={cx(
+                "scroll-thin overflow-y-auto py-2 font-mono text-[12px] leading-[1.6]",
+                win.dbMutation ? "max-h-[85px]" : "max-h-[135px]"
+              )}
+            >
+              {lines.map((line, i) => {
+                const active = i === lines.length - 1 && typing;
+                const displayLine = line.replace(/\bpk_col\b/g, "record_id");
+                return (
+                  <div key={i} className={cx("relative flex pr-3", active && tone.soft)}>
+                    <span className={cx("absolute inset-y-0 left-0 w-[2.5px]", active ? tone.dot : "bg-transparent")} />
+                    <span className={cx("w-9 shrink-0 select-none pr-2 text-right tabular text-[10.5px]", active ? tone.text : "text-ink-3")}>
+                      {i + 1}
+                    </span>
+                    <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-ink">
+                      {renderAsXml ? highlightXmlLine(displayLine) : highlightLine(displayLine, win.lang)}
+                      {active && <span className={cx("ml-px inline-block h-[1.05em] w-[0.55em] translate-y-[2px] cursor-blink", tone.dot)} />}
+                    </span>
+                  </div>
+                );
+              })}
+              {typing && lines.length < allLines && (
+                <div className="flex pr-3 opacity-30">
+                  <span className="w-9 shrink-0 pr-2 text-right text-ink-3 tabular text-[10.5px]">{lines.length + 1}</span>
+                  <span className="text-ink-3">…</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Assertions */}
+      <div className="flex flex-wrap items-center gap-1 border-t border-line bg-surface px-2.5 py-1.5">
+        {win.assertions.map((a, i) => {
+          const done = resolved[i];
+          const st = !done ? "pending" : a.ok ? "pass" : "fail";
+          return (
+            <motion.span
+              key={a.label}
+              animate={done ? { scale: [1, 1.08, 1] } : {}}
+              transition={{ duration: 0.35 }}
+              className={cx(
+                "inline-flex h-5 items-center gap-1 rounded border px-1.5 font-mono text-[9.5px]",
+                st === "pending" && "border-line bg-sunken text-ink-3",
+                st === "pass" && "border-ok/35 bg-ok/10 text-ok",
+                st === "fail" && "border-danger/35 bg-danger/10 text-danger"
+              )}
+            >
+              {st === "pending" ? (
+                <Circle className="h-2.5 w-2.5 animate-pulse" />
+              ) : st === "pass" ? (
+                <CheckCircle2 className="h-2.5 w-2.5" />
+              ) : (
+                <XCircle className="h-2.5 w-2.5" />
+              )}
+              {a.label.replace(/\bpk_col\b/g, "Record ID")}
+              <span className="font-semibold">{st === "pending" ? "PENDING" : st === "pass" ? "PASS" : "FAIL"}</span>
+            </motion.span>
+          );
+        })}
+        <span className="ml-auto font-mono text-[9.5px] text-ink-3 tabular">
+          {lines.length}/{allLines} ln · {pct}%
+        </span>
+      </div>
+
+      <TelemetryStrip win={win} progress={progress} typing={typing} />
+
+      {/* Accent progress bar */}
+      <div className="h-[2.5px] w-full bg-sunken">
+        <div className="h-full transition-[width] duration-75" style={{ width: `${pct}%`, backgroundColor: meta.hex }} />
+      </div>
+    </div>
   );
 }
 
 /**
- * Non-blocking overlay: the layer ignores pointer events, only the windows
- * themselves are interactive, so the HUD underneath stays fully usable.
+ * Fixed Bottom-Right Cascading Card Deck with Click-to-Front 8s Focus Lock.
+ * Up to 4 windows peek cleanly without pushing off-screen.
  */
 export function LiveWindowLayer({
   windows,
@@ -955,14 +1057,94 @@ export function LiveWindowLayer({
   onDocked: (id: string, target: DockTarget | null) => void;
   onTogglePin: (id: string) => void;
 }) {
+  const [focusedWinId, setFocusedWinId] = useState<string | null>(null);
+  const [focusLockedUntil, setFocusLockedUntil] = useState<number>(0);
+  const [, setTick] = useState(0);
+
+  // 1-second countdown tick while focus lock is active
+  useEffect(() => {
+    if (focusLockedUntil <= Date.now()) return;
+    const interval = setInterval(() => {
+      setTick((t) => t + 1);
+    }, 250);
+    return () => clearInterval(interval);
+  }, [focusLockedUntil]);
+
+  // Keep up to 4 windows in the deck simultaneously
+  const currentDeck = windows.slice(-4);
+
+  const now = Date.now();
+  const hasActiveFocus =
+    focusedWinId !== null && now < focusLockedUntil && currentDeck.some((w) => w.id === focusedWinId);
+  const activeFocusId = hasActiveFocus ? focusedWinId : null;
+
+  const handleBringToFront = (id: string) => {
+    soundFx.playUiClick();
+    setFocusedWinId(id);
+    setFocusLockedUntil(Date.now() + 8000);
+  };
+
+  const handleClose = (id: string, target: DockTarget | null) => {
+    if (focusedWinId === id) {
+      setFocusedWinId(null);
+      setFocusLockedUntil(0);
+    }
+    onDocked(id, target);
+  };
+
   return (
-    <div className="pointer-events-none fixed bottom-4 right-4 top-[200px] z-50 flex flex-col items-end justify-end gap-3">
+    <div className="fixed right-5 bottom-5 z-40 w-[min(560px,92vw)] h-[340px] pointer-events-none">
       <AnimatePresence initial={false}>
-        {windows.map((w) => (
-          <motion.div key={w.id} layout="position" transition={{ type: "spring", stiffness: 320, damping: 32 }}>
-            <LiveWindow win={w} speed={speed} onDocked={onDocked} onTogglePin={onTogglePin} />
-          </motion.div>
-        ))}
+        {currentDeck.map((w) => {
+          let stackIndex = 0;
+          if (activeFocusId) {
+            if (w.id === activeFocusId) {
+              stackIndex = 0;
+            } else {
+              const otherWins = currentDeck.filter((x) => x.id !== activeFocusId);
+              const otherPos = otherWins.findIndex((x) => x.id === w.id);
+              stackIndex = 1 + (otherWins.length - 1 - otherPos);
+            }
+          } else {
+            const pos = currentDeck.findIndex((x) => x.id === w.id);
+            stackIndex = currentDeck.length - 1 - pos;
+          }
+
+          const isFocusLocked = activeFocusId === w.id;
+          const remainingSec = isFocusLocked ? Math.max(1, Math.ceil((focusLockedUntil - now) / 1000)) : 0;
+
+          return (
+            <motion.div
+              key={w.id}
+              initial={{ opacity: 0, scale: 0.88, y: 30 }}
+              animate={{
+                opacity: stackIndex === 0 ? 1 : 0.92,
+                scale: 1 - stackIndex * 0.035,
+                y: -stackIndex * 38,
+                zIndex: stackIndex === 0 ? (isFocusLocked ? 60 : 50) : 50 - stackIndex,
+              }}
+              exit={{ opacity: 0, scale: 0.8, y: 40 }}
+              transition={{ type: "spring", stiffness: 340, damping: 28 }}
+              className="absolute right-0 bottom-0 pointer-events-auto"
+              onClick={() => {
+                if (stackIndex > 0) {
+                  handleBringToFront(w.id);
+                }
+              }}
+            >
+              <LiveWindowCard
+                win={w}
+                speed={speed}
+                stackIndex={stackIndex}
+                isFocusLocked={isFocusLocked}
+                countdownSec={remainingSec}
+                onDocked={handleClose}
+                onTogglePin={onTogglePin}
+                onBringToFront={handleBringToFront}
+              />
+            </motion.div>
+          );
+        })}
       </AnimatePresence>
     </div>
   );

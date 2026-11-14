@@ -1,4 +1,12 @@
-import type { AnticipateOfferPayload, ApprovalNeededPayload, UiActionPayload } from "../contracts";
+import type {
+  AnticipateOfferPayload,
+  ApprovalNeededPayload,
+  OumiIrisGate,
+  OumiIrisIntent,
+  UiActionPayload,
+} from "../contracts";
+
+export type { OumiIrisGate, OumiIrisIntent } from "../contracts";
 
 export type BrandColor = "indigo" | "emerald" | "amber" | "rose" | "cyan" | "violet";
 
@@ -45,11 +53,23 @@ export interface WorkspaceState {
     claim_id: string;
     claim_amount: number;
     counterparty: string;
-    turns: { speaker: "agent" | "counterparty" | "user"; text: string; audio_url?: string | null; ts: number }[];
+    turns: {
+      speaker: "agent" | "counterparty" | "user";
+      text: string;
+      audio_url?: string | null;
+      ts: number;
+      iris_intent?: OumiIrisIntent | null;
+      irisIntent?: OumiIrisIntent | null;
+    }[];
     selected_choice?: OperatorChoice | null;
     last_ui_action?: UiActionPayload | null;
     end?: { outcome: "accepted" | "escalated" | "rejected" | "no_answer"; agreed_amount?: number | null; summary: string } | null;
+    iris_gate?: OumiIrisGate | null;
+    irisGate?: OumiIrisGate | null;
   } | null;
+  iris_gate?: OumiIrisGate | null;
+  irisGate?: OumiIrisGate | null;
+  iris_usage?: { calls: number; input_tokens: number; output_tokens: number };
   latest_offer?: AnticipateOfferPayload | null;
   pending_offers: AnticipateOfferPayload[];
   metrics: {
@@ -124,6 +144,8 @@ export interface OperatorConsultTurn {
   text: string;
   audioUrl?: string | null;
   ts: number;
+  iris_intent?: OumiIrisIntent | null;
+  irisIntent?: OumiIrisIntent | null;
 }
 
 export interface OperatorConsultState {
@@ -142,6 +164,8 @@ export interface OperatorConsultState {
   activeSpeaker: "agent" | "counterparty" | "user" | null;
   selectedChoice: OperatorChoice | null;
   lastUiAction?: { action: string; label: string; ts: number } | null;
+  iris_gate?: OumiIrisGate | null;
+  irisGate?: OumiIrisGate | null;
   end: {
     outcome: "accepted" | "escalated" | "rejected" | "no_answer";
     agreed_amount?: number | null;

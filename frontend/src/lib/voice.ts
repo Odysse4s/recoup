@@ -204,6 +204,7 @@ export async function acquirePersistentMicStream(): Promise<MediaStream | null> 
         echoCancellation: true,
         noiseSuppression: true,
         autoGainControl: true,
+        channelCount: 1,
       },
     });
     stream.getAudioTracks().forEach((t) => {
@@ -455,15 +456,51 @@ function speakOnce(text: string, kind: string, hooks: SpeechHooks) {
             currentAudio = el;
             el.src = blobUrl;
             analyser = soundFx.attachVoiceAnalyser(el);
+            let safetyTimer: number | null = null;
+            const clearSafety = () => {
+              if (safetyTimer !== null) {
+                window.clearTimeout(safetyTimer);
+                safetyTimer = null;
+              }
+            };
+            const tightenSafety = () => {
+              if (Number.isFinite(el.duration) && el.duration > 0) {
+                clearSafety();
+                const remainingMs = Math.max(350, (el.duration - el.currentTime) * 1000 + 280);
+                safetyTimer = window.setTimeout(() => {
+                  clearSafety();
+                  done();
+                }, remainingMs);
+              }
+            };
+            el.onloadedmetadata = () => {
+              tightenSafety();
+            };
             el.onplay = () => {
               setSignal({ mode: "speaking", provider: "fal", analyser });
               hooks.onStart();
             };
             el.ontimeupdate = () => {
-              if (el.duration > 0) hooks.onProgress?.(el.currentTime / el.duration);
+              if (Number.isFinite(el.duration) && el.duration > 0) {
+                hooks.onProgress?.(el.currentTime / el.duration);
+                tightenSafety();
+              }
+              if (
+                (el.currentTime > 0.25 && el.paused && !el.seeking) ||
+                (el.duration > 0 && el.currentTime >= el.duration - 0.04)
+              ) {
+                clearSafety();
+                done();
+              }
             };
-            el.onended = done;
-            el.onerror = done;
+            el.onended = () => {
+              clearSafety();
+              done();
+            };
+            el.onerror = () => {
+              clearSafety();
+              done();
+            };
             await el.play();
             return;
           } catch (elErr) {
@@ -551,7 +588,7 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
           sharedMediaElement.pause();
           sharedMediaElement.currentTime = 0;
         } catch {}
-        sharedMediaElement.onplay = sharedMediaElement.ontimeupdate = sharedMediaElement.onended = sharedMediaElement.onerror = null;
+        sharedMediaElement.onplay = sharedMediaElement.ontimeupdate = sharedMediaElement.onended = sharedMediaElement.onerror = sharedMediaElement.onloadedmetadata = null;
         currentAudio = null;
       }
       if (blobUrlToRevoke) {
@@ -565,6 +602,14 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
         analyser = null;
       }
       endSignal("speaking");
+      sharedAudioContext?.resume().catch(() => undefined);
+      if (mobileCallOwnsAudio && warmMicStream) {
+        try {
+          warmMicStream.getAudioTracks().forEach((track) => {
+            track.enabled = true;
+          });
+        } catch {}
+      }
       hooks?.onEnd?.();
       resolve();
     };
@@ -597,6 +642,21 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
           currentAudio = el;
           el.src = blobUrl;
 
+          const tightenSafetyTimer = () => {
+            if (Number.isFinite(el.duration) && el.duration > 0) {
+              clearSafetyTimer();
+              const remainingMs = Math.max(350, (el.duration - el.currentTime) * 1000 + 280);
+              safetyTimer = window.setTimeout(() => {
+                clearSafetyTimer();
+                done();
+              }, remainingMs);
+            }
+          };
+
+          el.onloadedmetadata = () => {
+            tightenSafetyTimer();
+          };
+
           el.onplay = () => {
             setSignal({ mode: "speaking", provider: "fal", analyser: null });
             pulseVoice();
@@ -604,7 +664,17 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
           };
           el.ontimeupdate = () => {
             pulseVoice();
-            if (el.duration > 0) hooks?.onProgress?.(el.currentTime / el.duration);
+            if (Number.isFinite(el.duration) && el.duration > 0) {
+              hooks?.onProgress?.(el.currentTime / el.duration);
+              tightenSafetyTimer();
+            }
+            if (
+              (el.currentTime > 0.25 && el.paused && !el.seeking) ||
+              (el.duration > 0 && el.currentTime >= el.duration - 0.04)
+            ) {
+              clearSafetyTimer();
+              done();
+            }
           };
           el.onended = () => {
             clearSafetyTimer();
@@ -808,6 +878,14 @@ export function stopSpeaking() {
   cancelCurrent?.();
   chain = Promise.resolve();
   endSignal("speaking");
+  sharedAudioContext?.resume().catch(() => undefined);
+  if (mobileCallOwnsAudio && warmMicStream) {
+    try {
+      warmMicStream.getAudioTracks().forEach((track) => {
+        track.enabled = true;
+      });
+    } catch {}
+  }
 }
 
 /* ------------------------------------------------------------------------
@@ -919,6 +997,7 @@ export interface UseAutoVadOptions {
   onUtterance: (blob: Blob, mimeType: string, ext: string) => void;
   onPhaseChange?: (phase: AutoVadPhase) => void;
   onRms?: (rms: number) => void;
+  onBargeIn?: () => void;
 }
 
 export interface UseAutoVadReturn {
@@ -940,6 +1019,7 @@ export function useAutoVad({
   onUtterance,
   onPhaseChange,
   onRms,
+  onBargeIn,
 }: UseAutoVadOptions): UseAutoVadReturn {
   const [phase, setPhaseState] = useState<AutoVadPhase>("idle");
   const [rmsLevel, setRmsLevel] = useState(0);
@@ -955,6 +1035,8 @@ export function useAutoVad({
   onPhaseChangeRef.current = onPhaseChange;
   const onRmsRef = useRef(onRms);
   onRmsRef.current = onRms;
+  const onBargeInRef = useRef(onBargeIn);
+  onBargeInRef.current = onBargeIn;
 
   const agentSpeakingRef = useRef(agentSpeaking);
   agentSpeakingRef.current = agentSpeaking;
@@ -966,7 +1048,10 @@ export function useAutoVad({
   const speechStartAtRef = useRef<number>(0);
   const lastActiveSpeechAtRef = useRef<number>(0);
   const agentStoppedAtRef = useRef<number>(0);
+  const agentSpeechStartedAtRef = useRef<number>(0);
   const consecutiveSpeechFramesRef = useRef<number>(0);
+  const consecutiveBargeInFramesRef = useRef<number>(0);
+  const lastContextResumeAttemptAtRef = useRef<number>(0);
   const noiseFloorRef = useRef<number>(0.015);
   const calibrationFramesRef = useRef<number>(0);
   const discardCurrentRecordingRef = useRef<boolean>(false);
@@ -978,11 +1063,14 @@ export function useAutoVad({
     onPhaseChangeRef.current?.(next);
   }, []);
 
-  // Track when agent finishes speaking for the 280ms post-TTS cooldown
+  // Track when agent finishes speaking for the 220ms post-TTS cooldown, and track when agent starts speaking
   useEffect(() => {
     if (!agentSpeaking) {
       agentStoppedAtRef.current = performance.now();
+      consecutiveBargeInFramesRef.current = 0;
     } else {
+      agentSpeechStartedAtRef.current = performance.now();
+      consecutiveBargeInFramesRef.current = 0;
       // Recoup began speaking: if we were hearing or manually recording, abort recording to avoid echo
       manualRecordingRef.current = false;
       setManualRecording(false);
@@ -1117,7 +1205,7 @@ export function useAutoVad({
     try {
       sourceNode = ctx.createMediaStreamSource(stream);
       analyser = ctx.createAnalyser();
-      analyser.fftSize = 512;
+      analyser.fftSize = 1024;
       analyser.smoothingTimeConstant = 0.42;
       sourceNode.connect(analyser);
       analyserRef.current = analyser;
@@ -1128,8 +1216,62 @@ export function useAutoVad({
 
     setPhase("listening");
     const dataBuffer = new Float32Array(analyser.fftSize);
+    const freqBins = new Uint8Array(analyser.frequencyBinCount);
     let rafId: number | null = null;
     let running = true;
+
+    const startRecordingUtterance = (now: number) => {
+      if (recorderRef.current && recorderRef.current.state !== "inactive") {
+        try {
+          discardCurrentRecordingRef.current = true;
+          recorderRef.current.stop();
+        } catch {
+          // ignore
+        }
+      }
+
+      const { mimeType, ext } = pickRecorderMimeType();
+      chunksRef.current = [];
+      discardCurrentRecordingRef.current = false;
+      speechStartAtRef.current = now;
+      lastActiveSpeechAtRef.current = now;
+      manualRecordingRef.current = false;
+      hasSpokenInManualSessionRef.current = true;
+
+      try {
+        const rec = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+        rec.ondataavailable = (ev) => {
+          if (ev.data && ev.data.size > 0) {
+            chunksRef.current.push(ev.data);
+          }
+        };
+        rec.onstop = () => {
+          const wasManual = manualRecordingRef.current;
+          manualRecordingRef.current = false;
+          setManualRecording(false);
+          hasSpokenInManualSessionRef.current = false;
+
+          if (discardCurrentRecordingRef.current) {
+            chunksRef.current = [];
+            return;
+          }
+          const blob = new Blob(chunksRef.current, { type: rec.mimeType || mimeType || "audio/mp4" });
+          chunksRef.current = [];
+          const totalSpeechDuration = lastActiveSpeechAtRef.current - speechStartAtRef.current;
+          if (wasManual || (blob.size >= 600 && totalSpeechDuration >= 200)) {
+            onUtteranceRef.current(blob, rec.mimeType || mimeType, ext);
+          } else {
+            setPhase("listening");
+          }
+        };
+        recorderRef.current = rec;
+        rec.start(200);
+        setPhase("hearing");
+        pulseVoice();
+      } catch (recErr) {
+        console.warn("Auto-VAD: MediaRecorder start failed", recErr);
+      }
+    };
 
     const vadLoop = () => {
       if (!running) return;
@@ -1137,22 +1279,30 @@ export function useAutoVad({
       const now = performance.now();
       const isAgentSpeaking = agentSpeakingRef.current;
       const isMuted = mutedRef.current;
-      const isPostTtsCooldown = now - agentStoppedAtRef.current < 680;
 
-      // When Recoup is actively speaking or muted or in cooldown, pause VAD processing
-      if (isAgentSpeaking || isMuted || isPostTtsCooldown) {
+      // AudioContext state resume guard (throttled to at most once every 500ms)
+      if (ctx.state !== "running" && now - lastContextResumeAttemptAtRef.current > 500) {
+        lastContextResumeAttemptAtRef.current = now;
+        ctx.resume().catch(() => undefined);
+      }
+
+      if (isMuted) {
         consecutiveSpeechFramesRef.current = 0;
-        if (analyser) {
-          // Do not update voiceSignal with mic when agent is speaking
-          if (!isAgentSpeaking && signal.provider !== "fal") {
-            setSignal({ mode: "listening", provider: "mic", analyser });
-          }
-        }
+        consecutiveBargeInFramesRef.current = 0;
         rafId = requestAnimationFrame(vadLoop);
         return;
       }
 
-      // Read time-domain audio data to calculate RMS
+      const currentPhase = phaseRef.current;
+      const isPostTtsCooldown = !isAgentSpeaking && currentPhase === "listening" && (now - agentStoppedAtRef.current < 220);
+      if (isPostTtsCooldown) {
+        consecutiveSpeechFramesRef.current = 0;
+        consecutiveBargeInFramesRef.current = 0;
+        rafId = requestAnimationFrame(vadLoop);
+        return;
+      }
+
+      // Compute time-domain RMS
       analyser.getFloatTimeDomainData(dataBuffer);
       let sumSquares = 0;
       for (let i = 0; i < dataBuffer.length; i++) {
@@ -1165,77 +1315,78 @@ export function useAutoVad({
       setRmsLevel(rms);
       onRmsRef.current?.(rms);
 
-      // Keep VoiceOrb reactive to live microphone energy
+      // Compute Frequency-Domain Human Vocal Band Ratio
+      analyser.getByteFrequencyData(freqBins);
+      const sampleRate = ctx.sampleRate || 48000;
+      const binHz = sampleRate / analyser.fftSize;
+      let vocalEnergy = 0;
+      let totalEnergy = 0;
+      for (let i = 0; i < freqBins.length; i++) {
+        const freq = i * binHz;
+        const val = freqBins[i];
+        if (freq >= 80 && freq <= 8000) {
+          totalEnergy += val;
+          if (freq >= 300 && freq <= 3400) {
+            vocalEnergy += val;
+          }
+        }
+      }
+      const voiceBandRatio = vocalEnergy / (totalEnergy + 1e-6);
+
+      // Dynamic ambient noise floor calibration over initial frames (only while Recoup is not speaking)
+      if (!isAgentSpeaking && calibrationFramesRef.current < 40) {
+        calibrationFramesRef.current++;
+        noiseFloorRef.current = noiseFloorRef.current * 0.92 + Math.max(0.005, Math.min(0.06, rms)) * 0.08;
+      }
+      const noiseFloor = noiseFloorRef.current;
+
+      // When Recoup is speaking: Live Barge-In Gate
+      if (isAgentSpeaking) {
+        consecutiveSpeechFramesRef.current = 0;
+        const timeSinceSpeechStart = now - agentSpeechStartedAtRef.current;
+        // Ignore the first 350ms after speech starts to avoid initial speaker pop
+        if (timeSinceSpeechStart > 350) {
+          const bargeInRmsThresh = Math.max(0.042, noiseFloor * 3.5);
+          if (rms > bargeInRmsThresh && voiceBandRatio > 0.58) {
+            consecutiveBargeInFramesRef.current++;
+            if (consecutiveBargeInFramesRef.current >= 18) {
+              consecutiveBargeInFramesRef.current = 0;
+              stopSpeaking();
+              onBargeInRef.current?.();
+              startRecordingUtterance(now);
+            }
+          } else {
+            consecutiveBargeInFramesRef.current = Math.max(0, consecutiveBargeInFramesRef.current - 1);
+          }
+        } else {
+          consecutiveBargeInFramesRef.current = 0;
+        }
+
+        rafId = requestAnimationFrame(vadLoop);
+        return;
+      }
+
+      // Normal listening: keep VoiceOrb reactive to live microphone energy
       if (signal.mode !== "speaking") {
         setSignal({ mode: "listening", provider: "mic", analyser });
         if (rms > 0.02) pulseVoice();
       }
 
-      // Dynamic ambient noise floor calibration over initial frames
-      if (calibrationFramesRef.current < 40) {
-        calibrationFramesRef.current++;
-        noiseFloorRef.current = noiseFloorRef.current * 0.92 + Math.max(0.005, Math.min(0.06, rms)) * 0.08;
-      }
-
-      const noiseFloor = noiseFloorRef.current;
-      // Sensitive phone VAD thresholds for natural conversational phone speech
-      const speechStartThreshold = Math.max(0.012, noiseFloor * 1.8);
-      const silenceThreshold = Math.max(0.008, noiseFloor * 1.3);
-
-      const currentPhase = phaseRef.current;
-
       if (currentPhase === "listening") {
-        if (rms > speechStartThreshold) {
+        const normalSpeechThreshold = Math.max(0.014, noiseFloor * 1.9);
+        if (rms > normalSpeechThreshold && voiceBandRatio > 0.45) {
           consecutiveSpeechFramesRef.current++;
-          // ~100ms consecutive speech validation (~6 frames at 60Hz)
-          if (consecutiveSpeechFramesRef.current >= 6) {
+          if (consecutiveSpeechFramesRef.current >= 7) {
             consecutiveSpeechFramesRef.current = 0;
-            const { mimeType, ext } = pickRecorderMimeType();
-            chunksRef.current = [];
-            discardCurrentRecordingRef.current = false;
-            speechStartAtRef.current = now;
-            lastActiveSpeechAtRef.current = now;
-            manualRecordingRef.current = false;
-            hasSpokenInManualSessionRef.current = true;
-
-            try {
-              const rec = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-              rec.ondataavailable = (ev) => {
-                if (ev.data && ev.data.size > 0) {
-                  chunksRef.current.push(ev.data);
-                }
-              };
-              rec.onstop = () => {
-                const wasManual = manualRecordingRef.current;
-                manualRecordingRef.current = false;
-                setManualRecording(false);
-                hasSpokenInManualSessionRef.current = false;
-
-                if (discardCurrentRecordingRef.current) {
-                  chunksRef.current = [];
-                  return;
-                }
-                const blob = new Blob(chunksRef.current, { type: rec.mimeType || mimeType || "audio/mp4" });
-                chunksRef.current = [];
-                const totalSpeechDuration = lastActiveSpeechAtRef.current - speechStartAtRef.current;
-                if (wasManual || (blob.size >= 600 && totalSpeechDuration >= 200)) {
-                  onUtteranceRef.current(blob, rec.mimeType || mimeType, ext);
-                } else {
-                  setPhase("listening");
-                }
-              };
-              recorderRef.current = rec;
-              rec.start(200);
-              setPhase("hearing");
-            } catch (recErr) {
-              console.warn("Auto-VAD: MediaRecorder start failed", recErr);
-            }
+            startRecordingUtterance(now);
           }
         } else {
           consecutiveSpeechFramesRef.current = Math.max(0, consecutiveSpeechFramesRef.current - 1);
         }
       } else if (currentPhase === "hearing") {
-        if (rms >= speechStartThreshold) {
+        const speechActiveThreshold = Math.max(0.012, noiseFloor * 1.6);
+        const silenceThreshold = Math.max(0.008, noiseFloor * 1.2);
+        if (rms >= speechActiveThreshold) {
           hasSpokenInManualSessionRef.current = true;
           lastActiveSpeechAtRef.current = now;
         } else if (rms >= silenceThreshold && hasSpokenInManualSessionRef.current) {
