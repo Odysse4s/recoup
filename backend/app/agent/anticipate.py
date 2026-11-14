@@ -158,15 +158,14 @@ def gather_workspace_evidence(env: Env) -> str:
     if env.db_path.exists():
         with contextlib.closing(sqlite3.connect(env.db_path)) as conn:
             conn.row_factory = sqlite3.Row
-            tables = [
-                r[0]
-                for r in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-                ).fetchall()
-            ]
-            for t in tables:
+            table_rows = conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+            for row in table_rows:
+                t = row[0]
+                ddl = " ".join(str(row[1] or "").split())
                 rows = [dict(r) for r in conn.execute(f"SELECT * FROM {t} LIMIT 10").fetchall()]
-                parts.append(f"Table {t}: {json.dumps(rows)}")
+                parts.append(f"Table {t} ({ddl}): {json.dumps(rows)}")
     return "\n".join(parts)
 
 

@@ -130,7 +130,7 @@ class FakeProvider:
 
         # 1. Planner prompt (Contract Strategist)
         if "return strict json matching planpayload" in sys_low:
-            self.known_tables |= set(re.findall(r"^Table (\w+):", user_last, re.MULTILINE))
+            self.known_tables |= set(re.findall(r"^Table (\w+)\b", user_last, re.MULTILINE))
             goal = user_last.split("Goal:", 1)[-1].strip()
             if _is_anticipate_goal(goal):
                 ant = demo["anticipate"]
@@ -498,7 +498,10 @@ def _to_gemini_contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 name = str(block.get("name", ""))
                 if tid and name:
                     id_to_name[tid] = name
-                parts.append({"functionCall": {"name": name, "args": block.get("input", {})}})
+                fc_part: dict[str, Any] = {"functionCall": {"name": name, "args": block.get("input", {})}}
+                if block.get("thought_signature"):
+                    fc_part["thoughtSignature"] = block["thought_signature"]
+                parts.append(fc_part)
             elif btype == "tool_result":
                 tid = str(block.get("tool_use_id", ""))
                 name = id_to_name.get(tid, tid or "tool")
@@ -532,7 +535,7 @@ class GeminiProvider:
         self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
     ) -> LLMResponse:
         key = _cache_key(self.model, system, messages, tools)
-        cache_file = CACHE_DIR / f"{key}_v2.json"
+        cache_file = CACHE_DIR / f"{key}_v3.json"
         if self.use_cache:
             cached = _cache_read(cache_file)
             if cached is not None:
@@ -541,14 +544,20 @@ class GeminiProvider:
         api_key = os.getenv("GEMINI_API_KEY", "").strip()
         if not api_key:
             if os.getenv("LLM_FALLBACK_FAKE", "1") == "1":
-                return FakeProvider().complete(system, messages, tools)
+                fb = FakeProvider()
+                fb.turn = sum(1 for m in messages if m.get("role") == "assistant")
+                return fb.complete(system, messages, tools)
             raise RuntimeError("GEMINI_API_KEY is not set")
 
         max_output_tokens = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "8192"))
+        thinking_budget = int(os.getenv("GEMINI_THINKING_BUDGET", "512"))
+        gen_cfg: dict[str, Any] = {"maxOutputTokens": max_output_tokens}
+        if thinking_budget >= 0:
+            gen_cfg["thinkingConfig"] = {"thinkingBudget": thinking_budget}
         payload: dict[str, Any] = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": _to_gemini_contents(messages),
-            "generationConfig": {"maxOutputTokens": max_output_tokens},
+            "generationConfig": gen_cfg,
         }
         if tools:
             payload["tools"] = [
@@ -571,7 +580,9 @@ class GeminiProvider:
             data = _post_with_retry(url, {"x-goog-api-key": api_key}, payload)
         except Exception:
             if os.getenv("LLM_FALLBACK_FAKE", "1") == "1":
-                return FakeProvider().complete(system, messages, tools)
+                fb = FakeProvider()
+                fb.turn = sum(1 for m in messages if m.get("role") == "assistant")
+                return fb.complete(system, messages, tools)
             raise
 
         candidates = data.get("candidates") or []
@@ -591,12 +602,14 @@ class GeminiProvider:
                 fc = part["functionCall"]
                 name = str(fc.get("name", ""))
                 args = dict(fc.get("args") or {})
+                thought_sig = part.get("thoughtSignature") or part.get("thought_signature")
                 calls.append(
                     ToolCall(
-                        id=f"gem_{idx}_{name}",
+                        id=str(fc.get("id") or f"gem_{idx}_{name}"),
                         name=name,
                         args=args,
                         thought="".join(thought_texts) or "".join(texts) or None,
+                        thought_signature=str(thought_sig) if thought_sig else None,
                     )
                 )
 
@@ -767,7 +780,10 @@ def format_assistant_turn(resp: LLMResponse) -> dict[str, Any]:
     if resp.text:
         blocks.append({"type": "text", "text": resp.text})
     for c in resp.tool_calls:
-        blocks.append({"type": "tool_use", "id": c.id, "name": c.name, "input": c.args})
+        tool_block: dict[str, Any] = {"type": "tool_use", "id": c.id, "name": c.name, "input": c.args}
+        if c.thought_signature:
+            tool_block["thought_signature"] = c.thought_signature
+        blocks.append(tool_block)
     return {"role": "assistant", "content": blocks or [{"type": "text", "text": "(no output)"}]}
 
 
