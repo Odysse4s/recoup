@@ -77,6 +77,43 @@ function pickVoice(): SpeechSynthesisVoice | undefined {
   return voices.find((v) => v.lang?.startsWith("en") && v.name.includes("Natural")) ?? voices.find((v) => v.lang?.startsWith("en"));
 }
 
+function pickCounterpartyVoice(agentVoice?: SpeechSynthesisVoice): SpeechSynthesisVoice | undefined {
+  const voices = window.speechSynthesis?.getVoices() ?? [];
+  const preferred = [
+    "Microsoft Guy Online (Natural)",
+    "Microsoft Ryan Online (Natural)",
+    "Google UK English Male",
+    "Google UK English Female",
+    "Daniel",
+    "Alex",
+    "Aaron",
+    "Fred",
+  ];
+  for (const name of preferred) {
+    const v = voices.find((x) => x.name.includes(name) && x.name !== agentVoice?.name);
+    if (v) return v;
+  }
+  return voices.find((v) => v.lang?.startsWith("en") && v.name !== agentVoice?.name) ?? agentVoice;
+}
+
+async function tryRemoteTurnAudio(speaker: "agent" | "counterparty", text: string): Promise<HTMLAudioElement | null> {
+  try {
+    const res = await fetch("/api/voice/turn-audio", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ speaker, text }),
+    });
+    const type = res.headers.get("content-type") ?? "";
+    if (!res.ok || res.status === 204 || !type.startsWith("audio")) {
+      return null;
+    }
+    const blob = await res.blob();
+    return new Audio(URL.createObjectURL(blob));
+  } catch {
+    return null;
+  }
+}
+
 async function tryRemote(text: string, kind: string): Promise<HTMLAudioElement | null> {
   if (Date.now() < remoteRetryAfter) return null;
   try {
@@ -185,6 +222,101 @@ export function speakBriefing(text: string, kind: string, hooks: SpeechHooks, in
   });
 }
 
+function speakTurnOnce(speaker: "agent" | "counterparty", text: string, hooks?: Partial<SpeechHooks>) {
+  return new Promise<void>((resolve) => {
+    let finished = false;
+    let audio: HTMLAudioElement | null = null;
+    let analyser: AnalyserNode | null = null;
+    const done = () => {
+      if (finished) return;
+      finished = true;
+      if (cancelCurrent === done) cancelCurrent = null;
+      if (audio) {
+        audio.onplay = audio.ontimeupdate = audio.onended = audio.onerror = null;
+        if (currentAudio === audio) currentAudio = null;
+        if (audio.src.startsWith("blob:")) URL.revokeObjectURL(audio.src);
+      }
+      analyser?.disconnect();
+      endSignal("speaking");
+      hooks?.onEnd?.();
+      resolve();
+    };
+    cancelCurrent = done;
+    tryRemoteTurnAudio(speaker, text).then((remote) => {
+      if (finished) {
+        if (remote?.src.startsWith("blob:")) URL.revokeObjectURL(remote.src);
+        return;
+      }
+      if (remote) {
+        const el = remote;
+        audio = el;
+        currentAudio = el;
+        analyser = soundFx.attachVoiceAnalyser(el);
+        el.onplay = () => {
+          setSignal({ mode: "speaking", provider: "elevenlabs", analyser });
+          hooks?.onStart?.();
+        };
+        el.ontimeupdate = () => {
+          if (el.duration > 0) hooks?.onProgress?.(el.currentTime / el.duration);
+        };
+        el.onended = done;
+        el.onerror = done;
+        el.play().catch(done);
+        return;
+      }
+      const synth = window.speechSynthesis;
+      if (!synth) return done();
+      const u = new SpeechSynthesisUtterance(text);
+      const agentVoice = pickVoice();
+      const chosen = speaker === "agent" ? agentVoice : pickCounterpartyVoice(agentVoice);
+      if (chosen) u.voice = chosen;
+      // Dual-pitch Web Speech fallback distinguishes Recoup Negotiator vs Vendor AR Desk
+      u.rate = speaker === "agent" ? 1.06 : 0.98;
+      u.pitch = speaker === "agent" ? 1.06 : 0.85;
+      u.onstart = () => {
+        setSignal({ mode: "speaking", provider: "browser", analyser: null });
+        pulseVoice();
+        hooks?.onStart?.();
+      };
+      u.onboundary = (e) => {
+        pulseVoice();
+        hooks?.onProgress?.(Math.min(1, (e.charIndex + (e.charLength ?? 0)) / text.length));
+      };
+      u.onend = done;
+      u.onerror = done;
+      synth.speak(u);
+      window.setTimeout(done, Math.max(3800, text.length * 85));
+    });
+  });
+}
+
+export function speakCallTurn(
+  speaker: "agent" | "counterparty",
+  text: string,
+  hooks?: Partial<SpeechHooks>,
+  interrupt = false
+) {
+  if (interrupt) stopSpeaking();
+  const gen = generation;
+  let settled = false;
+  const guardedEnd = () => {
+    if (settled) return;
+    settled = true;
+    hooks?.onEnd?.();
+  };
+  chain = (interrupt ? Promise.resolve() : chain).then(() => {
+    if (gen !== generation) {
+      guardedEnd();
+      return;
+    }
+    return speakTurnOnce(speaker, text, {
+      onStart: hooks?.onStart,
+      onEnd: guardedEnd,
+      onProgress: hooks?.onProgress,
+    });
+  });
+}
+
 export function stopSpeaking() {
   generation += 1;
   window.speechSynthesis?.cancel();
@@ -224,6 +356,10 @@ type RecognitionCtor = new () => RecognitionLike;
 function getRecognitionCtor(): RecognitionCtor | null {
   const w = window as unknown as { SpeechRecognition?: RecognitionCtor; webkitSpeechRecognition?: RecognitionCtor };
   return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
+}
+
+export function hasSpeechRecognition(): boolean {
+  return typeof window !== "undefined" && getRecognitionCtor() !== null;
 }
 
 export function useSpeechInput(onTranscript: (text: string, final: boolean) => void) {

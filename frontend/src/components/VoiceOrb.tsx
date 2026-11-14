@@ -18,7 +18,7 @@ const vnoise = (x: number) => {
 const fbm = (x: number) => 0.5 * vnoise(x) + 0.3 * vnoise(x * 2.03 + 17.1) + 0.2 * vnoise(x * 4.07 + 5.3);
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
 
-type OrbTone = "accent" | "danger";
+export type OrbTone = "accent" | "danger" | "ok" | "signal";
 
 function readPalette(tone: OrbTone) {
   const cs = getComputedStyle(document.documentElement);
@@ -26,7 +26,9 @@ function readPalette(tone: OrbTone) {
   const colors =
     tone === "danger"
       ? [v("--danger", "#f43f5e"), v("--warn", "#f59e0b"), v("--purple", "#a855f7")]
-      : [v("--accent", "#10b981"), v("--purple", "#a855f7"), v("--signal", "#06b6d4")];
+      : tone === "signal"
+      ? [v("--signal", "#06b6d4"), v("--purple", "#a855f7"), v("--accent", "#10b981")]
+      : [v("--ok", "#10b981"), v("--accent", "#10b981"), v("--signal", "#06b6d4")];
   return { colors, dark: document.documentElement.classList.contains("dark") };
 }
 

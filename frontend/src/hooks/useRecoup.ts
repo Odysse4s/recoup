@@ -2,13 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AnticipateOfferPayload,
   ApprovalNeededPayload,
+  CallEndPayload,
+  CallTurnPayload,
   ChangeReport,
+  EvidencePayload,
   ForgeSpecPayload,
   ForgeTestPayload,
   PlanPayload,
   ServerEvent,
   VerifyPayload,
 } from "../contracts";
+import type { VendorCallState } from "../components/VendorCallPanel";
 import { brandOf } from "../lib/brand";
 import { buildThoughtGraph } from "../lib/graph";
 import { IDLE_NARRATION, briefingFor, callOf, idleNarration, narrate } from "../lib/narrate";
@@ -29,9 +33,9 @@ import {
   type WorkspaceState,
 } from "../lib/types";
 import { usePersistentState } from "../lib/usePersistentState";
-import { speakBriefing, stopSpeaking } from "../lib/voice";
+import { speakBriefing, speakCallTurn, stopSpeaking } from "../lib/voice";
 import { diffWindow, fileWindow, forgeWindow, outboxWindow, toolWindow } from "../lib/windows";
-import { mockDecisionEvents, mockEvents } from "../mockEvents";
+import { mockDecisionEvents, mockEvents, mockVendorCallEvents } from "../mockEvents";
 
 const EVENT_TYPES = [
   "plan",
@@ -96,6 +100,9 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   const [speechProgress, setSpeechProgress] = useState(0);
   const [queued, setQueued] = useState(0);
   const [landing, setLanding] = useState<string[]>([]);
+  const [evidenceItems, setEvidenceItems] = useState<EvidencePayload[]>([]);
+  const [uploadingEvidence, setUploadingEvidence] = useState(false);
+  const [vendorCall, setVendorCall] = useState<VendorCallState | null>(null);
 
   const queueRef = useRef<ServerEvent[]>([]);
   const liveCountRef = useRef(0);
@@ -387,6 +394,104 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         setRunStatus("running");
         setRunStartedAt((t) => t ?? Date.now());
         break;
+      case "evidence": {
+        const evPayload = ev.payload as unknown as EvidencePayload;
+        if (evPayload?.source) {
+          setEvidenceItems((prev) => {
+            const filtered = prev.filter((item) => item.source !== evPayload.source);
+            return [evPayload, ...filtered].slice(0, 6);
+          });
+        }
+        if (modeRef.current !== "demo") refreshState();
+        break;
+      }
+      case "call_start": {
+        const p = ev.payload as {
+          call_id?: string;
+          claim_id?: string;
+          counterparty?: string;
+          claim_amount?: number;
+          opening_pct?: number;
+          floor_pct?: number;
+        };
+        setVendorCall({
+          active: true,
+          dialing: false,
+          callId: String(p.call_id ?? "CALL-CLM-D-1042"),
+          claimId: String(p.claim_id ?? "CLM-D-1042"),
+          counterparty: String(p.counterparty ?? "Kappa Office Systems AR desk"),
+          claimAmount: Number(p.claim_amount ?? 587.3),
+          openingPct: Number(p.opening_pct ?? 70),
+          floorPct: Number(p.floor_pct ?? 85),
+          turns: [],
+          activeSpeaker: null,
+          end: null,
+        });
+        break;
+      }
+      case "call_turn": {
+        const turn = ev.payload as unknown as CallTurnPayload;
+        setVendorCall((prev) => {
+          const base: VendorCallState = prev ?? {
+            active: true,
+            dialing: false,
+            callId: turn.call_id || "CALL-CLM-D-1042",
+            claimId: turn.call_id?.replace(/^CALL-/, "") || "CLM-D-1042",
+            counterparty: "Kappa Office Systems AR desk",
+            claimAmount: 587.3,
+            openingPct: 70,
+            floorPct: 85,
+            turns: [],
+            activeSpeaker: null,
+            end: null,
+          };
+          return { ...base, active: true, dialing: false, turns: [...base.turns, turn] };
+        });
+        if (voiceRef.current && turn.text) {
+          speakCallTurn(turn.speaker, turn.text, {
+            onStart: () => {
+              setSpeaking(true);
+              setVendorCall((c) => (c ? { ...c, activeSpeaker: turn.speaker } : c));
+            },
+            onEnd: () => {
+              setSpeaking(false);
+              setVendorCall((c) => (c && c.activeSpeaker === turn.speaker ? { ...c, activeSpeaker: null } : c));
+            },
+          });
+        }
+        break;
+      }
+      case "call_end": {
+        const endPayload = ev.payload as unknown as CallEndPayload;
+        const settledClaimId = endPayload.call_id?.replace(/^CALL-/, "") || "CLM-D-1042";
+        setVendorCall((prev) => (prev ? { ...prev, active: false, dialing: false, end: endPayload } : prev));
+        if (endPayload.outcome === "accepted") {
+          soundFx.playCommitSuccess();
+          if (modeRef.current === "demo") {
+            applyDemoUpsert({
+              table: "claims",
+              pk_col: "id",
+              row: { id: settledClaimId, status: "settled" },
+            });
+            setWsState((ws) => {
+              if (!ws) return ws;
+              const nextStep = {
+                step: ws.undo_stack.length + 1,
+                tool: "upsert_row",
+                summary: `Settled claim #${settledClaimId} (${(endPayload.agreed_amount ?? 499.21).toFixed(2)} EUR)`,
+                args: { table: "claims", pk_col: "id", row: { id: settledClaimId, status: "settled" } },
+                ts: Date.now(),
+              };
+              const updated: WorkspaceState = { ...ws, undo_stack: [...ws.undo_stack, nextStep] };
+              wsStateRef.current = updated;
+              return updated;
+            });
+          } else {
+            refreshState();
+          }
+        }
+        break;
+      }
       case "plan":
       case "replan":
         setPlan(ev.payload as unknown as PlanPayload);
@@ -578,6 +683,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     setVerify(null);
     setPendingApproval(null);
     setOffer(null);
+    setVendorCall(null);
     setRehearsalActive(false);
     setStage(null);
     setStageDone(false);
@@ -788,10 +894,125 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     stopSpeaking();
     setSpeaking(false);
     setForgedCode({});
+    setEvidenceItems([]);
     setRowMarks({});
     setGhostRows({});
     setFileMarks({});
     suppressDiffRef.current = true;
+  };
+
+  const uploadEvidence = async (file: File): Promise<EvidencePayload | null> => {
+    setUploadingEvidence(true);
+    setNarration(`Auditing uploaded evidence \`${file.name}\`…`);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch("/api/evidence/upload", { method: "POST", body: form });
+      if (!res.ok) throw new Error(`upload status ${res.status}`);
+      const payload = (await res.json()) as EvidencePayload;
+      setEvidenceItems((prev) => [payload, ...prev.filter((x) => x.source !== payload.source)].slice(0, 6));
+      await refreshState();
+      return payload;
+    } catch {
+      const safeName = file.name.replace(/[^A-Za-z0-9._-]+/g, "_") || "evidence.txt";
+      const relPath = `inbox/${safeName}`;
+      const isPhoto = /\.(png|jpe?g|webp|gif|bmp|heic)$/i.test(safeName);
+      let findings: string[] = [];
+      if (!isPhoto) {
+        try {
+          const text = await file.text();
+          findings = text
+            .split(/\r?\n/)
+            .map((l) => l.replace(/^[#>*\-\s]+/, "").trim())
+            .filter(Boolean)
+            .slice(0, 5);
+          applyDemoFileWrite({ path: relPath, content: text });
+        } catch {
+          findings = [];
+        }
+      } else {
+        applyDemoFileWrite({ path: relPath, content: `[Photo evidence: ${safeName} (${file.size} bytes)]` });
+      }
+      if (!findings.length) {
+        findings = isPhoto
+          ? [
+              `Captured stockroom photo \`${relPath}\` (${file.size.toLocaleString()} bytes) in workspace inbox.`,
+              "Visual packaging / hardware damage attachment linked for vendor claim verification.",
+            ]
+          : [`Stored workspace evidence document \`${relPath}\` (${file.size.toLocaleString()} bytes).`];
+      }
+      const fallback: EvidencePayload = {
+        source: relPath,
+        kind: isPhoto ? "photo" : "document",
+        findings,
+      };
+      setEvidenceItems((prev) => [fallback, ...prev.filter((x) => x.source !== fallback.source)].slice(0, 6));
+      setNarration(`Extracted ${fallback.findings.length} audit finding(s) from \`${relPath}\`.`);
+      return fallback;
+    } finally {
+      setUploadingEvidence(false);
+    }
+  };
+
+  const dismissEvidence = (source: string) => {
+    setEvidenceItems((prev) => prev.filter((item) => item.source !== source));
+  };
+
+  const negotiateVendorCall = async (claimIdArg?: string) => {
+    const claimsRows = wsStateRef.current?.tables?.claims ?? [];
+    const latestClaim = claimsRows[claimsRows.length - 1];
+    const claimId = claimIdArg || String(latestClaim?.id ?? "CLM-D-1042");
+    const claimAmount = Number(latestClaim?.amount ?? 587.3);
+
+    stopSpeaking();
+    setVendorCall({
+      active: true,
+      dialing: true,
+      callId: `CALL-${claimId}`,
+      claimId,
+      counterparty: "Kappa Office Systems AR desk",
+      claimAmount,
+      openingPct: 70,
+      floorPct: 85,
+      turns: [],
+      activeSpeaker: null,
+      end: null,
+    });
+    setNarration(`Dialing Kappa Office Systems AR Desk to negotiate \`${claimId}\`…`);
+
+    if (modeRef.current === "demo") {
+      enqueue(mockVendorCallEvents(claimId, claimAmount));
+      return;
+    }
+    try {
+      const res = await fetch("/api/call/negotiate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ claim_id: claimId }),
+      });
+      if (!res.ok) throw new Error("negotiate failed");
+      await refreshState();
+    } catch {
+      enqueue(mockVendorCallEvents(claimId, claimAmount));
+    }
+  };
+
+  const replayTurnAudio = (speaker: "agent" | "counterparty", text: string) => {
+    speakCallTurn(
+      speaker,
+      text,
+      {
+        onStart: () => {
+          setSpeaking(true);
+          setVendorCall((c) => (c ? { ...c, activeSpeaker: speaker } : c));
+        },
+        onEnd: () => {
+          setSpeaking(false);
+          setVendorCall((c) => (c && c.activeSpeaker === speaker ? { ...c, activeSpeaker: null } : c));
+        },
+      },
+      true
+    );
   };
 
   const reset = async () => {
@@ -875,6 +1096,13 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     stepCount,
     forgedTools,
     graph,
+    evidenceItems,
+    uploadingEvidence,
+    uploadEvidence,
+    dismissEvidence,
+    vendorCall,
+    negotiateVendorCall,
+    replayTurnAudio,
     triggerGoal,
     runDemo,
     decide,

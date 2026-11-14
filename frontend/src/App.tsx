@@ -9,6 +9,7 @@ import { RewindOverlay } from "./components/RewindOverlay";
 import { AnticipateCard, DiffStack, RiskGateCard, StatsStrip } from "./components/RightRail";
 import { Telemetry } from "./components/Telemetry";
 import { TopBar } from "./components/TopBar";
+import { VendorCallPanel } from "./components/VendorCallPanel";
 import { WorkspaceDeck } from "./components/WorkspaceDeck";
 import { useRecoup } from "./hooks/useRecoup";
 import { useTheme } from "./lib/theme";
@@ -83,6 +84,10 @@ export default function App() {
   };
   const presets = r.wsState?.domain?.presets ?? PRESET_SCENARIOS;
   const rewinding = !!r.rewind;
+  const claimsRows = r.wsState?.tables?.claims ?? [];
+  const latestClaim = claimsRows[claimsRows.length - 1];
+  const canNegotiate = r.runStatus === "committed" || claimsRows.length > 0;
+  const claimSettled = claimsRows.some((row) => row.status === "settled");
 
   return (
     <div className="recoup-canvas flex min-h-screen flex-col text-ink lg:h-screen lg:overflow-hidden">
@@ -100,6 +105,10 @@ export default function App() {
           speaking={r.speaking}
           spokenText={r.spokenText}
           speechProgress={r.speechProgress}
+          evidenceItems={r.evidenceItems}
+          uploadingEvidence={r.uploadingEvidence}
+          onUploadEvidence={r.uploadEvidence}
+          onDismissEvidence={r.dismissEvidence}
         />
         <StatsStrip steps={r.stepCount} cost={r.totalCost} forged={r.forgedTools.length} pending={!!r.pendingApproval} />
       </div>
@@ -137,6 +146,15 @@ export default function App() {
         </div>
 
         <div className="scroll-thin flex min-h-0 flex-col gap-4 lg:col-span-4 lg:overflow-y-auto">
+          <VendorCallPanel
+            call={r.vendorCall}
+            canNegotiate={canNegotiate}
+            defaultClaimId={String(latestClaim?.id ?? "CLM-D-1042")}
+            defaultAmount={Number(latestClaim?.amount ?? 587.3)}
+            claimSettled={claimSettled}
+            onNegotiate={r.negotiateVendorCall}
+            onReplayTurnAudio={r.replayTurnAudio}
+          />
           <DiffStack
             report={r.report}
             ws={r.wsState}

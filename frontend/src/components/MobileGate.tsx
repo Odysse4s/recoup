@@ -2,23 +2,27 @@ import { animate, AnimatePresence, motion, useMotionValue, useTransform } from "
 import {
   ChevronRight,
   ChevronsRight,
+  Loader2,
+  Mic,
   Monitor,
   Moon,
   PhoneOff,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
+  Square,
   Sun,
   Undo2,
   Volume2,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ApprovalNeededPayload } from "../contracts";
 import type { RecoupRuntime } from "../hooks/useRecoup";
 import { InlineCode } from "../lib/highlight";
 import { narrate } from "../lib/narrate";
 import { soundFx } from "../lib/sound";
 import type { Theme } from "../lib/theme";
+import { hasSpeechRecognition, useSpeechInput } from "../lib/voice";
 import { DiffBlock } from "./RightRail";
 import { RecoupMark, VoicePill } from "./TopBar";
 import { btn, Chip, cx, Dot } from "./ui";
@@ -33,6 +37,22 @@ const buzz = (p: number | number[]) => {
     // unsupported
   }
 };
+
+function pickRecorderMimeType(): { mimeType: string; ext: string } {
+  if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") {
+    return { mimeType: "", ext: "webm" };
+  }
+  const candidates: { mimeType: string; ext: string }[] = [
+    { mimeType: "audio/mp4", ext: "mp4" },
+    { mimeType: "audio/webm;codecs=opus", ext: "webm" },
+    { mimeType: "audio/webm", ext: "webm" },
+    { mimeType: "audio/ogg;codecs=opus", ext: "ogg" },
+  ];
+  for (const c of candidates) {
+    if (MediaRecorder.isTypeSupported(c.mimeType)) return c;
+  }
+  return { mimeType: "", ext: "mp4" };
+}
 
 function useClock() {
   const [d, setD] = useState(new Date());
@@ -112,11 +132,167 @@ function SlideToApprove({ onApprove }: { onApprove: () => void }) {
 function IncomingCall({ approval, r }: { approval: ApprovalNeededPayload; r: RecoupRuntime }) {
   const [secs, setSecs] = useState(0);
   const [details, setDetails] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [voiceHint, setVoiceHint] = useState<string | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const stopTimerRef = useRef<number | null>(null);
+
+  const submitVoiceTranscript = useCallback(
+    async (transcript: string) => {
+      if (!transcript.trim()) return;
+      setTranscribing(true);
+      setVoiceHint(`Heard “${transcript}”…`);
+      try {
+        const res = await fetch("/api/voice/decision", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ req_id: approval.req_id, transcript }),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as {
+            ok?: boolean;
+            decision?: string;
+            approved?: boolean | null;
+            resolved?: boolean;
+          };
+          if (data.ok && typeof data.approved === "boolean") {
+            buzz([25, 40, 25]);
+            if (!data.resolved) r.decide(approval.req_id, data.approved);
+            return;
+          }
+          setVoiceHint(`Say “approve” or “reject” (heard “${transcript}”)`);
+          return;
+        }
+      } catch {
+        // Offline fallback regex
+      } finally {
+        setTranscribing(false);
+      }
+      const lower = transcript.toLowerCase();
+      if (/\b(approve|ship it|go ahead|confirm|proceed|commit)\b/.test(lower) && !/\b(don't|do not|not)\b/.test(lower)) {
+        r.decide(approval.req_id, true);
+      } else if (/\b(reject|roll\s*back|abort|cancel|deny|stop)\b/.test(lower)) {
+        r.decide(approval.req_id, false);
+      } else {
+        setVoiceHint(`Say “approve” or “reject” (heard “${transcript}”)`);
+      }
+    },
+    [approval.req_id, r]
+  );
+
+  const speech = useSpeechInput((text, final) => {
+    setVoiceHint(text ? `“${text}”` : "Listening…");
+    if (final && text.trim()) {
+      submitVoiceTranscript(text.trim());
+    }
+  });
+
+  const stopMediaRecorder = useCallback(() => {
+    if (stopTimerRef.current) {
+      window.clearTimeout(stopTimerRef.current);
+      stopTimerRef.current = null;
+    }
+    if (recorderRef.current && recorderRef.current.state !== "inactive") {
+      recorderRef.current.stop();
+    }
+  }, []);
+
+  const startMediaRecorderBackup = useCallback(async () => {
+    if (recording) {
+      stopMediaRecorder();
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setVoiceHint("Microphone capture requires HTTPS or localhost");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const { mimeType, ext } = pickRecorderMimeType();
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      const chunks: BlobPart[] = [];
+      recorder.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size > 0) chunks.push(ev.data);
+      };
+      recorder.onstop = async () => {
+        setRecording(false);
+        stream.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+        recorderRef.current = null;
+        const blob = new Blob(chunks, { type: recorder.mimeType || mimeType || "audio/mp4" });
+        if (blob.size === 0) {
+          setVoiceHint("No audio captured — tap Voice Sign-off to retry");
+          return;
+        }
+        setTranscribing(true);
+        setVoiceHint("Analyzing voice decision…");
+        try {
+          const form = new FormData();
+          form.append("req_id", approval.req_id);
+          form.append("audio", blob, `decision.${ext}`);
+          const res = await fetch("/api/voice/decision", { method: "POST", body: form });
+          if (res.ok) {
+            const body = (await res.json()) as {
+              ok?: boolean;
+              transcript?: string;
+              approved?: boolean | null;
+              resolved?: boolean;
+            };
+            if (body.ok && typeof body.approved === "boolean") {
+              buzz([25, 40, 25]);
+              setVoiceHint(`${body.approved ? "Approved" : "Rejected"} via voice`);
+              if (!body.resolved) r.decide(approval.req_id, body.approved);
+              return;
+            }
+            setVoiceHint(
+              body.transcript
+                ? `Heard “${body.transcript}” — say approve or reject`
+                : "Could not parse voice command — slide or tap retry"
+            );
+          } else {
+            setVoiceHint("Voice endpoint unavailable — use Slide to Approve");
+          }
+        } catch {
+          setVoiceHint("Offline — use Slide to Approve or Reject");
+        } finally {
+          setTranscribing(false);
+        }
+      };
+      recorderRef.current = recorder;
+      recorder.start();
+      setRecording(true);
+      setVoiceHint("Recording (3s) — say “Approve” or “Reject”…");
+      stopTimerRef.current = window.setTimeout(() => stopMediaRecorder(), 3000);
+    } catch {
+      setRecording(false);
+      setVoiceHint("Microphone permission denied");
+    }
+  }, [approval.req_id, r, recording, stopMediaRecorder]);
+
   useEffect(() => {
     buzz([200, 120, 200]);
+    setVoiceHint(null);
     const t = window.setInterval(() => setSecs((s) => s + 1), 1000);
-    return () => window.clearInterval(t);
+    return () => {
+      window.clearInterval(t);
+      if (stopTimerRef.current) window.clearTimeout(stopTimerRef.current);
+      streamRef.current?.getTracks().forEach((tr) => tr.stop());
+    };
   }, [approval.req_id]);
+
+  const handleVoiceSignOff = () => {
+    soundFx.playUiClick();
+    if (hasSpeechRecognition()) {
+      speech.toggle();
+    } else {
+      startMediaRecorderBackup();
+    }
+  };
+
+  const micActive = speech.listening || recording;
 
   return (
     <motion.div
@@ -133,23 +309,32 @@ function IncomingCall({ approval, r }: { approval: ApprovalNeededPayload; r: Rec
     >
       <StatusBar />
       <div className="scroll-thin flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pb-8">
-        <div className="mt-6 flex flex-col items-center text-center">
+        <div className="mt-5 flex flex-col items-center text-center">
           <span className="text-[13px] font-medium text-ink-2">
             incoming risk gate call · {String(Math.floor(secs / 60)).padStart(1, "0")}:{String(secs % 60).padStart(2, "0")}
           </span>
           <h1 className="mt-1 text-[30px] font-semibold tracking-[-0.03em] text-ink">{r.brand.brand_name} Risk Gate</h1>
-          <div className="relative mt-3 flex h-40 w-40 shrink-0 items-center justify-center">
-            <VoiceOrb variant="orb" tone="danger" ambient className="absolute inset-0 h-full w-full" />
-            <span className="relative flex h-20 w-20 items-center justify-center rounded-full bg-danger text-white shadow-[0_20px_60px_-10px_var(--danger)]">
-              <ShieldAlert className="h-9 w-9" />
+          <div className="relative mt-3 flex h-36 w-36 shrink-0 items-center justify-center">
+            <VoiceOrb variant="orb" tone={micActive ? "ok" : "danger"} ambient className="absolute inset-0 h-full w-full" />
+            <span
+              className={cx(
+                "relative flex h-20 w-20 items-center justify-center rounded-full text-white shadow-[0_20px_60px_-10px_var(--danger)]",
+                micActive ? "bg-ok text-on-solid" : "bg-danger"
+              )}
+            >
+              {micActive ? <Mic className="h-9 w-9 animate-pulse" /> : <ShieldAlert className="h-9 w-9" />}
             </span>
           </div>
           <span className="mt-1 text-[12.5px] font-medium text-ink-3" aria-live="polite">
-            {r.speaking ? "Reading executive risk summary aloud…" : "Ringing — tap speaker to replay summary"}
+            {voiceHint
+              ? voiceHint
+              : r.speaking
+              ? "Reading executive risk summary aloud…"
+              : "Ringing — slide, tap Voice Sign-off, or replay summary"}
           </span>
         </div>
 
-        <div className="mt-5 rounded-2xl border border-line bg-surface/80 p-4 backdrop-blur-xl">
+        <div className="mt-4 rounded-2xl border border-line bg-surface/80 p-4 backdrop-blur-xl">
           <div className="flex items-center justify-between">
             <code className="font-mono text-[14px] font-medium text-ink">{approval.tool_name}()</code>
             <Chip tone="danger">approval required</Chip>
@@ -179,7 +364,7 @@ function IncomingCall({ approval, r }: { approval: ApprovalNeededPayload; r: Rec
           </AnimatePresence>
         </div>
 
-        <div className="mt-auto space-y-6 pt-6">
+        <div className="mt-auto space-y-5 pt-5">
           <div className="flex items-end justify-around">
             <div className="flex flex-col items-center gap-2">
               <button
@@ -189,12 +374,39 @@ function IncomingCall({ approval, r }: { approval: ApprovalNeededPayload; r: Rec
                   r.decide(approval.req_id, false);
                 }}
                 aria-label="Reject and rollback"
-                className="flex h-[72px] w-[72px] items-center justify-center rounded-full bg-danger text-white shadow-lg active:scale-95"
+                className="flex h-[68px] w-[68px] items-center justify-center rounded-full bg-danger text-white shadow-lg active:scale-95"
               >
-                <PhoneOff className="h-7 w-7" />
+                <PhoneOff className="h-6 w-6" />
               </button>
-              <span className="text-[12.5px] font-medium text-ink-2">Reject &amp; Rollback</span>
+              <span className="text-[12px] font-medium text-ink-2">Reject</span>
             </div>
+
+            <div className="flex flex-col items-center gap-2">
+              <button
+                onClick={handleVoiceSignOff}
+                disabled={transcribing}
+                aria-pressed={micActive}
+                aria-label={micActive ? "Stop recording voice decision" : "Hands-free voice sign-off"}
+                className={cx(
+                  "flex h-[68px] w-[68px] items-center justify-center rounded-full border backdrop-blur transition-colors active:scale-95",
+                  micActive
+                    ? "border-ok bg-ok text-on-solid shadow-lg"
+                    : "border-line bg-surface/85 text-ink"
+                )}
+              >
+                {transcribing ? (
+                  <Loader2 className="h-6 w-6 animate-spin text-accent" />
+                ) : recording ? (
+                  <Square className="h-5 w-5 fill-current" />
+                ) : (
+                  <Mic className={cx("h-6 w-6", speech.listening && "animate-pulse")} />
+                )}
+              </button>
+              <span className="text-[12px] font-medium text-ink-2">
+                {transcribing ? "Checking…" : micActive ? "Tap to send" : "Voice Sign-off"}
+              </span>
+            </div>
+
             <div className="flex flex-col items-center gap-2">
               <button
                 onClick={() => {
@@ -202,11 +414,11 @@ function IncomingCall({ approval, r }: { approval: ApprovalNeededPayload; r: Rec
                   r.replayBriefing();
                 }}
                 aria-label="Repeat spoken summary"
-                className="flex h-[72px] w-[72px] items-center justify-center rounded-full border border-line bg-surface/80 text-ink backdrop-blur active:scale-95"
+                className="flex h-[68px] w-[68px] items-center justify-center rounded-full border border-line bg-surface/80 text-ink backdrop-blur active:scale-95"
               >
-                <Volume2 className={cx("h-7 w-7", r.speaking && "animate-pulse text-accent")} />
+                <Volume2 className={cx("h-6 w-6", r.speaking && "animate-pulse text-accent")} />
               </button>
-              <span className="text-[12.5px] font-medium text-ink-2">{r.speaking ? "Speaking…" : "Repeat summary"}</span>
+              <span className="text-[12px] font-medium text-ink-2">{r.speaking ? "Speaking…" : "Summary"}</span>
             </div>
           </div>
           <SlideToApprove onApprove={() => r.decide(approval.req_id, true)} />
@@ -385,7 +597,7 @@ export function MobileGate({
         </div>
         <h2 className="mt-4 text-[28px] font-semibold leading-tight tracking-[-0.03em] text-ink">High-value claims ring your phone.</h2>
         <p className="mt-3 text-[14px] leading-relaxed text-ink-2">
-          When {r.brand.brand_name} intercepts a vendor claim of EUR 250+ or outbound dispatch, this device receives an executive voice briefing. Slide to commit staged ERP changes, or reject and roll back.
+          When {r.brand.brand_name} intercepts a vendor claim of EUR 250+ or outbound dispatch, this device receives an executive voice briefing. Slide or speak hands-free to commit staged ERP changes, or reject and roll back.
         </p>
         <button
           onClick={() => {

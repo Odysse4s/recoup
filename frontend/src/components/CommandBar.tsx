@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { CornerDownLeft, Mic, MicOff, Sparkles, Volume2 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { ApprovalNeededPayload } from "../contracts";
+import { Camera, CornerDownLeft, FileCheck2, Loader2, Mic, MicOff, Paperclip, Sparkles, UploadCloud, Volume2, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import type { ApprovalNeededPayload, EvidencePayload } from "../contracts";
 import { soundFx } from "../lib/sound";
 import { useSpeechInput, useVoiceSignal } from "../lib/voice";
 import { btn, Chip, cx, Kbd } from "./ui";
@@ -113,6 +113,10 @@ export function CommandBar({
   speaking = false,
   spokenText = null,
   speechProgress = 0,
+  evidenceItems = [],
+  uploadingEvidence = false,
+  onUploadEvidence,
+  onDismissEvidence,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -124,10 +128,17 @@ export function CommandBar({
   speaking?: boolean;
   spokenText?: string | null;
   speechProgress?: number;
+  evidenceItems?: EvidencePayload[];
+  uploadingEvidence?: boolean;
+  onUploadEvidence?: (file: File) => Promise<EvidencePayload | null>;
+  onDismissEvidence?: (source: string) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [focused, setFocused] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const [transcript, setTranscript] = useState("");
+
   const speech = useSpeechInput((text, final) => {
     setTranscript(text);
     if (final && pendingApproval && onApprove) {
@@ -144,9 +155,11 @@ export function CommandBar({
     onChange(text);
     if (final) inputRef.current?.focus();
   });
+
   useEffect(() => {
     if (speech.listening) setTranscript("");
   }, [speech.listening]);
+
   const captionProgress = useCaptionProgress(spokenText, speaking, speechProgress);
   const caption: { mode: "speaking" | "listening"; text: string } | null = speech.listening
     ? { mode: "listening", text: transcript }
@@ -166,8 +179,36 @@ export function CommandBar({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  const handleFiles = async (files: FileList | null) => {
+    const file = files?.[0];
+    if (!file || !onUploadEvidence) return;
+    soundFx.playUiClick();
+    await onUploadEvidence(file);
+  };
+
+  const onDragEnterOrOver = (e: DragEvent<HTMLDivElement>) => {
+    if (!onUploadEvidence) return;
+    e.preventDefault();
+    setDragOver(true);
+  };
+  const onDragLeave = (e: DragEvent<HTMLDivElement>) => {
+    if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+    setDragOver(false);
+  };
+  const onDrop = async (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragOver(false);
+    await handleFiles(e.dataTransfer.files);
+  };
+
   return (
-    <div className="relative min-w-0 flex-1">
+    <div
+      className="relative min-w-0 flex-1"
+      onDragEnter={onDragEnterOrOver}
+      onDragOver={onDragEnterOrOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -177,21 +218,75 @@ export function CommandBar({
         }}
         className={cx(
           "relative flex h-11 w-full items-center gap-2 rounded-xl border bg-surface pl-3 pr-1.5 shadow-card transition-all",
-          speech.listening ? "border-danger/50" : focused ? "border-accent/60 ring-4 ring-accent/10" : "border-line"
+          dragOver
+            ? "border-accent bg-accent/[0.06] ring-4 ring-accent/15"
+            : speech.listening
+            ? "border-danger/50"
+            : focused
+            ? "border-accent/60 ring-4 ring-accent/10"
+            : "border-line"
         )}
       >
-        <Sparkles className="h-4 w-4 shrink-0 text-accent" />
+        {dragOver ? (
+          <UploadCloud className="h-4 w-4 shrink-0 animate-bounce text-accent" />
+        ) : (
+          <Sparkles className="h-4 w-4 shrink-0 text-accent" />
+        )}
         <input
           ref={inputRef}
           value={value}
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
           onChange={(e) => onChange(e.target.value)}
-          placeholder={speech.listening ? "Listening…" : `Assign a vendor audit or AP recovery goal to ${brandName}…`}
+          placeholder={
+            dragOver
+              ? "Drop receiving photo or delivery note to audit into workspace inbox…"
+              : speech.listening
+              ? "Listening…"
+              : `Assign a vendor audit or AP recovery goal to ${brandName}…`
+          }
           aria-label="Goal"
           className="h-full min-w-0 flex-1 bg-transparent text-[14px] text-ink placeholder:text-ink-3 focus:outline-none"
         />
-        {!focused && !value && <Kbd>⌘K</Kbd>}
+        {!focused && !value && !dragOver && <Kbd>⌘K</Kbd>}
+
+        {onUploadEvidence && (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*,.md,.txt,.csv,.json,.pdf"
+              className="hidden"
+              onChange={(e) => {
+                handleFiles(e.target.files);
+                e.currentTarget.value = "";
+              }}
+            />
+            <button
+              type="button"
+              disabled={uploadingEvidence}
+              onClick={() => {
+                soundFx.playUiClick();
+                fileInputRef.current?.click();
+              }}
+              aria-label="Attach receiving photo or document evidence"
+              title="Attach receiving photo or delivery log (or drag & drop onto bar)"
+              className={cx(
+                "flex h-8 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-[12px] font-medium transition-colors",
+                uploadingEvidence
+                  ? "border-accent/40 bg-accent/10 text-accent"
+                  : "border-line bg-sunken text-ink-2 hover:border-accent/40 hover:text-ink"
+              )}
+            >
+              {uploadingEvidence ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Paperclip className="h-3.5 w-3.5" />
+              )}
+              <span className="hidden md:inline">{uploadingEvidence ? "Auditing…" : "Attach Evidence"}</span>
+            </button>
+          </>
+        )}
 
         <button
           type="button"
@@ -231,8 +326,66 @@ export function CommandBar({
           <CornerDownLeft className="h-3.5 w-3.5 opacity-70" />
         </button>
       </form>
+
       <AnimatePresence>
-        {caption && <VoiceCaption key={caption.mode} mode={caption.mode} text={caption.text} progress={caption.mode === "speaking" ? captionProgress : 1} />}
+        {caption && (
+          <VoiceCaption
+            key={caption.mode}
+            mode={caption.mode}
+            text={caption.text}
+            progress={caption.mode === "speaking" ? captionProgress : 1}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence initial={false}>
+        {evidenceItems.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, height: 0, marginTop: 0 }}
+            animate={{ opacity: 1, height: "auto", marginTop: 8 }}
+            exit={{ opacity: 0, height: 0, marginTop: 0 }}
+            className="space-y-1.5 overflow-hidden"
+          >
+            {evidenceItems.slice(0, 2).map((ev) => (
+              <div
+                key={ev.source}
+                className="flex items-center gap-2.5 rounded-xl border border-ok/35 bg-surface px-3 py-1.5 text-[12px] shadow-card"
+              >
+                <Chip tone={ev.kind === "photo" ? "signal" : "ok"}>
+                  {ev.kind === "photo" ? <Camera className="h-2.5 w-2.5" /> : <FileCheck2 className="h-2.5 w-2.5" />}
+                  {ev.kind}
+                </Chip>
+                <code className="shrink-0 font-mono text-[11px] font-semibold text-ink">{ev.source}</code>
+                <span className="min-w-0 flex-1 truncate text-ink-2">
+                  {ev.findings.join(" · ")}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    soundFx.playUiClick();
+                    onChange(
+                      `Audit uploaded evidence ${ev.source} against our Kappa Office Systems contract, hold any overbilled invoice, and stage the credit claim`
+                    );
+                    inputRef.current?.focus();
+                  }}
+                  className="shrink-0 rounded-md border border-accent/35 bg-accent/10 px-2 py-0.5 text-[11px] font-semibold text-accent hover:bg-accent/15"
+                >
+                  Use in Goal
+                </button>
+                {onDismissEvidence && (
+                  <button
+                    type="button"
+                    onClick={() => onDismissEvidence(ev.source)}
+                    aria-label={`Dismiss ${ev.source}`}
+                    className="rounded p-0.5 text-ink-3 hover:text-ink"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+            ))}
+          </motion.div>
+        )}
       </AnimatePresence>
     </div>
   );
