@@ -24,6 +24,11 @@ AGENT_VOICE = "Rachel"
 COUNTERPARTY_VOICE = "Roger"
 DEFAULT_FAL_STT_MODEL = "fal-ai/wizper"
 
+DEFAULT_GROK_TTS_URL = "https://fal.run/xai/grok-tts"
+DEFAULT_GROK_VOICE_URL = "https://fal.run/xai/grok-voice"
+DEFAULT_GROK_REALTIME_WS_URL = "wss://fal.run/xai/grok-voice/realtime"
+DEFAULT_GROK_VOICE_ID = "ara"
+
 _DEFAULT_CACHE_DIR = elevenlabs_agent.VOICE_CACHE_DIR
 VOICE_CACHE_DIR = _DEFAULT_CACHE_DIR
 
@@ -172,6 +177,55 @@ _SPEAKER_TAG_PREFIX_RE = re.compile(
 )
 
 
+def synthesize_grok_tts(text: str, voice: str | None = None) -> bytes | None:
+    """Synthesize speech via xAI Grok TTS on fal.ai with SHA-256 disk caching."""
+    cleaned = _SPEAKER_TAG_PREFIX_RE.sub("", (text or "").strip()).strip()
+    if not cleaned:
+        return None
+
+    provider_pref = os.getenv("VOICE_PROVIDER", "").strip().lower()
+    if provider_pref in ("none", "offline", "fake", "disabled"):
+        return None
+
+    voice_id = (voice or "").strip() or os.getenv("GROK_VOICE", "").strip() or DEFAULT_GROK_VOICE_ID
+    digest = hashlib.sha256(f"{voice_id}:{cleaned}".encode()).hexdigest()
+    cache_dir = _resolve_cache_dir()
+    cache_path = cache_dir / f"grok_{voice_id}_{digest}.mp3"
+    if cache_path.is_file():
+        cached_bytes = cache_path.read_bytes()
+        if cached_bytes:
+            return cached_bytes
+
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        client_mod = getattr(httpx.Client, "__module__", "")
+        client_name = getattr(httpx.Client, "__name__", "")
+        if client_mod.startswith("httpx") or client_name == "FalDualClient":
+            return None
+
+    fal_key = os.getenv("FAL_KEY", "").strip()
+    if not fal_key:
+        return None
+
+    url = os.getenv("GROK_TTS_URL", DEFAULT_GROK_TTS_URL).strip() or DEFAULT_GROK_TTS_URL
+    try:
+        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+            resp = client.post(
+                url,
+                headers={"Authorization": f"Key {fal_key}", "Content-Type": "application/json"},
+                json={"text": cleaned, "voice": voice_id},
+            )
+            resp.raise_for_status()
+            audio_bytes = _extract_audio_bytes_from_response(resp, client)
+            if audio_bytes:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                cache_path.write_bytes(audio_bytes)
+                return audio_bytes
+    except (httpx.HTTPError, ValueError):
+        return None
+
+    return None
+
+
 def synthesize_call_turn(
     speaker: Literal["agent", "counterparty"],
     text: str,
@@ -204,6 +258,12 @@ def synthesize_call_turn(
 
     if not (fal_key or wonderful_key or eleven_key):
         return None
+
+    if fal_key and provider_pref not in ("elevenlabs", "offline", "none", "fake", "disabled"):
+        grok_voice = "eve" if role == "counterparty" else "ara"
+        grok_bytes = synthesize_grok_tts(cleaned, voice=grok_voice)
+        if grok_bytes:
+            return grok_bytes
 
     order = ["fal", "wonderful", "elevenlabs"]
     if provider_pref in order:

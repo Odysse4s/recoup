@@ -1,9 +1,13 @@
 import { AnimatePresence, motion } from "framer-motion";
 import {
   CheckCircle2,
+  ChevronDown,
+  Database,
   FileCheck2,
+  FileCode2,
   Loader2,
   Mic,
+  MicOff,
   Monitor,
   Moon,
   PackageCheck,
@@ -11,10 +15,12 @@ import {
   PhoneOff,
   ShieldCheck,
   Sparkles,
-  Square,
   Sun,
   Undo2,
   Volume2,
+  VolumeX,
+  X,
+  Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
@@ -30,7 +36,16 @@ import { narrate } from "../lib/narrate";
 import { soundFx } from "../lib/sound";
 import type { Theme } from "../lib/theme";
 import type { OperatorChoice, OperatorConsultState, OperatorConsultTurn } from "../lib/types";
-import { hasSpeechRecognition, speakCallTurn, stopSpeaking, useSpeechInput } from "../lib/voice";
+import {
+  getWarmMicStream,
+  hasSpeechRecognition,
+  pickRecorderMimeType,
+  speakCallTurn,
+  stopSpeaking,
+  unlockAudioSession,
+  useAutoVad,
+  useSpeechInput,
+} from "../lib/voice";
 import { DiffBlock } from "./RightRail";
 import { RecoupMark, VoicePill } from "./TopBar";
 import { btn, Chip, cx, Dot } from "./ui";
@@ -38,7 +53,7 @@ import { VoiceOrb } from "./VoiceOrb";
 
 const DEFAULT_CLAIM_ID = "CLM-D-1042";
 const DEFAULT_OPENING_QUESTION =
-  "Shipment D-1042 from Kappa Office Systems shows €587.30 in billing discrepancies across 22 hubs and unit-price overcharges. Say 'refund' to enforce the €587.30 refund and stage an AADE myDATA 5.1 credit note, or say 're-delivery' to accept 22 replacement units with a €202.30 credit.";
+  "Shipment D-1042 shows €587.30 in billing discrepancies across 22 hubs and unit-price overcharges. Say 'refund' to enforce the €587.30 refund and stage an AADE myDATA 5.1 credit note, or say 're-delivery' to accept 22 replacement units with a €202.30 credit.";
 
 const buzz = (p: number | number[]) => {
   try {
@@ -49,22 +64,6 @@ const buzz = (p: number | number[]) => {
     // unsupported
   }
 };
-
-function pickRecorderMimeType(): { mimeType: string; ext: string } {
-  if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") {
-    return { mimeType: "", ext: "webm" };
-  }
-  const candidates: { mimeType: string; ext: string }[] = [
-    { mimeType: "audio/mp4", ext: "mp4" },
-    { mimeType: "audio/webm;codecs=opus", ext: "webm" },
-    { mimeType: "audio/webm", ext: "webm" },
-    { mimeType: "audio/ogg;codecs=opus", ext: "ogg" },
-  ];
-  for (const c of candidates) {
-    if (MediaRecorder.isTypeSupported(c.mimeType)) return c;
-  }
-  return { mimeType: "", ext: "mp4" };
-}
 
 function parseChoiceFromText(text: string): OperatorChoice | null {
   const lower = text.toLowerCase();
@@ -174,7 +173,7 @@ function useClock() {
 function StatusBar() {
   const time = useClock();
   return (
-    <div className="relative z-30 flex h-[54px] shrink-0 items-center justify-between px-8 pt-1 text-[15px] font-semibold text-ink">
+    <div className="relative z-30 flex h-[50px] shrink-0 items-center justify-between px-7 pt-1 text-[14.5px] font-semibold text-ink">
       <span className="w-16 tabular">{time}</span>
       <span className="flex w-16 items-center justify-end gap-1.5">
         <svg width="18" height="11" viewBox="0 0 18 11" aria-hidden className="fill-current">
@@ -202,15 +201,27 @@ interface LocalCompletion {
 
 interface UserRespondApiBody {
   ok?: boolean;
+  call_id?: string;
+  keep_call_open?: boolean;
+  call_status?: "connected" | "ended";
   choice?: OperatorChoice | string;
   transcript?: string;
+  reply_text?: string;
+  confirmation_text?: string;
   reply?: string;
   confirmation?: string;
-  spoken_summary?: string;
   summary?: string;
+  spoken_summary?: string;
   agreed_amount?: number;
   resolved?: boolean;
   approved?: boolean;
+  ui_action?: {
+    action: string;
+    path?: string;
+    view?: string;
+    table?: string;
+    label?: string;
+  } | null;
 }
 
 function OperatorEscalationCall({
@@ -231,21 +242,23 @@ function OperatorEscalationCall({
   onDismissCompleted: () => void;
 }) {
   const [secs, setSecs] = useState(0);
-  const [answered, setAnswered] = useState(false);
+  const [answered, setAnswered] = useState(() => {
+    // If call is already active with turns on reconnect, consider answered
+    return Boolean(consult?.active && !consult?.ringing && consult.turns.length > 0);
+  });
   const [details, setDetails] = useState(false);
-  const [recording, setRecording] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [triggersOpen, setTriggersOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [submitSource, setSubmitSource] = useState<"mic" | "tap" | null>(null);
-  const [localSpeaking, setLocalSpeaking] = useState(false);
-  const [voiceHint, setVoiceHint] = useState<string | null>(null);
+  const [agentSpeaking, setAgentSpeaking] = useState(false);
+  const [actionToast, setActionToast] = useState<string | null>(null);
   const [localTurns, setLocalTurns] = useState<OperatorConsultTurn[]>([]);
+  const [warmStream, setWarmStream] = useState<MediaStream | null>(null);
 
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const stopTimerRef = useRef<number | null>(null);
-  const transcriptBoxRef = useRef<HTMLDivElement>(null);
+  const actionToastTimerRef = useRef<number | null>(null);
   const spokenOpeningKeyRef = useRef<string | null>(null);
   const spokenEndKeyRef = useRef<string | null>(null);
+  const lastSpokenTextRef = useRef<string>("");
 
   const reqId = approval?.req_id ?? consult?.reqId ?? null;
   const claimId = useMemo(() => {
@@ -281,6 +294,14 @@ function OperatorEscalationCall({
     return seed;
   }, [consult?.turns, localTurns, openingText]);
 
+  const latestAgentTurn = useMemo(() => {
+    return [...mergedTurns].reverse().find((t) => t.speaker === "agent") ?? null;
+  }, [mergedTurns]);
+
+  const latestUserTurn = useMemo(() => {
+    return [...mergedTurns].reverse().find((t) => t.speaker === "user") ?? null;
+  }, [mergedTurns]);
+
   const resolvedEnd = useMemo(() => {
     if (consult?.end) {
       const choice: OperatorChoice =
@@ -299,15 +320,31 @@ function OperatorEscalationCall({
     return localCompletion;
   }, [claimId, consult?.end, consult?.selectedChoice, localCompletion]);
 
+  const showActionToast = useCallback((msg: string) => {
+    if (actionToastTimerRef.current) {
+      window.clearTimeout(actionToastTimerRef.current);
+    }
+    setActionToast(msg);
+    soundFx.playWindowPop();
+    buzz([30, 40]);
+    actionToastTimerRef.current = window.setTimeout(() => {
+      setActionToast(null);
+    }, 4500);
+  }, []);
+
   const speakAgentLine = useCallback(
     (text: string, interrupt = false) => {
-      if (!text.trim()) return;
+      const clean = text.trim();
+      if (!clean) return;
+      if (lastSpokenTextRef.current === clean && !interrupt) return;
+      lastSpokenTextRef.current = clean;
+      setAgentSpeaking(true);
       speakCallTurn(
         "agent",
-        text,
+        clean,
         {
-          onStart: () => setLocalSpeaking(true),
-          onEnd: () => setLocalSpeaking(false),
+          onStart: () => setAgentSpeaking(true),
+          onEnd: () => setAgentSpeaking(false),
         },
         interrupt
       );
@@ -315,21 +352,22 @@ function OperatorEscalationCall({
     []
   );
 
-  // Haptic ring + call timer on fresh escalation
+  // Call timer starts when call is answered
   useEffect(() => {
-    buzz([220, 120, 220, 400]);
-    setSecs(0);
-    setVoiceHint(null);
-    setLocalTurns([]);
+    if (!answered || resolvedEnd) return;
     const t = window.setInterval(() => setSecs((s) => s + 1), 1000);
-    return () => {
-      window.clearInterval(t);
-      if (stopTimerRef.current) window.clearTimeout(stopTimerRef.current);
-      streamRef.current?.getTracks().forEach((tr) => tr.stop());
-    };
-  }, [callKey]);
+    return () => window.clearInterval(t);
+  }, [answered, resolvedEnd]);
 
-  // Web Audio ringtone loop every 2.2s while ringing until answered
+  // Teardown warm media stream when call ends or unmounts
+  useEffect(() => {
+    return () => {
+      if (actionToastTimerRef.current) window.clearTimeout(actionToastTimerRef.current);
+      warmStream?.getTracks().forEach((tr) => tr.stop());
+    };
+  }, [warmStream]);
+
+  // Ringtone & vibration loop while call is incoming/ringing and unanswered
   useEffect(() => {
     if (answered || resolvedEnd) return;
     const isRinging = Boolean(consult?.ringing || (!consult?.end && consult?.turns.length === 0));
@@ -343,717 +381,932 @@ function OperatorEscalationCall({
     return () => window.clearInterval(interval);
   }, [answered, consult?.end, consult?.ringing, consult?.turns.length, resolvedEnd]);
 
-  // Auto-play Recoup's fal.ai Voice opening question when call arrives or is answered
-  useEffect(() => {
-    const key = `${callKey}:${openingText}`;
-    if (spokenOpeningKeyRef.current === key) return;
-    if (!r.voiceOn && !answered) return;
-    spokenOpeningKeyRef.current = key;
-    speakAgentLine(openingText, false);
-  }, [answered, callKey, openingText, r.voiceOn, speakAgentLine]);
-
-  // Speak confirmation aloud when SSE CALL_END arrives from backend/desktop
+  // Handle SSE CALL_END when server completes call
   useEffect(() => {
     if (!consult?.end?.summary) return;
     const key = `${consult.callId}:end:${consult.end.summary}`;
     if (spokenEndKeyRef.current === key) return;
     spokenEndKeyRef.current = key;
     buzz([30, 50, 30]);
+    warmStream?.getTracks().forEach((t) => t.stop());
+    setWarmStream(null);
     if (r.voiceOn) {
-      const lastAgentTurn = [...(consult.turns ?? [])].reverse().find((t) => t.speaker === "agent");
+      const lastAgent = [...(consult.turns ?? [])].reverse().find((t) => t.speaker === "agent");
       const textToSpeak =
-        lastAgentTurn && lastAgentTurn.text !== openingText ? lastAgentTurn.text : consult.end.summary;
+        lastAgent && lastAgent.text !== openingText ? lastAgent.text : consult.end.summary;
       speakAgentLine(textToSpeak, false);
     }
-  }, [consult?.callId, consult?.end, consult?.turns, openingText, r.voiceOn, speakAgentLine]);
+  }, [consult?.callId, consult?.end, consult?.turns, openingText, r.voiceOn, speakAgentLine, warmStream]);
 
-  // Auto-scroll live transcript preview
-  useEffect(() => {
-    if (transcriptBoxRef.current) {
-      transcriptBoxRef.current.scrollTo({
-        top: transcriptBoxRef.current.scrollHeight,
-        behavior: "smooth",
-      });
-    }
-  }, [mergedTurns.length, resolvedEnd]);
-
-  const finalizeOfflineOrDemo = useCallback(
-    (choice: OperatorChoice, userUtterance: string) => {
-      const confirmation = defaultConfirmationFor(choice, claimId);
-      setLocalTurns((prev) => [
-        ...prev,
-        { speaker: "user", text: userUtterance, ts: Date.now() },
-        { speaker: "agent", text: confirmation, ts: Date.now() + 1 },
-      ]);
-      onSetLocalCompletion({ sessionKey: callKey, choice, summary: confirmation, claimId });
-      setVoiceHint(
-        choice === "refund"
-          ? "€587.30 Refund + AADE 5.1 Credit Note staged"
-          : "22-Unit Re-Delivery + AADE 9.3 Credit staged"
-      );
-      buzz([30, 50, 30]);
-      if (reqId) {
-        r.decide(reqId, true);
+  // Core handler for API responses from /api/call/user-respond
+  const processRespondResponse = useCallback(
+    (data: UserRespondApiBody, fallbackChoice: OperatorChoice | null, fallbackUserText: string) => {
+      // 1. Live Voice-to-Desktop Action Toast
+      if (data.ui_action) {
+        const act = data.ui_action;
+        const label =
+          act.label ||
+          (act.action === "open_file"
+            ? `Opened ${act.path?.split("/").pop() || "AADE myDATA XML"}`
+            : act.action === "switch_view" || act.action === "switch_tab"
+            ? `Switched Desktop to ${act.table || "SQLite"} table`
+            : "Desktop HUD Synchronized");
+        showActionToast(`✓ ${label} on Desktop`);
       }
-      speakAgentLine(confirmation, true);
-    },
-    [callKey, claimId, onSetLocalCompletion, r, reqId, speakAgentLine]
-  );
 
-  const handleApiDecisionResponse = useCallback(
-    (body: UserRespondApiBody, fallbackChoice: OperatorChoice | null, fallbackUserText: string) => {
+      const userLine = data.transcript?.trim() || fallbackUserText;
+      const keepCallOpen = Boolean(data.keep_call_open && data.call_status !== "ended");
+
+      if (userLine) {
+        setLocalTurns((prev) => [...prev, { speaker: "user", text: userLine, ts: Date.now() }]);
+      }
+
+      if (keepCallOpen) {
+        // Multi-Turn: Call stays connected! Recoup speaks reply and Auto-VAD re-arms!
+        const replyText =
+          data.reply_text?.trim() ||
+          data.reply?.trim() ||
+          "I've updated your desktop screen. You can say 'enforce refund' or 'accept delivery' whenever you're ready.";
+
+        setLocalTurns((prev) => [
+          ...prev,
+          { speaker: "agent", text: replyText, ts: Date.now() + 1 },
+        ]);
+        buzz([30, 40]);
+        speakAgentLine(replyText, true);
+        return;
+      }
+
+      // Final Turn: Call ends! Apply ERP commit and transition to Call Completed screen.
       const resolvedChoice: OperatorChoice =
-        body.choice === "redelivery" || body.choice === "refund"
-          ? body.choice
-          : (body.transcript ? parseChoiceFromText(body.transcript) : null) ??
+        data.choice === "redelivery" || data.choice === "refund"
+          ? (data.choice as OperatorChoice)
+          : (data.transcript ? parseChoiceFromText(data.transcript) : null) ??
             fallbackChoice ??
             "refund";
 
-      const userLine = body.transcript?.trim() || fallbackUserText;
       const confirmation =
-        body.reply?.trim() ||
-        body.confirmation?.trim() ||
-        body.spoken_summary?.trim() ||
-        body.summary?.trim() ||
+        data.confirmation_text?.trim() ||
+        data.reply_text?.trim() ||
+        data.confirmation?.trim() ||
+        data.reply?.trim() ||
+        data.spoken_summary?.trim() ||
+        data.summary?.trim() ||
         defaultConfirmationFor(resolvedChoice, claimId);
 
       setLocalTurns((prev) => [
         ...prev,
-        ...(userLine ? [{ speaker: "user" as const, text: userLine, ts: Date.now() }] : []),
-        { speaker: "agent" as const, text: confirmation, ts: Date.now() + 1 },
+        { speaker: "agent", text: confirmation, ts: Date.now() + 1 },
       ]);
+
       onSetLocalCompletion({
         sessionKey: callKey,
         choice: resolvedChoice,
         summary: confirmation,
         claimId,
       });
-      setVoiceHint(
-        resolvedChoice === "refund"
-          ? "AADE myDATA 5.1 Credit Note staged"
-          : "22-Unit Re-Delivery + AADE 9.3 staged"
-      );
-      buzz([30, 50, 30]);
 
-      if (reqId && (r.mode === "demo" || body.resolved === false)) {
-        r.decide(reqId, body.approved ?? true);
+      buzz([40, 60, 40]);
+      warmStream?.getTracks().forEach((t) => t.stop());
+      setWarmStream(null);
+
+      if (reqId && (r.mode === "demo" || data.resolved === false)) {
+        r.decide(reqId, data.approved ?? true);
       }
 
-      speakAgentLine(confirmation, false);
+      speakAgentLine(confirmation, true);
     },
-    [callKey, claimId, onSetLocalCompletion, r, reqId, speakAgentLine]
+    [callKey, claimId, onSetLocalCompletion, r, reqId, showActionToast, speakAgentLine, warmStream]
   );
 
-  const submitChoicePill = useCallback(
-    async (choice: OperatorChoice) => {
-      soundFx.playUiClick();
-      stopSpeaking();
-      setAnswered(true);
+  // Dispatch audio recorded by Auto-VAD to /api/call/user-respond
+  const handleUtteranceBlob = useCallback(
+    async (blob: Blob, mimeType: string, ext: string) => {
       setSubmitting(true);
-      setSubmitSource("tap");
-      const userLabel =
-        choice === "refund"
-          ? "Enforce €587.30 refund and stage Greek AADE myDATA 5.1 credit note."
-          : "Accept next-day 22-unit re-delivery with €202.30 SLA and price credit.";
-      setVoiceHint("Applying Decision & Emailing Vendor…");
-
-      if (r.mode === "demo" && (!reqId || reqId.startsWith("req_demo"))) {
-        setSubmitting(false);
-        setSubmitSource(null);
-        finalizeOfflineOrDemo(choice, userLabel);
-        return;
-      }
-
+      buzz(25);
       try {
+        const form = new FormData();
+        form.append("audio", blob, `utterance.${ext}`);
+        if (reqId) form.append("req_id", reqId);
+        form.append("claim_id", claimId || DEFAULT_CLAIM_ID);
+        if (consult?.callId) form.append("call_id", consult.callId);
+
         const res = await fetch("/api/call/user-respond", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            choice,
-            req_id: reqId,
-            claim_id: claimId || DEFAULT_CLAIM_ID,
-          }),
+          body: form,
         });
-        if (res.ok) {
-          const data = (await res.json()) as UserRespondApiBody;
-          handleApiDecisionResponse(data, choice, userLabel);
-          return;
-        }
-        finalizeOfflineOrDemo(choice, userLabel);
-      } catch {
-        finalizeOfflineOrDemo(choice, userLabel);
-      } finally {
-        setSubmitting(false);
-        setSubmitSource(null);
-      }
-    },
-    [claimId, finalizeOfflineOrDemo, handleApiDecisionResponse, r.mode, reqId]
-  );
 
-  const submitSpeechTranscript = useCallback(
-    async (transcript: string) => {
-      const clean = transcript.trim();
-      if (!clean) return;
-      setSubmitting(true);
-      setSubmitSource("mic");
-      setVoiceHint(`Heard “${clean}” — resolving…`);
-      const parsed = parseChoiceFromText(clean);
-
-      try {
-        const res = await fetch("/api/call/user-respond", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            transcript: clean,
-            req_id: reqId,
-            claim_id: claimId || DEFAULT_CLAIM_ID,
-          }),
-        });
         if (res.ok) {
-          const data = (await res.json()) as UserRespondApiBody;
-          if (data.ok === false && !data.choice && !parsed) {
-            setVoiceHint(`Heard “${clean}” — say “587 refund” or “22-unit re-delivery”`);
+          const body = (await res.json()) as UserRespondApiBody & { ignored_noise?: boolean };
+          if (body.ignored_noise) {
             return;
           }
-          handleApiDecisionResponse(data, parsed, clean);
+          processRespondResponse(body, null, body.transcript?.trim() || "");
           return;
         }
-      } catch {
-        // Offline / demo fallback below
+
+        // Demo fallback if network or endpoint fails
+        if (r.mode === "demo") {
+          processRespondResponse(
+            {
+              ok: true,
+              keep_call_open: false,
+              call_status: "ended",
+              choice: "refund",
+              transcript: "Enforce refund and stage AADE 5.1",
+              confirmation_text: defaultConfirmationFor("refund", claimId),
+            },
+            "refund",
+            "Enforce refund"
+          );
+        }
+      } catch (err) {
+        console.warn("Failed sending utterance", err);
+        if (r.mode === "demo") {
+          processRespondResponse(
+            {
+              ok: true,
+              keep_call_open: false,
+              call_status: "ended",
+              choice: "refund",
+              transcript: "Enforce refund",
+              confirmation_text: defaultConfirmationFor("refund", claimId),
+            },
+            "refund",
+            "Enforce refund"
+          );
+        }
       } finally {
         setSubmitting(false);
-        setSubmitSource(null);
-      }
-
-      if (parsed) {
-        finalizeOfflineOrDemo(parsed, clean);
-      } else if (/\b(reject|abort|cancel|rollback)\b/i.test(clean) && reqId) {
-        r.decide(reqId, false);
-      } else {
-        setVoiceHint(`Heard “${clean}” — say “enforce refund” or “accept re-delivery”, or tap a pill below`);
       }
     },
-    [claimId, finalizeOfflineOrDemo, handleApiDecisionResponse, r, reqId]
+    [claimId, consult?.callId, processRespondResponse, r.mode, reqId]
   );
 
-  const speech = useSpeechInput((text, final) => {
-    setVoiceHint(text ? `“${text}”` : "Listening…");
+  // Auto-VAD hook attached to warm MediaStream
+  const vad = useAutoVad({
+    stream: warmStream,
+    enabled: answered && !resolvedEnd && !submitting,
+    agentSpeaking: agentSpeaking || r.speaking,
+    muted: isMuted,
+    onUtterance: (blob, mimeType, ext) => {
+      handleUtteranceBlob(blob, mimeType, ext);
+    },
+  });
+
+  // Tapping "Accept Call" on Ringing Screen
+  const handleAcceptCall = useCallback(async () => {
+    soundFx.playUiClick();
+    buzz([50, 80]);
+
+    // 1. Unlock iOS Audio & SpeechSynthesis
+    unlockAudioSession();
+
+    // 2. Open warm mic MediaStream once
+    const stream = await getWarmMicStream();
+    if (stream) {
+      setWarmStream(stream);
+    }
+
+    setAnswered(true);
+
+    // 3. Ensure server consult is active and notify desktop immediately via pickup
+    try {
+      if (!consult?.active) {
+        await fetch("/api/call/user-consult", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ req_id: reqId, claim_id: claimId || DEFAULT_CLAIM_ID }),
+        }).catch(() => {});
+      }
+      await fetch("/api/call/pickup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          call_id: consult?.callId || `CONSULT-${claimId || DEFAULT_CLAIM_ID}`,
+          claim_id: claimId || DEFAULT_CLAIM_ID,
+          req_id: reqId,
+        }),
+      }).catch(() => {});
+    } catch {
+      // offline / demo
+    }
+
+    // 4. Play Recoup opening question aloud; onEnd transitions automatically into listening!
+    speakAgentLine(openingText, true);
+  }, [claimId, consult?.active, consult?.callId, openingText, reqId, speakAgentLine]);
+
+  // 1-Tap Quick Trigger Backup (Pills & Sheet)
+  const submitQuickTrigger = useCallback(
+    async (params: { transcript: string; choice?: OperatorChoice; ui_command?: string }) => {
+      soundFx.playUiClick();
+      setTriggersOpen(false);
+      stopSpeaking();
+      setSubmitting(true);
+      buzz(25);
+
+      try {
+        const res = await fetch("/api/call/user-respond", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            transcript: params.transcript,
+            choice: params.choice,
+            ui_command: params.ui_command,
+            req_id: reqId,
+            claim_id: claimId || DEFAULT_CLAIM_ID,
+            call_id: consult?.callId,
+          }),
+        });
+
+        if (res.ok) {
+          const body = (await res.json()) as UserRespondApiBody;
+          processRespondResponse(body, params.choice ?? null, params.transcript);
+          return;
+        }
+
+        // Offline / demo fallback
+        if (params.ui_command === "open_aade") {
+          showActionToast("✓ Opened AADE myDATA XML on Desktop");
+          speakAgentLine("Displaying the AADE myDATA 5.1 credit note on your desktop screen.", true);
+        } else if (params.ui_command === "open_db") {
+          showActionToast("✓ Switched Desktop to SQLite Invoices table");
+          speakAgentLine("Switched your desktop to the SQLite vendor invoices database table.", true);
+        } else if (params.choice) {
+          processRespondResponse(
+            {
+              ok: true,
+              keep_call_open: false,
+              call_status: "ended",
+              choice: params.choice,
+              transcript: params.transcript,
+              confirmation_text: defaultConfirmationFor(params.choice, claimId),
+            },
+            params.choice,
+            params.transcript
+          );
+        }
+      } catch {
+        if (params.choice) {
+          processRespondResponse(
+            {
+              ok: true,
+              keep_call_open: false,
+              call_status: "ended",
+              choice: params.choice,
+              transcript: params.transcript,
+              confirmation_text: defaultConfirmationFor(params.choice, claimId),
+            },
+            params.choice,
+            params.transcript
+          );
+        }
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [claimId, consult?.callId, processRespondResponse, reqId, showActionToast, speakAgentLine]
+  );
+
+  // Manual fallback speech recognition (if mic stream denied or user taps center orb)
+  const speechFallback = useSpeechInput((text, final) => {
     if (final && text.trim()) {
-      submitSpeechTranscript(text.trim());
+      submitQuickTrigger({ transcript: text.trim() });
     }
   });
 
-  const stopMediaRecorder = useCallback(() => {
-    if (stopTimerRef.current) {
-      window.clearTimeout(stopTimerRef.current);
-      stopTimerRef.current = null;
-    }
-    if (recorderRef.current && recorderRef.current.state !== "inactive") {
-      recorderRef.current.stop();
-    }
-  }, []);
+  const isSpeaking = agentSpeaking || r.speaking;
+  const isHearing = vad.phase === "hearing";
+  const isSyncing = vad.phase === "syncing" || submitting;
+  const isListening = answered && !isSpeaking && !isHearing && !isSyncing && !resolvedEnd;
 
-  const toggleTapAndSpeak = useCallback(async () => {
-    soundFx.playUiClick();
-    setAnswered(true);
+  // -------------------------------------------------------------------------
+  // SCREEN 1: RINGING SCREEN (Before Call Accepted)
+  // -------------------------------------------------------------------------
+  if (!answered && !resolvedEnd) {
+    return (
+      <motion.div
+        key={`ringing-${callKey}`}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        className="absolute inset-0 z-30 flex flex-col justify-between overflow-hidden text-white"
+        style={{
+          background:
+            "radial-gradient(130% 70% at 50% 18%, rgba(16, 185, 129, 0.28) 0%, rgba(12, 13, 18, 0.96) 65%, #08090c 100%)",
+        }}
+      >
+        <StatusBar />
 
-    if (recording) {
-      stopMediaRecorder();
-      return;
-    }
-    if (speech.listening) {
-      speech.stop();
-      return;
-    }
+        {/* Top Executive Line Pill */}
+        <div className="mt-2 flex flex-col items-center px-6 text-center">
+          <div className="inline-flex items-center gap-2 rounded-full border border-ok/40 bg-ok/15 px-3.5 py-1 text-[11px] font-bold uppercase tracking-wider text-ok shadow-[0_0_18px_rgba(16,185,129,0.3)]">
+            <span className="h-2 w-2 animate-ping rounded-full bg-ok" />
+            RECOUP EXECUTIVE LINE · GROK REALTIME VOICE
+          </div>
 
-    stopSpeaking();
-
-    const canRecordAudio =
-      typeof navigator !== "undefined" &&
-      Boolean(navigator.mediaDevices?.getUserMedia) &&
-      typeof MediaRecorder !== "undefined";
-
-    if (!canRecordAudio) {
-      if (hasSpeechRecognition()) {
-        speech.start();
-        setVoiceHint("Listening — say “refund” or “re-delivery”…");
-      } else {
-        setVoiceHint("Mic unavailable — use the 1-tap resolution pills below");
-      }
-      return;
-    }
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-      const { mimeType, ext } = pickRecorderMimeType();
-      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-      const chunks: BlobPart[] = [];
-
-      recorder.ondataavailable = (ev) => {
-        if (ev.data && ev.data.size > 0) chunks.push(ev.data);
-      };
-
-      recorder.onstop = async () => {
-        setRecording(false);
-        stream.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
-        recorderRef.current = null;
-
-        const blob = new Blob(chunks, { type: recorder.mimeType || mimeType || "audio/mp4" });
-        if (blob.size === 0) {
-          setVoiceHint("No speech captured — tap mic again or use a 1-tap pill below");
-          return;
-        }
-
-        setSubmitting(true);
-        setSubmitSource("mic");
-        setVoiceHint("Transcribing via fal.ai Wizper…");
-        try {
-          const form = new FormData();
-          form.append("audio", blob, `operator-decision.${ext}`);
-          if (reqId) form.append("req_id", reqId);
-          form.append("claim_id", claimId || DEFAULT_CLAIM_ID);
-
-          const res = await fetch("/api/call/user-respond", {
-            method: "POST",
-            body: form,
-          });
-          if (res.ok) {
-            const body = (await res.json()) as UserRespondApiBody;
-            const parsed = body.transcript ? parseChoiceFromText(body.transcript) : null;
-            if (body.ok === false && !body.choice && !parsed) {
-              setVoiceHint(
-                body.transcript
-                  ? `Heard “${body.transcript}” — say “refund” or “re-delivery”, or tap below`
-                  : "Could not parse voice decision — tap a resolution pill below"
-              );
-              return;
-            }
-            handleApiDecisionResponse(body, parsed, body.transcript || "Voice authorization via Wizper STT");
-            return;
-          }
-          if (r.mode === "demo") {
-            finalizeOfflineOrDemo("refund", "Enforce €587.30 refund and stage AADE 5.1 credit note.");
-            return;
-          }
-          setVoiceHint("Wizper STT endpoint unreachable — tap a 1-tap backup pill below");
-        } catch {
-          if (r.mode === "demo") {
-            finalizeOfflineOrDemo("refund", "Enforce €587.30 refund and stage AADE 5.1 credit note.");
-          } else {
-            setVoiceHint("Offline — tap a 1-tap resolution pill below");
-          }
-        } finally {
-          setSubmitting(false);
-          setSubmitSource(null);
-        }
-      };
-
-      recorderRef.current = recorder;
-      recorder.start();
-      setRecording(true);
-      buzz(25);
-      setVoiceHint("Recording — speak your decision, then tap again to send…");
-      stopTimerRef.current = window.setTimeout(() => stopMediaRecorder(), 6500);
-    } catch {
-      setRecording(false);
-      if (hasSpeechRecognition()) {
-        speech.start();
-        setVoiceHint("Listening via browser speech — say “refund” or “re-delivery”…");
-      } else {
-        setVoiceHint("Microphone permission denied — tap a resolution pill below");
-      }
-    }
-  }, [
-    claimId,
-    finalizeOfflineOrDemo,
-    handleApiDecisionResponse,
-    r.mode,
-    recording,
-    reqId,
-    speech,
-    stopMediaRecorder,
-  ]);
-
-  const micActive = recording || speech.listening;
-  const aiSpeaking = r.speaking || localSpeaking;
-
-  return (
-    <motion.div
-      key={callKey}
-      initial={{ opacity: 0, scale: 1.03 }}
-      animate={{ opacity: 1, scale: 1 }}
-      exit={{ opacity: 0, scale: 0.98 }}
-      transition={{ duration: 0.3 }}
-      className="absolute inset-0 z-20 flex flex-col"
-      style={{
-        background: resolvedEnd
-          ? "radial-gradient(120% 60% at 50% 0%, color-mix(in oklab, var(--ok) 24%, var(--canvas)), var(--canvas) 72%)"
-          : "radial-gradient(120% 60% at 50% 0%, color-mix(in oklab, var(--signal) 22%, var(--canvas)), var(--canvas) 72%)",
-      }}
-    >
-      <StatusBar />
-
-      <div className="scroll-thin flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-7">
-        {/* Call Header & Voice Orb */}
-        <div className="mt-2 flex flex-col items-center text-center">
-          <Chip tone={resolvedEnd ? "ok" : "accent"} className="mb-1.5">
-            <Volume2 className="h-2.5 w-2.5" />
-            fal.ai Voice · Wizper STT
-          </Chip>
-          <span className="font-mono text-[11.5px] font-medium uppercase tracking-wider text-ink-3">
-            {resolvedEnd
-              ? `call completed · ${claimId}`
-              : `live operator escalation · ${String(Math.floor(secs / 60)).padStart(2, "0")}:${String(
-                  secs % 60
-                ).padStart(2, "0")}`}
-          </span>
-          <h1 className="mt-1 text-[23px] font-semibold leading-tight tracking-[-0.03em] text-ink">
-            {r.brand.brand_name} AI · Shipment D-1042 Resolution
+          <div className="mt-6 text-[13px] font-semibold uppercase tracking-widest text-emerald-400/80">
+            Incoming Executive Escalation
+          </div>
+          <h1 className="mt-1 text-[32px] font-bold tracking-tight text-white">
+            {r.brand.brand_name} AI
           </h1>
-
-          <div className="relative mt-2.5 flex h-28 w-28 shrink-0 items-center justify-center">
-            <VoiceOrb
-              variant="orb"
-              tone={resolvedEnd ? "ok" : micActive ? "danger" : "signal"}
-              ambient
-              className="absolute inset-0 h-full w-full"
-            />
-            <button
-              type="button"
-              onClick={() => {
-                soundFx.playUiClick();
-                setAnswered(true);
-                speakAgentLine(
-                  resolvedEnd ? resolvedEnd.summary : openingText,
-                  true
-                );
-              }}
-              aria-label={answered ? "Replay spoken prompt" : "Answer and play spoken prompt"}
-              className={cx(
-                "relative flex h-16 w-16 items-center justify-center rounded-full text-white shadow-lg transition-transform active:scale-95",
-                resolvedEnd
-                  ? "bg-ok text-on-solid"
-                  : micActive
-                  ? "bg-danger"
-                  : "bg-signal"
-              )}
-            >
-              {resolvedEnd ? (
-                <CheckCircle2 className="h-8 w-8" />
-              ) : micActive ? (
-                <Mic className="h-7 w-7 animate-pulse" />
-              ) : (
-                <PhoneCall className={cx("h-7 w-7", aiSpeaking && "animate-pulse")} />
-              )}
-            </button>
-          </div>
-
-          <div className="mt-1.5 flex items-center justify-center gap-2">
-            <span className="text-[12px] font-medium text-ink-2" aria-live="polite">
-              {voiceHint
-                ? voiceHint
-                : aiSpeaking
-                ? "Speaking via fal.ai Voice…"
-                : resolvedEnd
-                ? "Resolution staged · reversible receipt ready"
-                : "Ringing — tap Answer/Replay, speak decision, or tap an option"}
-            </span>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => {
-              soundFx.playUiClick();
-              setAnswered(true);
-              speakAgentLine(resolvedEnd ? resolvedEnd.summary : openingText, true);
-            }}
-            className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-line bg-surface/85 px-3 py-1 text-[11.5px] font-semibold text-ink-2 backdrop-blur hover:text-ink"
-          >
-            <Volume2 className={cx("h-3.5 w-3.5 text-accent", aiSpeaking && "animate-pulse")} />
-            {answered ? "Replay Spoken Question" : "Answer & Play Question"}
-          </button>
+          <p className="mt-1 text-[14.5px] font-medium text-emerald-200/90">
+            Shipment D-1042 · €587.30 Decision
+          </p>
         </div>
 
-        {/* Live Call Transcript Preview (Recoup AI & You) */}
-        <div className="mt-3.5 rounded-2xl border border-line bg-surface/85 p-3 backdrop-blur-xl">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="font-mono text-[10.5px] font-semibold uppercase tracking-wider text-ink-3">
-              Live Call Transcript
-            </span>
-            <span className="font-mono text-[10.5px] text-ink-3">{claimId} · INV-7781</span>
+        {/* Center Pulsing Concentric Radar Rings & Emblem */}
+        <div className="relative flex flex-1 items-center justify-center">
+          <motion.div
+            className="absolute h-64 w-64 rounded-full border border-emerald-500/20"
+            animate={{ scale: [1, 1.45, 1], opacity: [0.5, 0, 0.5] }}
+            transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute h-52 w-52 rounded-full border border-emerald-400/30"
+            animate={{ scale: [1, 1.35, 1], opacity: [0.7, 0.1, 0.7] }}
+            transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut", delay: 0.3 }}
+          />
+          <motion.div
+            className="absolute h-40 w-40 rounded-full border border-cyan-400/40 bg-emerald-500/10 shadow-[0_0_50px_rgba(16,185,129,0.4)]"
+            animate={{ scale: [1, 1.15, 1] }}
+            transition={{ duration: 1.8, repeat: Infinity, ease: "easeInOut" }}
+          />
+
+          <div className="relative flex h-28 w-28 items-center justify-center rounded-full bg-gradient-to-tr from-emerald-600 to-cyan-500 shadow-2xl">
+            <PhoneCall className="h-12 w-12 text-white animate-pulse" />
           </div>
-          <div
-            ref={transcriptBoxRef}
-            className="scroll-thin max-h-[156px] space-y-2 overflow-y-auto pr-0.5"
-            aria-live="polite"
-          >
-            {mergedTurns.map((turn, idx) => {
-              const isUser = turn.speaker === "user";
-              return (
-                <div
-                  key={`m-turn-${idx}`}
-                  className={cx(
-                    "rounded-xl border px-3 py-2 text-[12.5px] leading-snug",
-                    isUser
-                      ? "ml-5 border-signal/35 bg-signal/10 text-ink"
-                      : "mr-3 border-ok/30 bg-ok/[0.06] text-ink"
-                  )}
-                >
-                  <div className="mb-0.5 flex items-center justify-between text-[10.5px] font-semibold">
-                    <span className={isUser ? "text-signal" : "text-ok"}>
-                      {isUser ? "You" : `${r.brand.brand_name} AI`}
-                    </span>
-                    <span className="font-mono text-[9.5px] text-ink-3">
-                      {isUser ? "Wizper STT" : "fal.ai Voice"}
-                    </span>
-                  </div>
-                  <p className="text-ink-2">{turn.text}</p>
-                </div>
-              );
-            })}
+        </div>
+
+        {/* Bottom Call Card: Plain-English Preview & Big Accept Call Button */}
+        <div className="px-6 pb-9">
+          <div className="mb-6 rounded-2xl border border-white/10 bg-white/[0.06] p-3 text-center backdrop-blur-md">
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-emerald-400">
+              Audit Discrepancy Preview
+            </div>
+            <div className="mt-1 text-[13px] font-medium text-white/90">
+              22 missing/broken hubs + overcharged invoice INV-7781
+            </div>
           </div>
 
-          {approval && (
-            <div className="mt-2 border-t border-line pt-2">
+          <div className="flex flex-col items-center gap-3">
+            <button
+              type="button"
+              onClick={handleAcceptCall}
+              className="group relative flex h-20 w-full items-center justify-center gap-3.5 rounded-3xl bg-gradient-to-r from-emerald-500 via-emerald-400 to-teal-500 text-[18px] font-bold text-slate-950 shadow-[0_0_40px_rgba(16,185,129,0.65)] transition-all hover:brightness-110 active:scale-[0.98]"
+            >
+              <PhoneCall className="h-7 w-7 transition-transform group-hover:scale-110" />
+              <span>Accept Call · Hands-Free</span>
+            </button>
+
+            {reqId && (
               <button
                 type="button"
                 onClick={() => {
                   soundFx.playUiClick();
-                  setDetails((d) => !d);
+                  stopSpeaking();
+                  r.decide(reqId, false);
                 }}
-                className="text-[12px] font-medium text-accent"
+                className="mt-1 flex items-center gap-1.5 py-1 text-[13px] font-medium text-white/50 transition-colors hover:text-white/80"
               >
-                {details ? "Hide staged ERP diff" : `Inspect staged diff (${approval.tool_name})`}
+                <PhoneOff className="h-3.5 w-3.5" />
+                Decline / Keep on Hold
               </button>
-              <AnimatePresence>
-                {details && (
-                  <motion.div
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: "auto", opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
-                    className="overflow-hidden"
-                  >
-                    <div className="mt-2 overflow-hidden rounded-lg border border-line">
-                      {approval.diff_preview ? (
-                        <DiffBlock diff={approval.diff_preview} max={140} />
-                      ) : (
-                        <pre className="bg-code p-2 font-mono text-[11px] text-ink-2">
-                          {JSON.stringify(approval.args, null, 2).replace(/"pk_col":/g, '"record_id":')}
-                        </pre>
-                      )}
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
-          )}
+            )}
+          </div>
+        </div>
+      </motion.div>
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // SCREEN 2: CONNECTED LIVE SPEAKERPHONE CALL SCREEN (Multi-Turn Auto-VAD)
+  // -------------------------------------------------------------------------
+  return (
+    <motion.div
+      key={`call-${callKey}`}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="absolute inset-0 z-30 flex flex-col justify-between overflow-hidden"
+      style={{
+        background: resolvedEnd
+          ? "radial-gradient(130% 65% at 50% 0%, color-mix(in oklab, var(--ok) 25%, var(--canvas)), var(--canvas) 75%)"
+          : isHearing
+          ? "radial-gradient(130% 65% at 50% 12%, rgba(244, 63, 94, 0.22) 0%, var(--canvas) 75%)"
+          : isSpeaking
+          ? "radial-gradient(130% 65% at 50% 12%, color-mix(in oklab, var(--ok) 24%, var(--canvas)) 0%, var(--canvas) 75%)"
+          : "radial-gradient(130% 65% at 50% 12%, color-mix(in oklab, var(--signal) 22%, var(--canvas)) 0%, var(--canvas) 75%)",
+      }}
+    >
+      <StatusBar />
+
+      {/* Action Toast: Live Voice-to-Desktop sync indicator */}
+      <AnimatePresence>
+        {actionToast && (
+          <motion.div
+            initial={{ opacity: 0, y: -24, scale: 0.92 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -12, scale: 0.95 }}
+            className="absolute left-5 right-5 top-[58px] z-40 flex items-center gap-2.5 rounded-2xl border border-ok/50 bg-ok/20 px-4 py-2.5 text-[13px] font-semibold text-ink shadow-[0_10px_30px_rgba(0,0,0,0.3)] backdrop-blur-xl"
+          >
+            <Monitor className="h-4 w-4 shrink-0 animate-pulse text-ok" />
+            <span className="truncate">{actionToast}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <div className="flex min-h-0 flex-1 flex-col justify-between px-5 pb-6">
+        {/* Header: Call Timer & Hands-Free Emerald Badge */}
+        <div className="mt-1 flex flex-col items-center text-center">
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-ok/40 bg-ok/15 px-3 py-0.5 text-[11px] font-bold uppercase tracking-wider text-ok">
+              <span className="h-2 w-2 rounded-full bg-ok animate-pulse" />
+              {resolvedEnd ? "CALL COMPLETED" : "LIVE CALL · HANDS-FREE"}
+            </span>
+            <span className="font-mono text-[12px] font-semibold text-ink-2">
+              {String(Math.floor(secs / 60)).padStart(2, "0")}:{String(secs % 60).padStart(2, "0")}
+            </span>
+          </div>
+
+          <h2 className="mt-1 text-[21px] font-bold tracking-tight text-ink">
+            {r.brand.brand_name} AI · D-1042
+          </h2>
+          <div className="text-[12px] font-medium text-ink-3">
+            Executive Line · Grok Realtime Voice &amp; Auto-VAD
+          </div>
         </div>
 
-        {/* Completion Card OR Active Decision Controls */}
-        <div className="mt-auto pt-4">
-          {resolvedEnd ? (
+        {/* Centerpiece 3D/Radial Voice Visualizer */}
+        <div className="my-auto flex flex-col items-center py-2">
+          <div className="relative flex h-52 w-52 items-center justify-center">
+            {/* Concentric Reactive Rings driven by real audio energy */}
             <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="space-y-3 rounded-3xl border border-ok/45 bg-ok/12 p-4 shadow-card backdrop-blur-xl"
-            >
-              <div className="flex items-start gap-2.5">
-                <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-ok" />
-                <div className="min-w-0 flex-1">
-                  <div className="text-[14.5px] font-semibold leading-snug text-ink">
-                    Applied &amp; Vendor Emailed · Undo Ready
-                  </div>
-                  <div className="mt-0.5 font-mono text-[11px] font-semibold text-ok">
-                    {resolvedEnd.choice === "redelivery"
-                      ? "22-Unit Replacement + AADE 9.3 (€202.30 Credit + Email Vendor)"
-                      : "AP Hold INV-7781 + AADE 5.1 (€587.30 Net / €728.25 Gross + Email Vendor)"}
-                  </div>
-                  <p className="mt-1.5 text-[12.5px] leading-relaxed text-ink-2">
-                    {resolvedEnd.summary}
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex gap-2 pt-1">
-                <button
-                  type="button"
-                  disabled={Boolean(r.rewind)}
-                  onClick={() => {
-                    soundFx.playUiClick();
-                    buzz([30, 40]);
-                    r.undo();
-                    onDismissCompleted();
-                  }}
-                  className={cx(btn("warn", "lg"), "h-12 flex-1 rounded-2xl text-[14px]")}
-                >
-                  <Undo2 className={cx("h-4 w-4", r.rewind && "animate-spin [animation-direction:reverse]")} />
-                  {r.rewind ? "Rewinding…" : "Undo Staged Commit"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    soundFx.playUiClick();
-                    onDismissCompleted();
-                  }}
-                  className={cx(btn("outline", "lg"), "h-12 rounded-2xl px-4 text-[13.5px]")}
-                >
-                  Done
-                </button>
-              </div>
-
-              {/* Next Prompt Suggestion when present */}
-              {r.offer && (
-                <div className="mt-2 rounded-2xl border border-signal/40 bg-surface/90 p-3 shadow-sm">
-                  <div className="flex items-center gap-2 text-[11.5px] font-semibold text-signal">
-                    <Sparkles className="h-3.5 w-3.5" /> Next Audit Suggestion
-                  </div>
-                  <div className="mt-1 text-[13px] font-semibold text-ink">
-                    Recoup found €175.00 more on paid shipments D-1017 &amp; D-1031 — Run this next?
-                  </div>
-                  <div className="mt-2.5 flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        soundFx.playUiClick();
-                        r.acceptOffer(r.offer!.offer_id);
-                        onDismissCompleted();
-                      }}
-                      className={cx(btn("signal", "sm"), "h-9 flex-1 rounded-xl font-semibold")}
-                    >
-                      Approve &amp; Run
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        soundFx.playUiClick();
-                        r.dismissOffer(r.offer!.offer_id);
-                      }}
-                      className={cx(btn("outline", "sm"), "h-9 rounded-xl")}
-                    >
-                      Dismiss
-                    </button>
-                  </div>
-                </div>
+              className={cx(
+                "absolute inset-0 rounded-full border transition-colors",
+                resolvedEnd
+                  ? "border-ok/30"
+                  : isHearing
+                  ? "border-rose-500/40"
+                  : isSpeaking
+                  ? "border-emerald-400/40"
+                  : "border-signal/30"
               )}
-            </motion.div>
-          ) : (
-            <div className="space-y-2.5">
-              {/* Prominent Tap & Speak Decision Microphone Button */}
+              animate={{
+                scale: isHearing ? [1, 1.25, 1] : isSpeaking ? [1, 1.18, 1] : [1, 1.08, 1],
+                opacity: [0.4, 0.8, 0.4],
+              }}
+              transition={{ duration: isHearing ? 1.2 : 2.4, repeat: Infinity, ease: "easeInOut" }}
+            />
+            <motion.div
+              className={cx(
+                "absolute -inset-4 rounded-full border border-dashed transition-colors",
+                isHearing ? "border-rose-400/30" : "border-emerald-500/25"
+              )}
+              animate={{ rotate: 360 }}
+              transition={{ duration: 25, repeat: Infinity, ease: "linear" }}
+            />
+
+            {/* Embedded Canvas VoiceOrb */}
+            <VoiceOrb
+              variant="orb"
+              tone={resolvedEnd ? "ok" : isHearing ? "danger" : isSpeaking ? "ok" : "signal"}
+              active
+              ambient={!isSpeaking && !isHearing}
+              className="absolute inset-2 h-48 w-48"
+            />
+
+            {/* Center Interactive Orb Button */}
+            <button
+              type="button"
+              onClick={() => {
+                soundFx.playUiClick();
+                if (isHearing) {
+                  // Fast shortcut: tap center orb while hearing to send turn immediately!
+                  vad.sendNow();
+                } else if (isSpeaking) {
+                  stopSpeaking();
+                } else if (!resolvedEnd) {
+                  speakAgentLine(latestAgentTurn?.text || openingText, true);
+                }
+              }}
+              aria-label="Voice orb status and instant send shortcut"
+              className={cx(
+                "relative z-10 flex h-20 w-20 items-center justify-center rounded-full text-white shadow-2xl transition-transform active:scale-95",
+                resolvedEnd
+                  ? "bg-ok text-on-solid"
+                  : isHearing
+                  ? "bg-danger text-white shadow-[0_0_30px_rgba(244,63,94,0.6)]"
+                  : isSpeaking
+                  ? "bg-ok text-on-solid shadow-[0_0_30px_rgba(16,185,129,0.5)]"
+                  : isSyncing
+                  ? "bg-signal text-white"
+                  : "bg-surface border border-line text-ink shadow-md"
+              )}
+            >
+              {resolvedEnd ? (
+                <CheckCircle2 className="h-9 w-9" />
+              ) : isSyncing ? (
+                <Loader2 className="h-9 w-9 animate-spin text-white" />
+              ) : isHearing ? (
+                <Mic className="h-9 w-9 animate-pulse" />
+              ) : isSpeaking ? (
+                <Volume2 className="h-9 w-9 animate-pulse" />
+              ) : (
+                <Mic className="h-9 w-9 text-signal" />
+              )}
+            </button>
+          </div>
+
+          {/* Unmistakable Live State Headline */}
+          <div className="mt-3 flex flex-col items-center text-center">
+            <div
+              className={cx(
+                "text-[15.5px] font-bold tracking-tight uppercase transition-colors",
+                resolvedEnd
+                  ? "text-ok"
+                  : isSpeaking
+                  ? "text-ok"
+                  : isHearing
+                  ? "text-danger"
+                  : isSyncing
+                  ? "text-signal"
+                  : "text-signal"
+              )}
+            >
+              {resolvedEnd
+                ? "DECISION APPLIED · REVERSIBLE UNDO READY"
+                : isSpeaking
+                ? "RECOUP SPEAKING…"
+                : isHearing
+                ? "HEARING YOU…"
+                : isSyncing
+                ? "SYNCING WITH DESKTOP…"
+                : "LISTENING LIVE — JUST SPEAK…"}
+            </div>
+            <p className="mt-0.5 max-w-[320px] text-[12px] font-medium text-ink-2">
+              {resolvedEnd
+                ? "ERP staged and vendor email ready · reversible receipt below"
+                : isSpeaking
+                ? "Grok Realtime Voice audio active"
+                : isHearing
+                ? "Auto-sends after 0.85s pause · or tap orb to send now"
+                : isSyncing
+                ? "Wizper STT & desktop synchronization in progress…"
+                : 'Try: “Show me the AADE tax filing on my screen” or “Enforce refund”'}
+            </p>
+          </div>
+        </div>
+
+        {/* Live Rolling Subtitle Strip (Latest Recoup AI & You lines) */}
+        {!resolvedEnd && (
+          <div className="mb-4 space-y-1.5 rounded-2xl border border-line bg-surface/75 p-3 backdrop-blur-xl">
+            {latestAgentTurn && (
+              <div className="text-[12.5px] leading-snug">
+                <span className="font-bold text-ok">{r.brand.brand_name} AI: </span>
+                <span className="text-ink-2">{latestAgentTurn.text}</span>
+              </div>
+            )}
+            {latestUserTurn && (
+              <div className="text-[12.5px] leading-snug">
+                <span className="font-bold text-signal">You: </span>
+                <span className="text-ink-2">{latestUserTurn.text}</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* SCREEN 3: CALL COMPLETED CARD */}
+        {resolvedEnd ? (
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="space-y-3 rounded-3xl border border-ok/45 bg-ok/12 p-4 shadow-card backdrop-blur-xl"
+          >
+            <div className="flex items-start gap-2.5">
+              <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-ok" />
+              <div className="min-w-0 flex-1">
+                <div className="text-[14.5px] font-semibold leading-snug text-ink">
+                  Applied &amp; Vendor Emailed · Undo Ready
+                </div>
+                <div className="mt-0.5 font-mono text-[11px] font-semibold text-ok">
+                  {resolvedEnd.choice === "redelivery"
+                    ? "22-Unit Replacement + AADE 9.3 (€202.30 Credit)"
+                    : "AP Hold INV-7781 + AADE 5.1 (€587.30 Net / €728.25 Gross)"}
+                </div>
+                <p className="mt-1.5 text-[12.5px] leading-relaxed text-ink-2">
+                  {resolvedEnd.summary}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex gap-2 pt-1">
               <button
                 type="button"
-                disabled={submitting}
-                onClick={toggleTapAndSpeak}
-                aria-pressed={micActive}
-                className={cx(
-                  "flex h-16 w-full items-center justify-center gap-3 rounded-2xl border text-[15.5px] font-semibold shadow-lg transition-all active:scale-[0.99]",
-                  micActive
-                    ? "border-danger bg-danger text-white"
-                    : "border-ok/50 bg-ok text-on-solid hover:brightness-105"
-                )}
+                disabled={Boolean(r.rewind)}
+                onClick={() => {
+                  soundFx.playUiClick();
+                  buzz([30, 40]);
+                  r.undo();
+                  onDismissCompleted();
+                }}
+                className={cx(btn("warn", "lg"), "h-12 flex-1 rounded-2xl text-[14px]")}
               >
-                {submitting ? (
-                  submitSource === "tap" ? (
-                    <>
-                      <Loader2 className="h-5 w-5 animate-spin" />
-                      Applying Decision &amp; Emailing Vendor…
-                    </>
-                  ) : (
-                    <>
-                      <Loader2 className="h-5 w-5 animate-spin" />
-                      Transcribing via fal.ai Wizper…
-                    </>
-                  )
-                ) : recording ? (
-                  <>
-                    <Square className="h-5 w-5 fill-current" />
-                    Tap to Send Spoken Decision
-                  </>
-                ) : speech.listening ? (
-                  <>
-                    <Mic className="h-5 w-5 animate-pulse" />
-                    Listening — Speak Now…
-                  </>
-                ) : (
-                  <>
-                    <Mic className="h-5 w-5" />
-                    Tap &amp; Speak Decision
-                  </>
-                )}
+                <Undo2 className={cx("h-4 w-4", r.rewind && "animate-spin [animation-direction:reverse]")} />
+                {r.rewind ? "Rewinding…" : "Undo Staged Commit"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  soundFx.playUiClick();
+                  onDismissCompleted();
+                }}
+                className={cx(btn("outline", "lg"), "h-12 rounded-2xl px-4 text-[13.5px]")}
+              >
+                Done
+              </button>
+            </div>
+
+            {/* Next Prompt Suggestion when present */}
+            {r.offer && (
+              <div className="mt-2 rounded-2xl border border-signal/40 bg-surface/90 p-3 shadow-sm">
+                <div className="flex items-center gap-2 text-[11.5px] font-semibold text-signal">
+                  <Sparkles className="h-3.5 w-3.5" /> Next Audit Suggestion
+                </div>
+                <div className="mt-1 text-[13px] font-semibold text-ink">
+                  Recoup found €175.00 more on paid shipments D-1017 &amp; D-1031 — Run this next?
+                </div>
+                <div className="mt-2.5 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundFx.playUiClick();
+                      r.acceptOffer(r.offer!.offer_id);
+                      onDismissCompleted();
+                    }}
+                    className={cx(btn("signal", "sm"), "h-9 flex-1 rounded-xl font-semibold")}
+                  >
+                    Approve &amp; Run
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundFx.playUiClick();
+                      r.dismissOffer(r.offer!.offer_id);
+                    }}
+                    className={cx(btn("outline", "sm"), "h-9 rounded-xl")}
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            )}
+          </motion.div>
+        ) : (
+          /* SLEEK ENTERPRISE CALL BOTTOM DOCK (4 NATIVE PHONE CONTROLS) */
+          <div className="space-y-3">
+            {/* 4 Bottom Controls */}
+            <div className="grid grid-cols-4 items-center justify-items-center gap-2 rounded-3xl border border-line bg-surface/85 px-3 py-2.5 backdrop-blur-2xl">
+              {/* 1. Mute Mic Toggle */}
+              <button
+                type="button"
+                onClick={() => {
+                  soundFx.playUiClick();
+                  setIsMuted((m) => !m);
+                }}
+                className="flex flex-col items-center gap-1 text-ink-2 transition-transform active:scale-95"
+              >
+                <div
+                  className={cx(
+                    "flex h-12 w-12 items-center justify-center rounded-full border transition-colors",
+                    isMuted
+                      ? "border-warn/50 bg-warn/20 text-warn"
+                      : "border-line bg-surface text-ink hover:text-ink"
+                  )}
+                >
+                  {isMuted ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
+                </div>
+                <span className="text-[11px] font-medium text-ink-3">
+                  {isMuted ? "Muted" : "Mute"}
+                </span>
               </button>
 
-              {/* Two Crisp 1-Tap Stage Backup Pills */}
-              <div className="space-y-2 pt-0.5">
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={() => submitChoicePill("refund")}
-                  className="flex w-full items-center justify-between gap-2 rounded-2xl border border-ok/45 bg-ok/12 px-4 py-3 text-left transition-colors hover:bg-ok/18 active:scale-[0.99] disabled:opacity-50"
+              {/* 2. Speaker (ON/OFF) Toggle */}
+              <button
+                type="button"
+                onClick={() => {
+                  soundFx.playUiClick();
+                  r.toggleVoice();
+                }}
+                className="flex flex-col items-center gap-1 text-ink-2 transition-transform active:scale-95"
+              >
+                <div
+                  className={cx(
+                    "flex h-12 w-12 items-center justify-center rounded-full border transition-colors",
+                    r.voiceOn
+                      ? "border-ok/40 bg-ok/15 text-ok"
+                      : "border-line bg-surface text-ink-3"
+                  )}
                 >
-                  <span className="flex min-w-0 items-center gap-2.5">
-                    {submitting && submitSource === "tap" ? (
-                      <Loader2 className="h-4 w-4 shrink-0 animate-spin text-ok" />
-                    ) : (
-                      <FileCheck2 className="h-4 w-4 shrink-0 text-ok" />
-                    )}
-                    <span className="truncate text-[13.5px] font-semibold text-ink">
-                      {submitting && submitSource === "tap"
-                        ? "Applying Decision & Emailing Vendor…"
-                        : "Enforce €587.30 Refund + Email Vendor"}
-                    </span>
-                  </span>
-                  <Chip tone="ok" solid className="shrink-0 text-[11px]">
-                    AADE 5.1 + Hold INV-7781
-                  </Chip>
-                </button>
+                  {r.voiceOn ? <Volume2 className="h-5 w-5" /> : <VolumeX className="h-5 w-5" />}
+                </div>
+                <span className="text-[11px] font-medium text-ink-3">
+                  {r.voiceOn ? "Speaker" : "Muted"}
+                </span>
+              </button>
 
+              {/* 3. Quick Voice Triggers Drawer Trigger */}
+              <button
+                type="button"
+                onClick={() => {
+                  soundFx.playUiClick();
+                  setTriggersOpen((v) => !v);
+                }}
+                className="flex flex-col items-center gap-1 text-ink-2 transition-transform active:scale-95"
+              >
+                <div
+                  className={cx(
+                    "flex h-12 w-12 items-center justify-center rounded-full border transition-colors",
+                    triggersOpen
+                      ? "border-signal/50 bg-signal/20 text-signal"
+                      : "border-line bg-surface text-ink"
+                  )}
+                >
+                  <Zap className="h-5 w-5 text-signal" />
+                </div>
+                <span className="text-[11px] font-medium text-ink-3">Triggers</span>
+              </button>
+
+              {/* 4. Red End Call Button */}
+              <button
+                type="button"
+                onClick={() => {
+                  soundFx.playUiClick();
+                  buzz(50);
+                  stopSpeaking();
+                  warmStream?.getTracks().forEach((t) => t.stop());
+                  setWarmStream(null);
+                  if (reqId) {
+                    r.decide(reqId, false);
+                  }
+                  onDismissCompleted();
+                }}
+                className="flex flex-col items-center gap-1 text-ink-2 transition-transform active:scale-95"
+              >
+                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-danger text-white shadow-lg shadow-danger/30 hover:bg-danger/90">
+                  <PhoneOff className="h-5 w-5" />
+                </div>
+                <span className="text-[11px] font-medium text-danger">End</span>
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* QUICK VOICE TRIGGERS BOTTOM DRAWER / SHEET */}
+      <AnimatePresence>
+        {triggersOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="absolute inset-0 z-50 flex flex-col justify-end bg-black/60 backdrop-blur-sm"
+          >
+            <motion.div
+              initial={{ y: "100%" }}
+              animate={{ y: 0 }}
+              exit={{ y: "100%" }}
+              transition={{ type: "spring", damping: 25, stiffness: 300 }}
+              className="rounded-t-3xl border-t border-line bg-canvas p-5 shadow-2xl"
+            >
+              <div className="mb-3 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Zap className="h-4 w-4 text-signal" />
+                  <span className="text-[14px] font-bold text-ink">
+                    Quick Voice Triggers (Noise Backup)
+                  </span>
+                </div>
                 <button
                   type="button"
-                  disabled={submitting}
-                  onClick={() => submitChoicePill("redelivery")}
-                  className="flex w-full items-center justify-between gap-2 rounded-2xl border border-line bg-surface/90 px-4 py-3 text-left transition-colors hover:border-signal/50 hover:bg-surface active:scale-[0.99] disabled:opacity-50"
+                  onClick={() => setTriggersOpen(false)}
+                  className="rounded-full p-1 text-ink-3 hover:text-ink"
                 >
-                  <span className="flex min-w-0 items-center gap-2.5">
-                    {submitting && submitSource === "tap" ? (
-                      <Loader2 className="h-4 w-4 shrink-0 animate-spin text-signal" />
-                    ) : (
-                      <PackageCheck className="h-4 w-4 shrink-0 text-signal" />
-                    )}
-                    <span className="truncate text-[13.5px] font-semibold text-ink">
-                      {submitting && submitSource === "tap"
-                        ? "Applying Decision & Emailing Vendor…"
-                        : "Accept 22-Unit Re-Delivery + Email Vendor"}
-                    </span>
-                  </span>
-                  <Chip tone="signal" className="shrink-0 text-[11px]">
-                    €202.30 Credit + AADE 9.3
-                  </Chip>
+                  <X className="h-5 w-5" />
                 </button>
               </div>
 
-              {reqId && (
-                <div className="flex justify-center pt-1">
-                  <button
-                    type="button"
-                    disabled={submitting}
-                    onClick={() => {
-                      buzz(50);
-                      soundFx.playUiClick();
-                      stopSpeaking();
-                      r.decide(reqId, false);
-                    }}
-                    className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[12px] font-medium text-ink-3 hover:text-danger"
-                  >
-                    <PhoneOff className="h-3.5 w-3.5" />
-                    Decline &amp; Roll Back Workspace
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
+              <p className="mb-4 text-[12px] text-ink-3">
+                Send instant voice-to-desktop commands or decisions without microphone input:
+              </p>
+
+              <div className="space-y-2.5">
+                {/* 1. Show AADE on PC */}
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() =>
+                    submitQuickTrigger({
+                      transcript: "Show me the AADE tax filing on my screen",
+                      ui_command: "open_aade",
+                    })
+                  }
+                  className="flex w-full items-center justify-between rounded-2xl border border-line bg-surface/90 px-4 py-3 text-left transition-colors hover:border-signal/50 hover:bg-surface active:scale-[0.99]"
+                >
+                  <span className="flex items-center gap-3">
+                    <FileCode2 className="h-5 w-5 text-signal" />
+                    <div>
+                      <div className="text-[13.5px] font-semibold text-ink">Show AADE on PC</div>
+                      <div className="text-[11.5px] text-ink-3">
+                        Pops AADE myDATA 5.1 XML on desktop screen
+                      </div>
+                    </div>
+                  </span>
+                  <Chip tone="signal">open_aade</Chip>
+                </button>
+
+                {/* 2. Show DB on PC */}
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() =>
+                    submitQuickTrigger({
+                      transcript: "Show me the database invoices table",
+                      ui_command: "open_db",
+                    })
+                  }
+                  className="flex w-full items-center justify-between rounded-2xl border border-line bg-surface/90 px-4 py-3 text-left transition-colors hover:border-signal/50 hover:bg-surface active:scale-[0.99]"
+                >
+                  <span className="flex items-center gap-3">
+                    <Database className="h-5 w-5 text-signal" />
+                    <div>
+                      <div className="text-[13.5px] font-semibold text-ink">Show DB on PC</div>
+                      <div className="text-[11.5px] text-ink-3">
+                        Switches desktop HUD to SQLite invoices table
+                      </div>
+                    </div>
+                  </span>
+                  <Chip tone="signal">open_db</Chip>
+                </button>
+
+                {/* 3. Enforce €587 Refund */}
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() =>
+                    submitQuickTrigger({
+                      transcript: "Enforce the 587 euro refund and send the claim",
+                      choice: "refund",
+                    })
+                  }
+                  className="flex w-full items-center justify-between rounded-2xl border border-ok/45 bg-ok/12 px-4 py-3 text-left transition-colors hover:bg-ok/18 active:scale-[0.99]"
+                >
+                  <span className="flex items-center gap-3">
+                    <FileCheck2 className="h-5 w-5 text-ok" />
+                    <div>
+                      <div className="text-[13.5px] font-semibold text-ink">
+                        Enforce €587 Refund
+                      </div>
+                      <div className="text-[11.5px] text-ink-3">
+                        Stage AADE 5.1 Credit Note + Hold INV-7781
+                      </div>
+                    </div>
+                  </span>
+                  <Chip tone="ok" solid>
+                    €587.30 Net
+                  </Chip>
+                </button>
+
+                {/* 4. Accept 22 Replacement */}
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() =>
+                    submitQuickTrigger({
+                      transcript: "Accept free replacement delivery of the 22 units tomorrow",
+                      choice: "redelivery",
+                    })
+                  }
+                  className="flex w-full items-center justify-between rounded-2xl border border-line bg-surface/90 px-4 py-3 text-left transition-colors hover:border-signal/50 hover:bg-surface active:scale-[0.99]"
+                >
+                  <span className="flex items-center gap-3">
+                    <PackageCheck className="h-5 w-5 text-signal" />
+                    <div>
+                      <div className="text-[13.5px] font-semibold text-ink">
+                        Accept 22 Replacement
+                      </div>
+                      <div className="text-[11.5px] text-ink-3">
+                        Next-day 22 hubs + €202.30 AADE 9.3 credit
+                      </div>
+                    </div>
+                  </span>
+                  <Chip tone="signal">22 Hubs</Chip>
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 }
@@ -1106,7 +1359,7 @@ function GateHome({
           <div className="leading-tight">
             <div className="text-[17px] font-semibold tracking-tight text-ink">Mobile Companion</div>
             <div className="max-w-[220px] truncate text-[12px] text-ink-3">
-              <span className="font-medium text-ink-2">{r.brand.brand_name}</span> · fal.ai Voice · Wizper STT
+              <span className="font-medium text-ink-2">{r.brand.brand_name}</span> · Grok Realtime Voice
             </div>
           </div>
         </div>
@@ -1129,7 +1382,7 @@ function GateHome({
       </div>
 
       <div className="scroll-thin flex-1 space-y-3 overflow-y-auto px-5 pb-4">
-        {/* State 2 — Tier 1 Push Notification Card: Pre-call Voice Escalation Waiting */}
+        {/* Tier-1 Push Notification Card: Voice Call Waiting */}
         {r.pendingApproval && r.pendingApproval.channel === "voice_call" && (
           <motion.div
             initial={{ opacity: 0, y: -8 }}
@@ -1161,7 +1414,7 @@ function GateHome({
           </motion.div>
         )}
 
-        {/* State 2 — Tier 1 Push Notification Card: Lightweight Notification Approval */}
+        {/* Tier-1 Push Notification Card: Notification Approval */}
         {r.pendingApproval && r.pendingApproval.channel === "notification" && (
           <motion.div
             initial={{ opacity: 0, y: -8 }}
@@ -1175,7 +1428,7 @@ function GateHome({
               <Chip tone="danger">Vendor Email</Chip>
             </div>
             <div className="mt-2 text-[15px] font-semibold leading-snug text-ink">
-              Approve Outbound Vendor Email to accounts@kappaoffice.example
+              Approve Outbound Vendor Email
             </div>
             <p className="mt-1 text-[12.5px] leading-relaxed text-ink-2">
               {r.pendingApproval.spoken_summary || r.pendingApproval.risk_reason}
@@ -1199,7 +1452,7 @@ function GateHome({
           </motion.div>
         )}
 
-        {/* State 3 — Standby Connected Card */}
+        {/* Standby Connected Card */}
         <div className="relative overflow-hidden rounded-3xl border border-line bg-surface p-5 shadow-card">
           <div className="flex items-center gap-4">
             <div className="relative flex h-16 w-16 items-center justify-center">
@@ -1214,11 +1467,11 @@ function GateHome({
             </div>
             <div>
               <div className="text-[19px] font-semibold tracking-tight text-ink">
-                Connected to Desktop · Ready for Approvals &amp; Calls
+                Connected to Desktop · Ready for Live Calls
               </div>
               <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-ink-3">
                 <Dot tone={r.connected ? "ok" : "neutral"} live={r.connected} />
-                {r.connected ? "Live SSE & 1.5s Poll Sync · fal.ai Voice ready" : "Standby · demo ready"}
+                {r.connected ? "Live SSE Sync · Grok Realtime Voice Ready" : "Standby · demo ready"}
               </div>
             </div>
           </div>
@@ -1259,7 +1512,7 @@ function GateHome({
           <VoicePill r={r} compact />
         </div>
 
-        {/* State 2 — Tier 1 Push Notification Card: Next Prompt Suggestion */}
+        {/* Tier-1 Push Notification Card: Next Prompt Suggestion */}
         <AnimatePresence>
           {r.offer && (
             <motion.div
@@ -1349,15 +1602,7 @@ export function MobileGate({
   const unlockAudio = useCallback(() => {
     soundFx.playUiClick();
     soundFx.playStageTick(0);
-    try {
-      if (typeof window !== "undefined" && window.speechSynthesis) {
-        const u = new SpeechSynthesisUtterance(" ");
-        u.volume = 0.01;
-        window.speechSynthesis.speak(u);
-      }
-    } catch {
-      // ignore
-    }
+    unlockAudioSession();
     setAudioUnlocked(true);
     try {
       sessionStorage.setItem("recoup.audioUnlocked", "1");
@@ -1447,9 +1692,9 @@ export function MobileGate({
           Step away from your desk — Recoup calls your phone.
         </h2>
         <p className="mt-3 text-[14px] leading-relaxed text-ink-2">
-          Powered by <span className="font-semibold text-ink">fal.ai Voice</span> &amp;{" "}
+          Powered by <span className="font-semibold text-ink">Grok Realtime Voice</span> &amp;{" "}
           <span className="font-semibold text-ink">Wizper STT</span>. Hear the Shipment D-1042 discrepancy summary aloud,
-          speak your decision hands-free, and stage Greek AADE <code className="font-mono text-[12.5px]">myDATA</code>{" "}
+          speak your decision hands-free with auto voice activity detection, and stage Greek AADE <code className="font-mono text-[12.5px]">myDATA</code>{" "}
           credit notes with 1-tap reversible undo.
         </p>
         <button

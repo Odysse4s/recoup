@@ -43,7 +43,7 @@ function VoiceCaption({
 }) {
   const listening = mode === "listening";
   const signal = useVoiceSignal();
-  const provider = !listening && signal.provider === "fal" ? "fal.ai Voice" : null;
+  const provider = !listening && signal.provider === "fal" ? "Grok Voice · fal.ai" : null;
   const { spoken, rest } = useMemo(() => {
     if (listening) return { spoken: text, rest: "" };
     const pos = Math.round(progress * text.length);
@@ -73,17 +73,17 @@ function VoiceCaption({
       >
         <div
           className="flex shrink-0 items-center gap-2"
-          title={listening ? "Push-to-talk microphone active" : provider ? "Cloud TTS: fal.ai Voice" : "Voice briefing active"}
+          title={listening ? "Push-to-talk microphone active" : provider ? "Cloud Voice: Grok Voice · fal.ai" : "Voice briefing active"}
         >
           <Chip tone={listening ? "danger" : "accent"}>
             {listening ? <Mic className="h-2.5 w-2.5" /> : <Volume2 className="h-2.5 w-2.5" />}
-            {listening ? "Push-to-talk" : provider ?? "Voice briefing"}
+            {listening ? "Push-to-talk" : provider ?? "Grok Voice · fal.ai"}
           </Chip>
           <VoiceOrb variant="bars" tone={listening ? "danger" : "accent"} className="h-5 w-[76px]" />
         </div>
         <p className="min-w-0 flex-1 truncate text-[13.5px] font-medium leading-snug tracking-tight">
           {listening && !text ? (
-            <span className="text-ink-3">Listening — speak a vendor audit goal or “approve”…</span>
+            <span className="text-ink-3">Listening — speak a supplier audit goal or “approve”…</span>
           ) : (
             <>
               <span className={listening ? "text-ink" : "karaoke-spoken"}>{spoken}</span>
@@ -245,7 +245,7 @@ export function CommandBar({
               ? "Drop receiving photo or delivery note to audit into workspace inbox…"
               : speech.listening
               ? "Listening…"
-              : "Ask Recoup to audit a shipment, verify contract rates, or stage a vendor claim…"
+              : "Check delivery D-1042 from Kappa Office Systems — 22 hubs arrived missing or broken and invoice INV-7781 is overcharged"
           }
           aria-label="Goal"
           className="h-full min-w-0 flex-1 bg-transparent text-[14px] text-ink placeholder:text-ink-3 focus:outline-none"
@@ -379,7 +379,7 @@ export function CommandBar({
                   onClick={() => {
                     soundFx.playUiClick();
                     onChange(
-                      `Audit uploaded evidence ${ev.source} against our Kappa Office Systems contract, hold any overbilled invoice, and stage the credit claim`
+                      "Check delivery D-1042 from Kappa Office Systems — 22 hubs arrived missing or broken and invoice INV-7781 is overcharged"
                     );
                     inputRef.current?.focus();
                   }}

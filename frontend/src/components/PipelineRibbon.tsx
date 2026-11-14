@@ -19,7 +19,7 @@ const STEPS: RibbonStep[] = [
   { id: "forge", num: "2", label: "Build Safe Tool", stages: ["forge"], anchorKeys: ["stage:forge"] },
   { id: "rehearse", num: "3", label: "Dry-Run in Clone", stages: ["rehearse", "verify"], anchorKeys: ["stage:rehearse", "stage:verify"] },
   { id: "gate", num: "4", label: "Your Approval", stages: ["gate"], anchorKeys: ["stage:gate"] },
-  { id: "commit", num: "5", label: "Apply & Email Vendor", stages: ["commit"], anchorKeys: ["stage:commit"] },
+  { id: "commit", num: "5", label: "Apply & Email Supplier", stages: ["commit"], anchorKeys: ["stage:commit"] },
   { id: "anticipate", num: "6", label: "Next Suggestion", stages: ["anticipate"], anchorKeys: ["stage:anticipate"] },
 ];
 

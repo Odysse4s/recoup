@@ -132,7 +132,7 @@ export function RiskGateCard({ approval, onDecide }: { approval: ApprovalNeededP
         </span>
         <div className="min-w-0 flex-1">
           <h3 className="truncate text-[13px] font-bold text-ink sm:text-[14px]">
-            Waiting for Your Approval — Live ERP &amp; Vendor Email Untouched
+            Waiting for Your Approval — Live ERP &amp; Supplier Email Held
           </h3>
         </div>
         <Chip tone="danger" className="shrink-0">live ERP untouched</Chip>
@@ -142,23 +142,38 @@ export function RiskGateCard({ approval, onDecide }: { approval: ApprovalNeededP
       <div className="space-y-3.5 p-4">
         <div>
           <div className="mb-2 flex items-center justify-between text-[11.5px] font-semibold uppercase tracking-wider text-ink-3">
-            <span>What Recoup Staged</span>
+            <span>Executive Audit Summary</span>
             {counts && (
               <span className="font-mono text-[10.5px] normal-case tracking-normal text-ink-2">
-                {counts.db} DB rows · {counts.outbox} email · {counts.files} files
+                {counts.db} DB rows · {counts.outbox} email · {counts.files} files staged
               </span>
             )}
           </div>
           <ul className="space-y-2">
-            {bullets.map((b, i) => (
-              <li
-                key={i}
-                className="flex items-start gap-2.5 rounded-lg border border-accent/25 bg-accent/[0.04] p-2.5 text-[13px] font-medium leading-snug text-ink"
-              >
-                <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
-                <span>{b}</span>
-              </li>
-            ))}
+            <li className="flex items-start gap-2.5 rounded-lg border border-danger/25 bg-danger/[0.04] p-2.5 text-[12.5px] leading-snug text-ink">
+              <span className="mt-0.5 shrink-0 rounded bg-danger/15 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase text-danger">
+                1. Problem Found
+              </span>
+              <span className="min-w-0 flex-1 font-medium">
+                Ordered 120 hubs → 22 arrived missing/broken + invoice overcharged = <span className="font-semibold text-danger">€587.30 owed back</span>
+              </span>
+            </li>
+            <li className="flex items-start gap-2.5 rounded-lg border border-warn/25 bg-warn/[0.04] p-2.5 text-[12.5px] leading-snug text-ink">
+              <span className="mt-0.5 shrink-0 rounded bg-warn/15 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase text-warn">
+                2. Staged in Safe Clone
+              </span>
+              <span className="min-w-0 flex-1 font-medium">
+                Invoice INV-7781 frozen · Greek AADE myDATA €587.30 tax credit ready · Supplier email drafted
+              </span>
+            </li>
+            <li className="flex items-start gap-2.5 rounded-lg border border-ok/25 bg-ok/[0.04] p-2.5 text-[12.5px] leading-snug text-ink">
+              <span className="mt-0.5 shrink-0 rounded bg-ok/15 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase text-ok">
+                3. Your Decision
+              </span>
+              <span className="min-w-0 flex-1 font-medium">
+                <span className="font-semibold text-ok">Enforce €587.30 Refund + AADE Tax Credit</span> OR <span className="font-semibold text-signal">Accept Free Replacement Delivery (22 Units Tomorrow)</span>
+              </span>
+            </li>
           </ul>
         </div>
 
@@ -169,7 +184,7 @@ export function RiskGateCard({ approval, onDecide }: { approval: ApprovalNeededP
             className="flex items-center gap-1.5 font-mono text-[11.5px] font-medium text-ink-2 hover:text-ink"
           >
             <ChevronDown className={cx("h-3.5 w-3.5 transition-transform", showDiff && "rotate-180")} />
-            <span>{showDiff ? "Hide raw diff & parameters" : "View raw diff & parameters"}</span>
+            <span>{showDiff ? "Hide raw staged details & parameters" : "View raw staged details & parameters"}</span>
           </button>
           <AnimatePresence>
             {showDiff && (
@@ -177,15 +192,28 @@ export function RiskGateCard({ approval, onDecide }: { approval: ApprovalNeededP
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: "auto" }}
                 exit={{ opacity: 0, height: 0 }}
-                className="mt-2 overflow-hidden rounded-lg border border-line"
+                className="mt-2 space-y-2 overflow-hidden rounded-lg border border-line p-2.5 bg-sunken/40"
               >
-                {approval.diff_preview ? (
-                  <DiffBlock diff={approval.diff_preview} max={160} />
-                ) : (
-                  <pre className="bg-code p-3 font-mono text-[11.5px] text-ink-2">
-                    {JSON.stringify(approval.args, null, 2).replace(/"pk_col":/g, '"record_id":')}
-                  </pre>
-                )}
+                <div className="text-[11px] font-semibold text-ink-3 uppercase tracking-wider">
+                  Staged Mutations Checklist
+                </div>
+                <ul className="space-y-1.5">
+                  {bullets.map((b, i) => (
+                    <li key={i} className="flex items-start gap-2 text-[12px] text-ink-2">
+                      <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent" />
+                      <span>{b}</span>
+                    </li>
+                  ))}
+                </ul>
+                <div className="pt-1">
+                  {approval.diff_preview ? (
+                    <DiffBlock diff={approval.diff_preview} max={160} />
+                  ) : (
+                    <pre className="bg-code p-2.5 font-mono text-[11px] text-ink-2 rounded">
+                      {JSON.stringify(approval.args, null, 2).replace(/"pk_col":/g, '"record_id":')}
+                    </pre>
+                  )}
+                </div>
               </motion.div>
             )}
           </AnimatePresence>
@@ -197,7 +225,7 @@ export function RiskGateCard({ approval, onDecide }: { approval: ApprovalNeededP
             onClick={withClick(() => onDecide(approval.req_id, true))}
             className={cx(btn("ok", "lg"), "flex-1 text-[13.5px] font-semibold")}
           >
-            <Check className="h-4 w-4" /> Approve &amp; Send Email
+            <Check className="h-4 w-4" /> Enforce €587.30 Refund
           </button>
           <button
             type="button"

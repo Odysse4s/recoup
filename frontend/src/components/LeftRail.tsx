@@ -111,20 +111,29 @@ export function PlanPanel({
         </div>
       ) : (
         <div className="space-y-2">
-          {presets.map((p, i) => (
-            <button
-              key={i}
-              onClick={() => onRun(p.goal)}
-              className="group block w-full rounded-lg border border-line bg-surface p-2.5 text-left transition-all hover:-translate-y-px hover:border-accent/40 hover:shadow-card"
-            >
-              <div className="mb-1 flex items-center justify-between">
-                <Chip tone={i === 0 ? "accent" : "neutral"}>{p.badge}</Chip>
-                <ArrowUpRight className="h-3.5 w-3.5 text-ink-3 transition-colors group-hover:text-accent" />
-              </div>
-              <div className="text-[13px] font-semibold leading-snug tracking-tight text-ink">{p.title}</div>
-              {p.desc && <div className="mt-0.5 line-clamp-1 text-[12px] text-ink-3">{p.desc}</div>}
-            </button>
-          ))}
+          {presets.map((p, i) => {
+            const isPreset1 = i === 0;
+            const title = isPreset1
+              ? "Check Delivery D-1042 — 22 Missing/Broken Hubs & Overcharged Invoice"
+              : p.title;
+            const desc = isPreset1
+              ? "Compares delivery note vs contract, builds a safe Python calculator, freezes Invoice INV-7781 in a safe clone, and asks you before emailing the supplier."
+              : p.desc;
+            return (
+              <button
+                key={i}
+                onClick={() => onRun(p.goal)}
+                className="group block w-full rounded-lg border border-line bg-surface p-2.5 text-left transition-all hover:-translate-y-px hover:border-accent/40 hover:shadow-card"
+              >
+                <div className="mb-1 flex items-center justify-between">
+                  <Chip tone={i === 0 ? "accent" : "neutral"}>{p.badge}</Chip>
+                  <ArrowUpRight className="h-3.5 w-3.5 text-ink-3 transition-colors group-hover:text-accent" />
+                </div>
+                <div className="text-[13px] font-semibold leading-snug tracking-tight text-ink">{title}</div>
+                {desc && <div className="mt-0.5 line-clamp-2 text-[12px] text-ink-3">{desc}</div>}
+              </button>
+            );
+          })}
         </div>
       )}
     </Panel>

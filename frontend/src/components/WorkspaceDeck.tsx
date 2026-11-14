@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { BrainCircuit, Database, FileCode2, Rows2 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import type { RecoupRuntime } from "../hooks/useRecoup";
 import { soundFx } from "../lib/sound";
 import { usePersistentState } from "../lib/usePersistentState";
@@ -50,6 +50,13 @@ export function WorkspaceDeck({ r }: { r: RecoupRuntime }) {
   const [rawView, setView] = usePersistentState<DeckView>("recoup.workspaceView.v2", defaultView());
   const view = normalizeView(rawView);
   const nodes = r.graph.nodes.length;
+
+  useEffect(() => {
+    if (r.requestedDeckView?.seq) {
+      setView(normalizeView(r.requestedDeckView.view));
+      soundFx.playStageTick(2);
+    }
+  }, [r.requestedDeckView?.seq, r.requestedDeckView?.view, setView]);
 
   const dbSummaryCount = Object.values(r.report?.db_summary ?? {}).reduce(
     (acc, s) => acc + (s.inserted || 0) + (s.updated || 0) + (s.deleted || 0),
@@ -143,6 +150,7 @@ export function WorkspaceDeck({ r }: { r: RecoupRuntime }) {
           rewinding={!!r.rewind}
           pulseKey={r.pulses.db}
           onOpenFile={r.openFile}
+          focusTable={r.requestedDbTable}
         />
       )}
     </div>

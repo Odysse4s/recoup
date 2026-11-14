@@ -143,6 +143,16 @@ class VerifyPayload(BaseModel):
 
 
 # ---------- supplier & operator calls ----------
+class UiActionPayload(BaseModel):
+    action: Literal["open_file", "switch_view", "commit_resolution"]
+    path: str | None = None
+    content: str | None = None
+    view: str | None = None
+    table: str | None = None
+    choice: Literal["refund", "redelivery"] | None = None
+    label: str = ""
+
+
 class CallStartPayload(BaseModel):
     call_id: str
     mode: Literal["vendor", "user_consult"] = "vendor"
@@ -153,6 +163,7 @@ class CallStartPayload(BaseModel):
     opening_pct: float | None = None
     floor_pct: float | None = None
     channel: Literal["notification", "voice_call"] = "notification"
+    call_status: Literal["ringing", "connected", "ended"] = "ringing"
 
 
 class CallTurnPayload(BaseModel):
@@ -161,6 +172,9 @@ class CallTurnPayload(BaseModel):
     text: str
     audio_url: str | None = None
     offer_pct: float | None = None
+    keep_call_open: bool = False
+    call_status: Literal["ringing", "connected", "ended"] | None = None
+    ui_action: dict[str, Any] | None = None
 
 
 class CallEndPayload(BaseModel):

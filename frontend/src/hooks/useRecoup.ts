@@ -3,6 +3,7 @@ import type {
   AnticipateOfferPayload,
   ApprovalNeededPayload,
   CallEndPayload,
+  CallStartPayload,
   CallTurnPayload,
   ChangeReport,
   EvidencePayload,
@@ -10,6 +11,7 @@ import type {
   ForgeTestPayload,
   PlanPayload,
   ServerEvent,
+  UiActionPayload,
   VerifyPayload,
 } from "../contracts";
 import { brandOf } from "../lib/brand";
@@ -43,6 +45,16 @@ import {
   mockUserConsultRespondEvents,
   mockUserConsultStartEvents,
 } from "../mockEvents";
+
+function reconstructDiff(diff: string): string {
+  const lines = diff.split("\n");
+  const hasUnifiedHeaders = lines.some((l) => l.startsWith("@@") || l.startsWith("+++"));
+  if (!hasUnifiedHeaders) return diff;
+  return lines
+    .filter((l) => !l.startsWith("+++") && !l.startsWith("---") && !l.startsWith("@@") && !l.startsWith("-"))
+    .map((l) => (l.startsWith("+") ? l.slice(1) : l))
+    .join("\n");
+}
 
 const EVENT_TYPES = [
   "plan",
@@ -110,6 +122,10 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   const [evidenceItems, setEvidenceItems] = useState<EvidencePayload[]>([]);
   const [uploadingEvidence, setUploadingEvidence] = useState(false);
   const [operatorConsult, setOperatorConsult] = useState<OperatorConsultState | null>(null);
+  const [requestedDeckView, setRequestedDeckView] = useState<{ view: "graph" | "db" | "split"; seq: number } | null>(null);
+  const [requestedDbTable, setRequestedDbTable] = useState<{ table: string; seq: number } | null>(null);
+  const executeUiActionRef = useRef<((uiAction: UiActionPayload) => void) | null>(null);
+  const lastUiActionRef = useRef<{ key: string; ts: number } | null>(null);
 
   const queueRef = useRef<ServerEvent[]>([]);
   const liveCountRef = useRef(0);
@@ -262,6 +278,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             audioUrl: t.audio_url ?? null,
             ts: t.ts ?? Date.now() / 1000,
           }));
+          const isConnected = ac.call_status === "connected" || (!ac.ringing && ac.active);
           setOperatorConsult((prev) => {
             const prevCount = prev?.turns.length ?? 0;
             if (!windowsEnabledRef.current && voiceRef.current && mappedTurns.length > prevCount) {
@@ -275,7 +292,9 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             }
             return {
               active: Boolean(ac.active),
-              ringing: Boolean(ac.ringing),
+              ringing: Boolean(ac.ringing) && ac.call_status !== "connected",
+              callStatus: ac.call_status ?? (isConnected ? "connected" : ac.ringing ? "ringing" : undefined),
+              connectedAt: ac.connected_at ? ac.connected_at * 1000 : (isConnected ? (prev?.connectedAt ?? Date.now()) : null),
               mode: "user_consult",
               channel: ac.channel ?? "voice_call",
               callId: ac.call_id,
@@ -286,9 +305,20 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
               turns: mappedTurns,
               activeSpeaker: ac.active ? (mappedTurns[mappedTurns.length - 1]?.speaker ?? null) : null,
               selectedChoice: ac.selected_choice ?? null,
+              lastUiAction: ac.last_ui_action
+                ? {
+                    action: ac.last_ui_action.action,
+                    label: ac.last_ui_action.label || ac.last_ui_action.action,
+                    ts: prev?.lastUiAction?.ts ?? Date.now(),
+                  }
+                : (prev?.lastUiAction ?? null),
               end: ac.end ?? null,
             };
           });
+
+          if (ac.last_ui_action) {
+            executeUiActionRef.current?.(ac.last_ui_action);
+          }
         } else if (data.active_call === null && modeRef.current === "live") {
           setOperatorConsult((prev) => (prev?.active ? null : prev));
         }
@@ -456,6 +486,92 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     [forgedCode, spawnWindow]
   );
 
+  const executeUiAction = useCallback(
+    (uiAction: UiActionPayload) => {
+      if (!uiAction || !uiAction.action) return;
+      const actionKey = `${uiAction.action}:${uiAction.path || ""}:${uiAction.view || ""}:${uiAction.table || ""}:${uiAction.choice || ""}`;
+      const now = Date.now();
+      if (lastUiActionRef.current && lastUiActionRef.current.key === actionKey && now - lastUiActionRef.current.ts < 3000) {
+        return;
+      }
+      lastUiActionRef.current = { key: actionKey, ts: now };
+
+      const label =
+        uiAction.label ||
+        (uiAction.action === "open_file"
+          ? `Opened ${uiAction.path ?? "file"} on Desktop`
+          : uiAction.action === "switch_view"
+          ? `Opened SQLite ${uiAction.table ? `table '${uiAction.table}'` : uiAction.view ?? "studio"} on Desktop`
+          : `Committed ${uiAction.choice ?? "resolution"}`);
+
+      setOperatorConsult((prev) =>
+        prev
+          ? {
+              ...prev,
+              lastUiAction: { action: uiAction.action, label, ts: now },
+            }
+          : prev
+      );
+      setNarration(`⚡ Live Voice Command: ${label}`);
+
+      // Only trigger visual desktop window/view mutations when windowsEnabledRef.current === true (i.e. on the Desktop screen!)
+      if (!windowsEnabledRef.current) return;
+
+      if (uiAction.action === "open_file") {
+        const path = uiAction.path || "aade/mydata_CLM-D-1042.xml";
+        let content = uiAction.content;
+        if (!content && wsStateRef.current?.files?.[path]) {
+          content = wsStateRef.current.files[path];
+        }
+        if (!content && report?.files_modified) {
+          const mod = report.files_modified.find((m) => m.path === path);
+          if (mod) {
+            content = reconstructDiff(mod.diff);
+          }
+        }
+        if (!content && /aade|mydata/i.test(path)) {
+          const m = path.match(/CLM-[A-Za-z0-9-]+/i);
+          const claimId = m ? m[0] : "CLM-D-1042";
+          content = buildDemoAadeXml(claimId, "refund");
+        }
+        if (!content) {
+          content = "";
+        }
+
+        // Close duplicate window with same path first
+        setWindows((ws) => ws.filter((w) => w.path !== path && w.path !== `workspace/${path}`));
+        spawnWindow({
+          ...fileWindow(path, content),
+          manual: true,
+          pinned: true,
+          instant: false,
+        });
+        soundFx.playWindowPop();
+      } else if (uiAction.action === "switch_view") {
+        const targetView: "graph" | "db" | "split" =
+          uiAction.view === "graph" ? "graph" : uiAction.view === "split" ? "split" : "db";
+        setRequestedDeckView({ view: targetView, seq: now });
+        if (uiAction.table) {
+          setRequestedDbTable({ table: uiAction.table, seq: now });
+        }
+        soundFx.playStageTick(2);
+        // Unpin floating windows blocking center view so SQLite invoices table is 100% visible on projector
+        setWindows((ws) => ws.map((w) => (w.pinned ? { ...w, pinned: false } : w)));
+      } else if (uiAction.action === "commit_resolution") {
+        if (uiAction.choice) {
+          const choice = uiAction.choice;
+          setOperatorConsult((prev) => (prev ? { ...prev, selectedChoice: choice } : prev));
+        }
+        window.setTimeout(() => {
+          setWindows((ws) => ws.map((w) => (w.pinned ? { ...w, pinned: false } : w)));
+          void refreshState();
+        }, 400);
+      }
+    },
+    [report, spawnWindow, refreshState]
+  );
+  executeUiActionRef.current = executeUiAction;
+
   // ---------------------------------------------------------------- reducer
   const markPlan = (toolName: string, status: "running" | "done" | "failed") =>
     setPlan((prev) => {
@@ -506,21 +622,14 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           stopSpeaking();
           setSpeaking(false);
         }
-        const p = ev.payload as {
-          call_id?: string;
-          mode?: "vendor" | "user_consult";
-          channel?: "notification" | "voice_call";
-          req_id?: string | null;
-          claim_id?: string;
-          counterparty?: string;
-          claim_amount?: number;
-          opening_pct?: number;
-          floor_pct?: number;
-        };
+        const p = ev.payload as unknown as CallStartPayload;
         const callId = String(p.call_id ?? "CONSULT-CLM-D-1042");
-        setOperatorConsult({
+        const isConnected = p.call_status === "connected";
+        setOperatorConsult((prev) => ({
           active: true,
-          ringing: true,
+          ringing: !isConnected,
+          callStatus: isConnected ? "connected" : (p.call_status ?? "ringing"),
+          connectedAt: isConnected ? (prev?.connectedAt ?? Date.now()) : (prev?.connectedAt ?? null),
           mode: "user_consult",
           channel: p.channel ?? "voice_call",
           callId,
@@ -528,12 +637,13 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           claimId: String(p.claim_id ?? "CLM-D-1042"),
           claimAmount: Number(p.claim_amount ?? 587.3),
           counterparty: String(p.counterparty ?? "Operator Mobile"),
-          turns: [],
-          activeSpeaker: null,
-          selectedChoice: null,
+          turns: prev?.turns ?? [],
+          activeSpeaker: prev?.activeSpeaker ?? null,
+          selectedChoice: prev?.selectedChoice ?? null,
+          lastUiAction: prev?.lastUiAction ?? null,
           end: null,
-        });
-        if (!windowsEnabledRef.current) {
+        }));
+        if (!windowsEnabledRef.current && !isConnected) {
           soundFx.playIncomingCall();
         }
         break;
@@ -547,11 +657,14 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
               ? "redelivery"
               : "refund"
             : null;
+        const isConnected = turn.call_status === "connected";
         setOperatorConsult((prev) => {
           const claimId = callId.replace(/^CONSULT-/, "").replace(/^CALL-/, "") || prev?.claimId || "CLM-D-1042";
           const base: OperatorConsultState = prev ?? {
             active: true,
-            ringing: false,
+            ringing: !isConnected,
+            callStatus: isConnected ? "connected" : "ringing",
+            connectedAt: isConnected ? Date.now() : null,
             mode: "user_consult",
             channel: "voice_call",
             callId: callId || `CONSULT-${claimId}`,
@@ -562,12 +675,16 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             turns: [],
             activeSpeaker: null,
             selectedChoice: null,
+            lastUiAction: null,
             end: null,
           };
+          const nextConnected = isConnected || base.callStatus === "connected" || !base.ringing;
           return {
             ...base,
-            active: true,
-            ringing: false,
+            active: turn.keep_call_open !== false,
+            ringing: isConnected ? false : base.ringing,
+            callStatus: turn.call_status ?? (nextConnected ? "connected" : base.callStatus),
+            connectedAt: nextConnected ? (base.connectedAt ?? Date.now()) : base.connectedAt,
             selectedChoice: inferredChoice ?? base.selectedChoice,
             turns: [
               ...base.turns,
@@ -580,6 +697,11 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             ],
           };
         });
+
+        if (turn.ui_action) {
+          executeUiAction(turn.ui_action);
+        }
+
         const shouldAutoSpeakTurn =
           voiceRef.current &&
           turn.speaker === "agent" &&
@@ -1291,11 +1413,34 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         body: JSON.stringify({ choice, req_id: reqId, claim_id: claimId }),
       });
       if (!res.ok) throw new Error(`respond failed (${res.status})`);
+      const data = (await res.json().catch(() => null)) as { ok?: boolean; turn?: CallTurnPayload; keep_call_open?: boolean } | null;
+      if (data?.turn?.ui_action) {
+        executeUiAction(data.turn.ui_action);
+      }
       await refreshState();
     } catch {
       runDemoFallback();
     }
   };
+
+  const pickupCall = useCallback(async () => {
+    try {
+      const res = await fetch("/api/call/pickup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ call_id: operatorConsult?.callId }),
+      });
+      if (res.ok) {
+        setOperatorConsult((prev) =>
+          prev ? { ...prev, ringing: false, callStatus: "connected", connectedAt: prev.connectedAt ?? Date.now() } : prev
+        );
+      }
+    } catch {
+      setOperatorConsult((prev) =>
+        prev ? { ...prev, ringing: false, callStatus: "connected", connectedAt: prev.connectedAt ?? Date.now() } : prev
+      );
+    }
+  }, [operatorConsult?.callId]);
 
   const reset = async () => {
     clearWorkspaceUi();
@@ -1404,6 +1549,10 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     openForged,
     dockWindow,
     togglePin,
+    requestedDeckView,
+    requestedDbTable,
+    pickupCall,
+    executeUiAction,
   };
 }
 

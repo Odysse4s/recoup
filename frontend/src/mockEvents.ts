@@ -1,7 +1,7 @@
 import type { ChangeReport, ServerEvent } from "./contracts";
 
 export const HERO_GOAL =
-  "Audit shipment D-1042 against our Kappa Office Systems contract, hold the overbilled invoice, and send the credit claim";
+  "Check delivery D-1042 from Kappa Office Systems — 22 hubs arrived missing or broken and invoice INV-7781 is overcharged";
 export const FOLLOW_UP_GOAL =
   "Recover unclaimed vendor credits across earlier Kappa Office Systems shipments D-1017 and D-1031";
 

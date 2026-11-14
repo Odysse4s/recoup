@@ -107,6 +107,16 @@ export interface VerifyPayload {
   criteria: VerifyCriterionResult[];
 }
 
+export interface UiActionPayload {
+  action: "open_file" | "switch_view" | "commit_resolution";
+  path?: string | null;
+  content?: string | null;
+  view?: string | null;
+  table?: string | null;
+  choice?: "refund" | "redelivery" | null;
+  label?: string;
+}
+
 export interface CallStartPayload {
   call_id: string;
   mode?: "vendor" | "user_consult";
@@ -117,6 +127,7 @@ export interface CallStartPayload {
   claim_amount?: number;
   opening_pct?: number | null;
   floor_pct?: number | null;
+  call_status?: "ringing" | "connected" | "ended";
 }
 
 export interface CallTurnPayload {
@@ -125,6 +136,9 @@ export interface CallTurnPayload {
   text: string;
   audio_url?: string | null;
   offer_pct?: number | null;
+  keep_call_open?: boolean;
+  call_status?: "ringing" | "connected" | "ended" | null;
+  ui_action?: UiActionPayload | null;
 }
 
 export interface CallEndPayload {

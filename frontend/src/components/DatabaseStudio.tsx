@@ -12,7 +12,7 @@ import {
   ShieldCheck,
   Table2,
 } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { ChangeReport } from "../contracts";
 import { anchorRef } from "../lib/anchors";
 import { FALLBACK_TABLES as FALLBACK } from "../lib/offline";
@@ -382,6 +382,7 @@ export function DatabaseStudio({
   rewinding,
   pulseKey,
   onOpenFile,
+  focusTable,
 }: {
   ws: WorkspaceState | null;
   report: ChangeReport | null;
@@ -391,6 +392,7 @@ export function DatabaseStudio({
   rewinding: boolean;
   pulseKey: number;
   onOpenFile: (path: string, content: string) => void;
+  focusTable?: { table: string; seq: number } | null;
 }) {
   const tables = ws?.tables && Object.keys(ws.tables).length ? ws.tables : FALLBACK;
   const schemaMap = ws?.schema_sql ?? {};
@@ -440,6 +442,12 @@ export function DatabaseStudio({
   const [selected, setSelected] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [collapsedDdl, setCollapsedDdl] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    if (focusTable?.seq && focusTable.table) {
+      setSelected(focusTable.table);
+    }
+  }, [focusTable?.seq, focusTable?.table]);
 
   const active =
     selected === "__files"

@@ -233,15 +233,15 @@ export function VoicePill({ r, compact }: { r: RecoupRuntime; compact?: boolean 
         disabled={!r.lastBriefing}
         title={
           r.lastBriefing
-            ? `fal.ai Voice · Replay briefing: “${r.lastBriefing}”`
-            : "fal.ai Voice briefings play on dry-run, risk gate and operator consultations"
+            ? `Grok Voice · fal.ai · Replay briefing: “${r.lastBriefing}”`
+            : "Grok Voice · fal.ai briefings play on dry-run, risk gate and operator consultations"
         }
         className="flex h-6 items-center gap-1.5 rounded-full pl-2 pr-2 text-[11.5px] font-medium text-ink-2 hover:text-ink disabled:cursor-default"
       >
         <Equalizer active={r.speaking} bars={5} tone={r.voiceOn ? "accent" : "neutral"} />
         {!compact && (
           <span className="hidden items-center gap-1 whitespace-nowrap 2xl:flex">
-            {falCloud ? "fal.ai Voice" : r.speaking ? "fal.ai Voice…" : r.voiceOn ? "fal.ai Voice" : "Voice Off"}
+            {falCloud ? "Grok Voice · fal.ai" : r.speaking ? "Grok Voice…" : r.voiceOn ? "Grok Voice · fal.ai" : "Voice Off"}
             {r.lastBriefing && !r.speaking && <Play className="h-2.5 w-2.5 text-ink-3" />}
           </span>
         )}
@@ -254,8 +254,8 @@ export function VoicePill({ r, compact }: { r: RecoupRuntime; compact?: boolean 
           r.toggleVoice();
         }}
         aria-pressed={!r.voiceOn}
-        aria-label={r.voiceOn ? "Disable fal.ai Voice briefings" : "Enable fal.ai Voice briefings"}
-        title={r.voiceOn ? "fal.ai Voice Briefings: ON (click to mute speech)" : "fal.ai Voice Briefings: OFF"}
+        aria-label={r.voiceOn ? "Disable Grok Voice briefings" : "Enable Grok Voice briefings"}
+        title={r.voiceOn ? "Grok Voice · fal.ai Briefings: ON (click to mute speech)" : "Grok Voice · fal.ai Briefings: OFF"}
         className={cx(
           "flex h-6 items-center gap-1 rounded-full px-1.5 font-mono text-[10px] font-medium transition-colors",
           r.voiceOn ? "text-ink-2 hover:bg-surface hover:text-ink" : "text-ink-3 opacity-60 hover:bg-surface hover:text-ink-2"

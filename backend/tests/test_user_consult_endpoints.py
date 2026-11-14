@@ -90,8 +90,8 @@ def test_user_consult_emits_call_start_and_opening_turn(isolated_consult_server)
     assert data["mode"] == "user_consult"
     assert data["claim_id"] == "CLM-D-1042"
     assert data["claim_amount"] == pytest.approx(587.30)
-    assert "587 euro 30 cent" in data["opening_text"]
-    assert "AADE myDATA" in data["opening_text"]
+    assert "587 euros and 30 cents" in data["opening_text"]
+    assert "AADE" in data["opening_text"]
 
     starts = [e for e in BUS.history if e.type == EventType.CALL_START]
     turns = [e for e in BUS.history if e.type == EventType.CALL_TURN]
@@ -104,6 +104,7 @@ def test_user_consult_emits_call_start_and_opening_turn(isolated_consult_server)
         "claim_id": "CLM-D-1042",
         "claim_amount": 587.30,
         "channel": "voice_call",
+        "call_status": "ringing",
     }
     assert len(turns) == 1
     assert turns[0].payload["speaker"] == "agent"
@@ -629,6 +630,179 @@ async def test_approve_double_resolution_returns_already_resolved(isolated_consu
 
     r_unknown = client.post("/api/approve/req_completely_unknown", json={"approved": True})
     assert r_unknown.status_code == 404
+
+
+def test_call_pickup_sets_connected_and_emits_call_start(isolated_consult_server):
+    client, _, _, _ = isolated_consult_server
+
+    c_resp = client.post("/api/call/user-consult", json={})
+    assert c_resp.status_code == 200
+    s_before = client.get("/api/state").json()
+    assert s_before["active_call"]["call_status"] == "ringing"
+    assert s_before["active_call"]["ringing"] is True
+
+    p_resp = client.post("/api/call/pickup", json={"claim_id": "CLM-D-1042"})
+    assert p_resp.status_code == 200
+    p_data = p_resp.json()
+    assert p_data["ok"] is True
+    assert p_data["call_status"] == "connected"
+
+    s_after = client.get("/api/state").json()
+    assert s_after["active_call"]["call_status"] == "connected"
+    assert s_after["active_call"]["ringing"] is False
+    assert s_after["active_call"]["active"] is True
+
+    starts = [e for e in BUS.history if e.type == EventType.CALL_START]
+    assert len(starts) == 2
+    assert starts[-1].payload["call_status"] == "connected"
+    assert starts[-1].payload["counterparty"] == "Operator Mobile"
+
+
+async def test_multi_turn_conversational_desktop_ui_control(isolated_consult_server):
+    client, ws, _, _ = isolated_consult_server
+
+    loop = asyncio.get_running_loop()
+    gate_fut: asyncio.Future[bool] = loop.create_future()
+    PENDING["req_multi_turn"] = gate_fut
+    PENDING_PAYLOADS["req_multi_turn"] = {"req_id": "req_multi_turn", "tool_name": "send_email"}
+
+    c_resp = client.post("/api/call/user-consult", json={"req_id": "req_multi_turn"})
+    assert c_resp.status_code == 200
+
+    pickup_resp = client.post("/api/call/pickup", json={"req_id": "req_multi_turn"})
+    assert pickup_resp.status_code == 200
+    assert pickup_resp.json()["call_status"] == "connected"
+
+    # Turn 1: "Show me the AADE tax filing"
+    t1_resp = client.post(
+        "/api/call/user-respond",
+        json={"transcript": "Show me the AADE tax filing", "req_id": "req_multi_turn"},
+    )
+    assert t1_resp.status_code == 200
+    b1 = t1_resp.json()
+    assert b1["ok"] is True
+    assert b1["keep_call_open"] is True
+    assert b1["call_status"] == "connected"
+    assert b1["choice"] is None
+    assert b1["ui_action"]["action"] == "open_file"
+    assert b1["ui_action"]["path"] == "aade/mydata_CLM-D-1042.xml"
+    assert "<invoiceType>5.1</invoiceType>" in b1["ui_action"]["content"]
+    assert "req_multi_turn" in PENDING
+    assert not gate_fut.done()
+    assert not any(e.type == EventType.CALL_END for e in BUS.history)
+
+    # Turn 2: "Show me the database"
+    t2_resp = client.post(
+        "/api/call/user-respond",
+        json={"transcript": "Show me the database", "req_id": "req_multi_turn"},
+    )
+    assert t2_resp.status_code == 200
+    b2 = t2_resp.json()
+    assert b2["ok"] is True
+    assert b2["keep_call_open"] is True
+    assert b2["call_status"] == "connected"
+    assert b2["choice"] is None
+    assert b2["ui_action"]["action"] == "switch_view"
+    assert b2["ui_action"]["table"] == "invoices"
+    assert "req_multi_turn" in PENDING
+    assert not gate_fut.done()
+    assert not any(e.type == EventType.CALL_END for e in BUS.history)
+
+    # Turn 3: "Enforce the refund"
+    t3_resp = client.post(
+        "/api/call/user-respond",
+        json={"transcript": "Enforce the refund", "req_id": "req_multi_turn"},
+    )
+    assert t3_resp.status_code == 200
+    b3 = t3_resp.json()
+    assert b3["ok"] is True
+    assert b3["keep_call_open"] is False
+    assert b3["call_status"] == "ended"
+    assert b3["choice"] == "refund"
+    assert b3["ui_action"]["action"] == "commit_resolution"
+    assert b3["agreed_amount"] == pytest.approx(587.30)
+    assert gate_fut.done() and gate_fut.result() is True
+    assert "req_multi_turn" not in PENDING
+    assert (ws / "aade" / "mydata_CLM-D-1042.xml").exists()
+    assert any(e.type == EventType.CALL_END for e in BUS.history)
+    assert client.get("/api/state").json()["active_call"]["call_status"] == "ended"
+
+
+def test_grok_tts_offline_fallback_and_caching(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from app.voice import call_audio
+
+    cache_dir = tmp_path / "voice_cache"
+    monkeypatch.setattr(call_audio, "VOICE_CACHE_DIR", cache_dir)
+    monkeypatch.setenv("VOICE_CACHE_DIR", str(cache_dir))
+
+    # 1. Offline fallback
+    monkeypatch.setenv("VOICE_PROVIDER", "offline")
+    assert call_audio.synthesize_grok_tts("Hello operator") is None
+
+    # 2. Missing FAL_KEY fallback
+    monkeypatch.delenv("VOICE_PROVIDER", raising=False)
+    monkeypatch.delenv("FAL_KEY", raising=False)
+    assert call_audio.synthesize_grok_tts("Hello operator") is None
+
+    # 3. Cache hit returns cached bytes directly without HTTP
+    monkeypatch.setenv("FAL_KEY", "fal-mock-key")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    digest = call_audio.hashlib.sha256(b"ara:Cached audio turn").hexdigest()
+    cache_file = cache_dir / f"grok_ara_{digest}.mp3"
+    cache_file.write_bytes(b"MOCK-GROK-MP3-BYTES")
+
+    cached_res = call_audio.synthesize_grok_tts("Cached audio turn", voice="ara")
+    assert cached_res == b"MOCK-GROK-MP3-BYTES"
+
+
+async def test_live_audio_stt_noise_and_open_question_do_not_prematurely_hang_up_call(
+    isolated_consult_server,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client, _, _, _ = isolated_consult_server
+
+    loop = asyncio.get_running_loop()
+    gate_fut: asyncio.Future[bool] = loop.create_future()
+    PENDING["req_vad_guard"] = gate_fut
+    PENDING_PAYLOADS["req_vad_guard"] = {"req_id": "req_vad_guard", "tool_name": "send_email"}
+
+    client.post("/api/call/user-consult", json={"req_id": "req_vad_guard"})
+    client.post("/api/call/pickup", json={"req_id": "req_vad_guard"})
+
+    # 1. Wizper silence hallucination ("Thank you.") is ignored cleanly without ending call
+    fake_noise = types.ModuleType("app.voice.call_audio")
+    fake_noise.transcribe_operator_voice = lambda audio_bytes, mime_type="audio/webm": "Thank you."  # type: ignore[attr-defined]
+    monkeypatch.setitem(__import__("sys").modules, "app.voice.call_audio", fake_noise)
+
+    r_noise = client.post(
+        "/api/call/user-respond",
+        data={"req_id": "req_vad_guard", "claim_id": "CLM-D-1042"},
+        files={"audio": ("noise.webm", b"\x1aE\xdf\xa3room-cough-bytes", "audio/webm")},
+    )
+    assert r_noise.status_code == 200
+    b_noise = r_noise.json()
+    assert b_noise["keep_call_open"] is True
+    assert b_noise["ignored_noise"] is True
+    assert not gate_fut.done()
+
+    # 2. Open conversational question keeps call open and replies with summary
+    fake_q = types.ModuleType("app.voice.call_audio")
+    fake_q.transcribe_operator_voice = lambda audio_bytes, mime_type="audio/webm": "Wait what are my options again?"  # type: ignore[attr-defined]
+    monkeypatch.setitem(__import__("sys").modules, "app.voice.call_audio", fake_q)
+
+    r_q = client.post(
+        "/api/call/user-respond",
+        data={"req_id": "req_vad_guard", "claim_id": "CLM-D-1042"},
+        files={"audio": ("question.webm", b"\x1aE\xdf\xa3question-bytes", "audio/webm")},
+    )
+    assert r_q.status_code == 200
+    b_q = r_q.json()
+    assert b_q["keep_call_open"] is True
+    assert b_q["call_status"] == "connected"
+    assert b_q["choice"] is None
+    assert "587 euros" in b_q["reply_text"]
+    assert not gate_fut.done()
+
 
 
 

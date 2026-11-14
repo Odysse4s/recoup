@@ -1,4 +1,4 @@
-import type { AnticipateOfferPayload, ApprovalNeededPayload } from "../contracts";
+import type { AnticipateOfferPayload, ApprovalNeededPayload, UiActionPayload } from "../contracts";
 
 export type BrandColor = "indigo" | "emerald" | "amber" | "rose" | "cyan" | "violet";
 
@@ -36,6 +36,8 @@ export interface WorkspaceState {
   active_call?: {
     active: boolean;
     ringing: boolean;
+    call_status?: "ringing" | "connected" | "ended";
+    connected_at?: number | null;
     mode: "user_consult";
     channel?: "notification" | "voice_call";
     call_id: string;
@@ -45,6 +47,7 @@ export interface WorkspaceState {
     counterparty: string;
     turns: { speaker: "agent" | "counterparty" | "user"; text: string; audio_url?: string | null; ts: number }[];
     selected_choice?: OperatorChoice | null;
+    last_ui_action?: UiActionPayload | null;
     end?: { outcome: "accepted" | "escalated" | "rejected" | "no_answer"; agreed_amount?: number | null; summary: string } | null;
   } | null;
   latest_offer?: AnticipateOfferPayload | null;
@@ -113,6 +116,8 @@ export interface OperatorConsultTurn {
 export interface OperatorConsultState {
   active: boolean;
   ringing: boolean;
+  callStatus?: "ringing" | "connected" | "ended";
+  connectedAt?: number | null;
   mode: "user_consult" | "vendor";
   channel?: "notification" | "voice_call";
   callId: string;
@@ -123,6 +128,7 @@ export interface OperatorConsultState {
   turns: OperatorConsultTurn[];
   activeSpeaker: "agent" | "counterparty" | "user" | null;
   selectedChoice: OperatorChoice | null;
+  lastUiAction?: { action: string; label: string; ts: number } | null;
   end: {
     outcome: "accepted" | "escalated" | "rejected" | "no_answer";
     agreed_amount?: number | null;

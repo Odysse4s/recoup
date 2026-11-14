@@ -51,7 +51,11 @@ export default function App() {
     const defaultGoal = r.wsState?.domain?.default_goal ?? r.wsState?.domain?.presets?.[0]?.goal;
     if (defaultGoal) {
       syncedGoalRef.current = true;
-      setGoal(defaultGoal);
+      if (defaultGoal.toLowerCase().includes("audit shipment d-1042")) {
+        setGoal(PRESET_SCENARIOS[0].goal);
+      } else {
+        setGoal(defaultGoal);
+      }
     }
   }, [r.wsState?.domain]);
 
@@ -145,7 +149,7 @@ export default function App() {
 
         <div className="scroll-thin flex min-h-0 flex-col gap-4 lg:col-span-5 lg:overflow-y-auto">
           <AnimatePresence initial={false}>
-            {r.pendingApproval && !isHighStakesConsult && (
+            {r.pendingApproval && !isHighStakesConsult && !r.operatorConsult && (
               <RiskGateCard key={r.pendingApproval.req_id} approval={r.pendingApproval} onDecide={r.decide} />
             )}
           </AnimatePresence>
