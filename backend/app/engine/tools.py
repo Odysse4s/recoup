@@ -396,21 +396,41 @@ class PlaceCall(Tool):
             "counterparty": {"type": "string"},
             "claim_id": {"type": "string"},
             "claim_amount": {"type": "number"},
+            "objective": {"type": "string"},
             "purpose": {"type": "string"},
         },
-        "required": ["to", "purpose"],
+        "required": ["to"],
     }
     risk = "high"
     reversible = False
+    mutating = True
 
     def preview(self, args: dict[str, Any], env: Env) -> str:
         target = args.get("counterparty") or args.get("to", "")
-        purpose = args.get("purpose", "")
-        return f"VOICE CALL to={target} purpose={purpose!r}"
+        claim_id = args.get("claim_id", "")
+        objective = args.get("objective") or args.get("purpose", "")
+        claim_part = f" claim_id={claim_id}" if claim_id else ""
+        return f"VOICE CALL to={target}{claim_part} objective={objective!r}"
 
     def do(self, args: dict[str, Any], env: Env) -> dict[str, Any]:
-        env.outbox.append({"tool": self.name, **args})
-        return {"placed": not env.dry_run_external, "to": args.get("to", "")}
+        to_target = str(args.get("to") or args.get("phone") or args.get("counterparty") or "")
+        claim_id = str(args.get("claim_id") or "")
+        objective = str(args.get("objective") or args.get("purpose") or "")
+        env.outbox.append(
+            {
+                "tool": self.name,
+                **args,
+                "to": to_target,
+                "claim_id": claim_id,
+                "objective": objective,
+            }
+        )
+        return {
+            "placed": not env.dry_run_external,
+            "to": to_target,
+            "claim_id": claim_id,
+            "objective": objective,
+        }
 
 
 REGISTRY: dict[str, Tool] = {
