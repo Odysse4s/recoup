@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -165,12 +166,18 @@ def _elevenlabs_turn_tts(text: str, voice_id: str, api_key: str) -> bytes | None
         return resp.content if resp.content else None
 
 
+_SPEAKER_TAG_PREFIX_RE = re.compile(
+    r"^\s*(?:\[[^\]]{2,80}\]|Turn\s*\d+\s*(?:\([^)]*\))?\s*:)\s*",
+    re.IGNORECASE,
+)
+
+
 def synthesize_call_turn(
     speaker: Literal["agent", "counterparty"],
     text: str,
 ) -> bytes | None:
     """Synthesize a vendor negotiation turn using distinct voices per speaker role."""
-    cleaned = (text or "").strip()
+    cleaned = _SPEAKER_TAG_PREFIX_RE.sub("", (text or "").strip()).strip()
     if not cleaned:
         return None
 

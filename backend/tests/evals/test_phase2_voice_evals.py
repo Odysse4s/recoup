@@ -216,6 +216,37 @@ class TestDualSpeakerCallSynthesis:
         assert seen_urls[3].endswith("/IKne3meq5aSn9XLyUdCD")
         assert len(list(_clean_phase2_state.glob("*.mp3"))) == 4
 
+    def test_strips_bracketed_speaker_stage_directions_before_tts(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("FAL_KEY", "fal-stage-key")
+        sent_texts: list[str] = []
+
+        class TagStripClient:
+            def __init__(self, **kwargs: Any) -> None:
+                pass
+
+            def __enter__(self) -> Self:
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                return None
+
+            def post(self, url: str, headers: dict[str, str], json: dict[str, Any]) -> _StubHTTPResponse:
+                sent_texts.append(json["text"])
+                return _StubHTTPResponse(content=b"ID3-clean-turn", content_type="audio/mpeg")
+
+        monkeypatch.setattr(call_audio_module.httpx, "Client", TagStripClient)
+
+        audio = synthesize_call_turn(
+            "agent",
+            "[Recoup Procurement Agent] Calling Kappa Office Systems regarding CLM-D-1042.",
+        )
+        assert audio == b"ID3-clean-turn"
+        assert sent_texts == ["Calling Kappa Office Systems regarding CLM-D-1042."]
+        assert synthesize_call_turn("agent", "[Recoup Procurement Agent]") is None
+
 
 # ---------------------------------------------------------------------------
 # 2. Mocked fal Wizper STT -> `transcribe_and_decide`
