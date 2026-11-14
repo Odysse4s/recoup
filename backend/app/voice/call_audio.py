@@ -706,30 +706,51 @@ _DOUBLE_NEGATION_RE = re.compile(
     re.IGNORECASE,
 )
 _INTERJECTION_NO_RE = re.compile(
-    r"(?:^|(?<=[.,;!?]))\s*\bno\b(?=\s+(?:please|just|go\s+ahead|send|ship|give|issue|process|take|we|i|let'?s|lets)\b)",
+    r"(?:^|(?<=[.,;!?]))\s*\bno\b(?=\s+(?:please|just|go\s+ahead|request|stage|send|ship|give|issue|process|take|we|i|let'?s|lets)\b)",
+    re.IGNORECASE,
+)
+_RETRACTION_PIVOT_RE = re.compile(
+    r"\b(?:scratch\s+that|forget\s+(?:that|it)|never\s+mind|change\s+of\s+(?:mind|plan)|changed\s+(?:my|our)\s+mind)\b",
     re.IGNORECASE,
 )
 _PIVOT_SPLIT_RE = re.compile(
-    r"\b(?:wait(?:\s+a\s+(?:second|sec|minute|moment))?|actually|on\s+second\s+thought"
-    r"|scratch\s+that|forget\s+that|correction|change\s+of\s+(?:mind|plan)|never\s+mind)\b",
+    r"("
+    r"\b(?:wait(?:\s+a\s+(?:second|sec|minute|moment))?(?!\s+(?:on\s+both|until\b))"
+    r"|hold\s+on(?:\s+a\s+(?:second|sec|minute|moment))?(?!\s+until\b)"
+    r"|hang\s+on(?:\s+a\s+(?:second|sec|minute|moment))?(?!\s+until\b)"
+    r"|stop(?:\s+(?:there|right\s+there|right\s+now|here|talking|speaking|for\s+a\s+(?:second|sec|minute|moment)|a\s+(?:second|sec|minute|moment)))?"
+    r"(?=\s*(?:[.,;!?—–]|$|\b(?:and|don'?t|do\s+not|we|i|let'?s|lets|please|just|request|issue|send|ship|give|process|stage|take|hold|wait|actually)\b))"
+    r"|actually|on\s+second\s+thought"
+    r"|scratch\s+that|forget\s+(?:that|it)|correction|change\s+of\s+(?:mind|plan)|changed\s+(?:my|our)\s+mind|never\s+mind)\b"
+    r"|(?:^|(?<=[.!?—–]))\s*\bno\b\s*,\s*(?=\b(?:we|i|let'?s|lets|please|just|request|issue|send|ship|give|process|stage|take|do|don'?t|do\s+not|hold|cancel|leave)\b)"
+    r")",
     re.IGNORECASE,
 )
 _CLAUSE_SPLIT_RE = re.compile(
-    r"[.,;!?—–]+"
+    r"(?:[.,](?!\d)|[;!?—–])+"
     r"|\b(?:but|however|though|although|yet|whereas)\b"
     r"|(?=\b(?:we|i)\s+(?:want|need|prefer|would\s+like|will\s+take|'ll\s+take|choose|opt\s+for|go\s+with)\b)"
-    r"|(?=\b(?:let'?s|lets)\s+(?:take|do|go\s+with|get|issue|send|ship|have|make)\b)"
-    r"|(?<!\bdo\s)(?<!\bnot\s)(?<!\bdon't\s)(?<!\bdont\s)(?<!\bnever\s)(?<!\bto\s)(?<!\bor\s)(?<!\bnor\s)"
-    r"(?=\b(?:issue|reimburse|reship|re-ship|redeliver|re-deliver|send\s+the|ship\s+the|give\s+us)\b)",
+    r"|(?=\b(?:let'?s|lets)\s+(?:take|do|go\s+with|get|issue|send|ship|have|make|request|stage|process)\b)"
+    r"|(?<!\bdo\s)(?<!\bnot\s)(?<!\bdon't\s)(?<!\bdont\s)(?<!\bnever\s)(?<!\bto\s)(?<!\bor\s)(?<!\bnor\s)(?<!\bno\s)"
+    r"(?=\b(?:request|stage|process|issue|reimburse|reship|re-ship|redeliver|re-deliver"
+    r"|send\s+(?:the|new|more|another|22|replacements?)"
+    r"|ship\s+(?:the|new|more|another|22|replacements?)"
+    r"|give\s+us"
+    r"|(?:just|please)\s+(?:request|stage|process|issue|send|ship|give|take|do|reship|re-ship|redeliver|re-deliver|reimburse))\b)",
     re.IGNORECASE,
 )
 _INSTEAD_OF_RE = re.compile(
-    r"\b(?:instead\s+of|rather\s+than|as\s+opposed\s+to)\s+([^.,;!?]+?)"
-    r"(?=(?:\b(?:we|i|let'?s|lets|please|issue|send|ship|give|take)\b|$))",
+    r"\b(?:instead\s+of|rather\s+than|as\s+opposed\s+to)\s+"
+    r"((?:(?:a|an|the|any|our|getting|taking|issuing|sending|shipping|doing|receiving|requesting)\s+){0,3}"
+    r"(?:(?:eur\s+)?587(?:[.,]\s*30|\s+30|\s+euros?)?(?:\s+(?:refund(?:s)?|credit\s+notes?|credit\s+memos?|credits?))?"
+    r"|22\s+(?:[a-z0-9-]+\s+){0,2}(?:replacement\s+)?(?:hubs?|units?)"
+    r"|refund(?:s|ed|ing)?|credit\s+notes?|credit\s+memos?|credits?|reimburse(?:ment|ments|d|s)?|money\s+back"
+    r"|re[-\s]?deliver(?:y|ies|ed|ing)?|replacements?(?:\s+(?:re[-\s]?deliver(?:y|ies)|hubs?|units?))?"
+    r"|re[-\s]?ship(?:ment|ments|ped|ping|s)?|reship(?:ment|ments|ped|ping|s)?))\b",
     re.IGNORECASE,
 )
 _OPTION_NEGATOR_RE = re.compile(
-    r"\b(?:do\s+not|don'?t|dont|no|not|never|neither|nor|without|forget|skip|drop|scratch|nix|avoid|stop|cancel|hold\s+off\s+on|against)\b",
+    r"\b(?:do\s+not|don'?t|dont|no|not|never|neither|nor|without|forget|skip|drop|scratch|nix|avoid|stop|cancel|abort|hold\s+off\s+on|against)\b",
     re.IGNORECASE,
 )
 _REFUND_TARGET_RE = re.compile(
@@ -737,38 +758,46 @@ _REFUND_TARGET_RE = re.compile(
     r"refund(?:s|ed|ing)?"
     r"|credit\s+notes?"
     r"|credit\s+memos?"
-    r"|credit(?:s|ed|ing)?(?!\s+cards?)"
+    r"|credit(?:s|ed|ing)?(?!\s+(?:cards?|claims?)\b)"
     r"|reimburse(?:ment|ments|d|s)?"
     r"|money\s+back"
-    r"|587(?:[.,]\s*30|\s+30|\s+euros?)?"
+    r"|587(?:[.,]\s*30|\s+30)?(?:\s+euros?)?(?![.,]\s*\d)(?!\s+(?:euros?\s+)?(?:claim|discrepanc(?:y|ies)|dispute|variance|audit|case|matter|issue|invoice)\b)"
     r")\b",
     re.IGNORECASE,
 )
-_REDELIVERY_TARGET_RE = re.compile(
+_EXPLICIT_REDELIVERY_TARGET_RE = re.compile(
     r"\b(?:"
     r"re[-\s]?deliver(?:y|ies|ed|ing)?"
     r"|replacements?"
     r"|replace(?:d|s|ing)?"
     r"|re[-\s]?ship(?:ment|ments|ped|ping|s)?"
     r"|reship(?:ment|ments|ped|ping|s)?"
-    r"|send\s+(?:new|more|another|the\s+22|22)"
-    r"|ship\s+(?:new|more|another|the\s+22|22)"
-    r"|22\s+(?:[a-z0-9-]+\s+){0,2}(?:hubs?|units?)"
+    r"|(?:send|ship|deliver|dispatch)\s+(?:out\s+)?(?:the\s+|our\s+|us\s+)?(?:new|more|another|missing|remaining|22)\b"
     r")\b",
+    re.IGNORECASE,
+)
+_BARE_22_UNITS_RE = re.compile(
+    r"\b22\s+(?:[a-z0-9-]+\s+){0,2}(?:hubs?|units?)\b(?!\s+(?:were|was|are|is)\b)",
+    re.IGNORECASE,
+)
+_UNITS_ACTION_CUE_RE = re.compile(
+    r"\b(?:send|ship|deliver|dispatch|fulfill|supply|give|take|get|want|need|prefer|choose|opt|go\s+with"
+    r"|request|stage|process|do\s+not|don'?t|dont|no|not|never|without|skip|drop|cancel|abort|scratch|forget)\b",
     re.IGNORECASE,
 )
 _HARD_NO_ACTION_RE = re.compile(
     r"\b(?:"
-    r"cancel\s+(?:everything|all|it|this|the\s+claim)"
-    r"|abort(?:\s+everything|\s+it|\s+all)?"
+    r"cancel\s+(?:everything|all|it|this|that|the\s+claim)"
+    r"|abort(?:\s+(?:everything|it|this|that|all|the\s+claim|the\s+call))?"
+    r"(?!\s+(?:the\s+|a\s+|an\s+|any\s+)?(?:refund|credit|reimburse\w*|re[-\s]?deliver\w*|replacement\w*|re[-\s]?ship\w*|reship\w*|22\b))"
     r"|leave\s+(?:it|everything|things|the\s+claim|the\s+invoice)\s+(?:alone|untouched|as\s+is|unchanged)"
-    r"|do\s+nothing"
-    r"|don'?t\s+do\s+anything"
-    r"|do\s+not\s+do\s+anything"
+    r"|do\s+nothing(?!\s+(?:else|yet|until|before|unless)\b)"
+    r"|don'?t\s+do\s+anything(?!\s+(?:else|yet|until|before|unless)\b)"
+    r"|do\s+not\s+do\s+anything(?!\s+(?:else|yet|until|before|unless)\b)"
     r"|take\s+no\s+action"
     r"|no\s+action"
     r"|stand\s+down"
-    r"|drop\s+(?:everything|the\s+claim|it)"
+    r"|drop\s+(?:everything|the\s+claim|it|this|that)"
     r"|neither(?:\s+one|\s+option)?"
     r"|none\s+of\s+(?:them|those|the\s+options)"
     r")\b",
@@ -781,23 +810,51 @@ _UNCLEAR_RE = re.compile(
     r"|unsure"
     r"|undecided"
     r"|uncertain"
+    r"|maybe"
+    r"|perhaps"
+    r"|possibly"
     r"|don'?t\s+know"
     r"|do\s+not\s+know"
-    r"|let\s+me\s+(?:check|verify|ask|confirm|think|look|see)"
-    r"|need\s+to\s+(?:check|verify|ask|confirm|think)"
-    r"|have\s+to\s+(?:check|verify|ask|confirm)"
-    r"|check\s+(?:our\s+|the\s+|my\s+)?(?:warehouse|inventory|stock|stockroom|team|manager)"
+    r"|no\s+idea"
+    r"|what\s+(?:are|were)\s+(?:my|our|the)\s+options"
+    r"|(?:what|which)\s+options\s+(?:do\s+(?:i|we)\s+have|are\s+there|are\s+available)"
+    r"|tell\s+me\s+(?:my|our|the)\s+options"
+    r"|(?:let\s+(?:me|us)|(?:i|we)\s+(?:need|have|want)\s+to|i'?ll|we'?ll)\s+"
+    r"(?:check|verify|ask|confirm|think|look|see|talk|speak|consult|review|discuss|run\s+(?:this|it)\s+by)"
+    r"|check\s+with\s+(?:our\s+|the\s+|my\s+)?[a-z]+"
+    r"|check\s+(?:our\s+|the\s+|my\s+)?(?:warehouse|inventory|stock|stockroom|team|manager|accounting|finance|director|boss|supervisor|records|ledger)"
+    r"|until\s+(?:i|we)\s+(?:confirm|check|verify|ask|approve|get\s+back|hear\s+back|review|talk|speak|consult)"
+    r"|(?:do\s+not|don'?t|dont)\s+(?:do|stage|submit|process|send|issue|commit|proceed)(?:\s+(?:anything|that|it|this))?\s+(?:yet|until|before)\b"
+    r"|(?:do\s+not|don'?t|dont)\s+(?:stage|submit|commit)\s+(?:that|it|this|anything)\b"
+    r"|(?:hold\s+on|hang\s+on|wait)\s+until\b"
     r"|get\s+back\s+to\s+you"
     r"|call\s+(?:you\s+)?back"
-    r"|think\s+about\s+it"
+    r"|think\s+(?:about\s+it|it\s+over)"
     r"|decide\s+later"
+    r"|confirm\s+later"
     r")\b",
     re.IGNORECASE,
 )
-_COMPARATIVE_QUESTION_RE = re.compile(
-    r"^\s*(?:what|which|can\s+you|could\s+you|should\s+we|do\s+you|is\s+it)\b.*\bor\b",
+_BOTH_OPTIONS_RE = re.compile(
+    r"\b(?:"
+    r"(?:give\s+us|(?:we|i)\s+(?:want|need|would\s+like|will\s+take|'ll\s+take)"
+    r"|send(?:\s+us)?|issue|stage|process|take|get|have|do|request)\s+both\b"
+    r"|both\s+(?:options|of\s+them)\b"
+    r")",
     re.IGNORECASE,
 )
+_INFO_QUESTION_CLAUSE_RE = re.compile(
+    r"^\s*(?:how\s+(?:long|fast|soon|much|many|does|do|would|will|can|could)"
+    r"|when\s+(?:would|will|can|could|do|does)"
+    r"|what\s+(?:is|was|are|were|would|does)"
+    r"|why\s+(?:did|was|were|is|would))\b",
+    re.IGNORECASE,
+)
+_COMPARATIVE_QUESTION_RE = re.compile(
+    r"^\s*(?:what|which|can\s+(?:you|we)|could\s+(?:you|we)|should\s+(?:we|i)|do\s+you|is\s+it)\b.*\bor\b",
+    re.IGNORECASE,
+)
+_COORD_NEG_RE = re.compile(r"\b(?:or|nor)\b", re.IGNORECASE)
 
 
 def _extract_human_utterances(
@@ -838,8 +895,39 @@ def _extract_human_utterances(
     return utterances
 
 
+def _find_redelivery_target(text: str, *, require_action_cue: bool = True) -> re.Match[str] | None:
+    m_exp = _EXPLICIT_REDELIVERY_TARGET_RE.search(text)
+    if m_exp is not None:
+        return m_exp
+    m_units = _BARE_22_UNITS_RE.search(text)
+    if m_units is not None and (not require_action_cue or _UNITS_ACTION_CUE_RE.search(text)):
+        return m_units
+    return None
+
+
+def _is_target_negated(
+    text: str,
+    target_match: re.Match[str],
+    other_match: re.Match[str] | None,
+    neg_matches: list[re.Match[str]],
+) -> bool:
+    t_start = target_match.start()
+    for nm in neg_matches:
+        if nm.start() >= t_start:
+            continue
+        if other_match is None or not (nm.start() < other_match.start() < t_start):
+            return True
+        between_targets = text[other_match.end() : t_start]
+        if _COORD_NEG_RE.search(between_targets):
+            return True
+    return False
+
+
 def _analyze_clause_options(clause: str) -> tuple[bool, bool, bool, bool]:
     pos_ref = neg_ref = pos_red = neg_red = False
+    if _INFO_QUESTION_CLAUSE_RE.search(clause):
+        return pos_ref, neg_ref, pos_red, neg_red
+
     normalized = _BENIGN_NO_IDIOM_RE.sub(" ", clause)
     normalized = _DOUBLE_NEGATION_RE.sub(" proceed with ", normalized)
 
@@ -847,33 +935,31 @@ def _analyze_clause_options(clause: str) -> tuple[bool, bool, bool, bool]:
         rejected_span = m.group(1)
         if _REFUND_TARGET_RE.search(rejected_span):
             neg_ref = True
-        if _REDELIVERY_TARGET_RE.search(rejected_span):
+        if _find_redelivery_target(rejected_span, require_action_cue=False) is not None:
             neg_red = True
     working = _INSTEAD_OF_RE.sub(" ", normalized)
 
-    has_ref = bool(_REFUND_TARGET_RE.search(working))
-    has_red = bool(_REDELIVERY_TARGET_RE.search(working))
-    if not (has_ref or has_red):
-        return pos_ref, neg_ref, pos_red, neg_red
-
     cleaned_neg = re.sub(
-        r"\b(?:not\s+sure|don'?t\s+know|do\s+not\s+know)\b",
+        r"\b(?:not\s+sure|don'?t\s+know|do\s+not\s+know|no\s+idea)\b",
         " ",
         working,
         flags=re.IGNORECASE,
     )
+    ref_m = _REFUND_TARGET_RE.search(cleaned_neg)
+    red_m = _find_redelivery_target(cleaned_neg, require_action_cue=True)
+    if ref_m is None and red_m is None:
+        return pos_ref, neg_ref, pos_red, neg_red
+
     neg_matches = list(_OPTION_NEGATOR_RE.finditer(cleaned_neg))
 
-    if has_ref:
-        ref_m = _REFUND_TARGET_RE.search(cleaned_neg)
-        if ref_m and any(nm.start() < ref_m.start() for nm in neg_matches):
+    if ref_m is not None:
+        if _is_target_negated(cleaned_neg, ref_m, red_m, neg_matches):
             neg_ref = True
         else:
             pos_ref = True
 
-    if has_red:
-        red_m = _REDELIVERY_TARGET_RE.search(cleaned_neg)
-        if red_m and any(nm.start() < red_m.start() for nm in neg_matches):
+    if red_m is not None:
+        if _is_target_negated(cleaned_neg, red_m, ref_m, neg_matches):
             neg_red = True
         else:
             pos_red = True
@@ -885,32 +971,49 @@ def _classify_single_human_turn(raw_text: str) -> RealtimeDecision | None:
     if not raw_text or not raw_text.strip():
         return None
 
-    prepped = _INTERJECTION_NO_RE.sub(".", raw_text)
-    pivot_parts = _PIVOT_SPLIT_RE.split(prepped)
-    has_pivot = len(pivot_parts) > 1
+    prepped = _BENIGN_NO_IDIOM_RE.sub(" ", raw_text)
+    prepped = _DOUBLE_NEGATION_RE.sub(" proceed with ", prepped)
+    prepped = _INTERJECTION_NO_RE.sub(".", prepped)
+
+    tokens = _PIVOT_SPLIT_RE.split(prepped)
+    pairs: list[tuple[str, str]] = [("", tokens[0])]
+    for idx in range(1, len(tokens), 2):
+        delim = tokens[idx]
+        seg = tokens[idx + 1] if (idx + 1) < len(tokens) else ""
+        pairs.append((delim, seg))
+
+    substantive_parts = [seg.strip(" ,.;:!?—–-") for _, seg in pairs if seg.strip(" ,.;:!?—–-")]
+    has_pivot = len(substantive_parts) > 1
 
     if (
         _COMPARATIVE_QUESTION_RE.search(prepped)
         and not has_pivot
         and _REFUND_TARGET_RE.search(prepped)
-        and _REDELIVERY_TARGET_RE.search(prepped)
+        and _find_redelivery_target(prepped, require_action_cue=False) is not None
     ):
         return "unclear"
 
     stage_decisions: list[RealtimeDecision] = []
+    pending_retraction = False
     any_neg_ref = False
     any_neg_red = False
     any_hard_no_action = bool(_HARD_NO_ACTION_RE.search(prepped))
     any_hold_off = bool(_HOLD_OFF_RE.search(prepped))
     any_unclear = bool(_UNCLEAR_RE.search(prepped))
+    any_both = bool(_BOTH_OPTIONS_RE.search(prepped))
 
-    for part in pivot_parts:
-        part = part.strip()
+    for delim, raw_part in pairs:
+        if delim and _RETRACTION_PIVOT_RE.search(delim):
+            pending_retraction = True
+
+        part = raw_part.strip(" ,.;:!?—–-")
         if not part:
             continue
+
         part_hard_no = bool(_HARD_NO_ACTION_RE.search(part))
         part_hold = bool(_HOLD_OFF_RE.search(part))
         part_unclear = bool(_UNCLEAR_RE.search(part))
+        part_both = bool(_BOTH_OPTIONS_RE.search(part))
 
         clauses = [c.strip() for c in _CLAUSE_SPLIT_RE.split(part) if c.strip()]
         pos_ref = neg_ref = pos_red = neg_red = False
@@ -924,25 +1027,30 @@ def _classify_single_human_turn(raw_text: str) -> RealtimeDecision | None:
         any_neg_ref = any_neg_ref or neg_ref
         any_neg_red = any_neg_red or neg_red
 
-        if pos_ref and not pos_red and not part_hard_no and not part_unclear:
+        before_len = len(stage_decisions)
+        if pos_ref and not pos_red and not part_hard_no and not part_unclear and not part_both:
             stage_decisions.append("refund")
-        elif pos_red and not pos_ref and not part_hard_no and not part_unclear:
+        elif pos_red and not pos_ref and not part_hard_no and not part_unclear and not part_both:
             stage_decisions.append("redelivery")
-        elif part_hard_no or (neg_ref and neg_red and not pos_ref and not pos_red):
-            stage_decisions.append("no_action")
-        elif part_unclear:
+        elif part_unclear or part_both or (pos_ref and pos_red):
             stage_decisions.append("unclear")
-        elif part_hold and not pos_ref and not pos_red:
+        elif part_hard_no or ((part_hold or (neg_ref and neg_red)) and not pos_ref and not pos_red):
             stage_decisions.append("no_action")
-        elif pos_ref and pos_red:
+        elif neg_ref or neg_red:
             stage_decisions.append("unclear")
+
+        if len(stage_decisions) > before_len:
+            pending_retraction = False
+
+    if pending_retraction and (not stage_decisions or stage_decisions[-1] in ("refund", "redelivery")):
+        stage_decisions.append("unclear")
 
     if stage_decisions:
         return stage_decisions[-1]
+    if any_unclear or any_both:
+        return "unclear"
     if any_hard_no_action or (any_neg_ref and any_neg_red):
         return "no_action"
-    if any_unclear:
-        return "unclear"
     if any_hold_off:
         return "no_action"
     if any_neg_ref or any_neg_red:
@@ -1027,6 +1135,7 @@ async def relay_grok_realtime_websocket(
     *,
     claim_id: str = DEFAULT_REALTIME_CLAIM_ID,
     voice: str | None = None,
+    sample_rate: int = GROK_REALTIME_SAMPLE_RATE,
     instructions: str | None = None,
     greet_on_connect: bool = True,
     max_duration_s: float = GROK_REALTIME_MAX_DURATION_S,
@@ -1039,7 +1148,23 @@ async def relay_grok_realtime_websocket(
         await client_ws.accept()
 
     clean_claim = (claim_id or DEFAULT_REALTIME_CLAIM_ID).strip() or DEFAULT_REALTIME_CLAIM_ID
-    session_update = build_grok_realtime_session_update(voice=voice, instructions=instructions)
+    try:
+        session_update = build_grok_realtime_session_update(
+            voice=voice,
+            sample_rate=sample_rate,
+            instructions=instructions,
+        )
+    except ValueError as exc:
+        outcome = classify_realtime_call_outcome([], claim_id=clean_claim)
+        with contextlib.suppress(Exception):
+            await _send_client_json(
+                client_ws,
+                {"type": "recoup.error", "message": str(exc)[:200]},
+            )
+            if hasattr(client_ws, "close"):
+                await client_ws.close(code=1008)
+        return outcome
+
     clamped_max_s = max(0.02, min(float(max_duration_s), GROK_REALTIME_HARD_MAX_DURATION_S))
     connector = ws_connector or ws_connect
 
@@ -1088,6 +1213,8 @@ async def relay_grok_realtime_websocket(
         agent_buffers: dict[str, list[str]] = {}
         agent_finalized: set[str] = set()
         user_buffers: dict[str, str] = {}
+        active_response_id: str | None = None
+        cancelled_response_ids: set[str] = set()
         stop_reason = "client_hangup"
         upstream_ws: Any = None
 
@@ -1128,7 +1255,7 @@ async def relay_grok_realtime_websocket(
                     "call_id": f"CALL-{clean_claim}",
                     "claim_id": clean_claim,
                     "voice": session_update["session"]["voice"],
-                    "sample_rate": GROK_REALTIME_SAMPLE_RATE,
+                    "sample_rate": sample_rate,
                     "encoding": "pcm_s16le",
                 },
             )
@@ -1163,7 +1290,7 @@ async def relay_grok_realtime_websocket(
                             )
 
             async def client_to_upstream() -> None:
-                nonlocal stop_reason, last_client_to_upstream
+                nonlocal stop_reason, last_client_to_upstream, active_response_id
                 while not stop_event.is_set():
                     try:
                         raw_msg = await client_ws.receive_text()
@@ -1193,7 +1320,14 @@ async def relay_grok_realtime_websocket(
                                 )
                             )
                     elif mtype in ("audio.barge_in", "response.cancel"):
-                        await upstream_ws.send(encode_fal_realtime_event({"type": "response.cancel"}))
+                        interrupted_id = active_response_id
+                        if interrupted_id:
+                            cancelled_response_ids.add(interrupted_id)
+                        active_response_id = None
+                        await _send_client_json(
+                            client_ws,
+                            {"type": "recoup.barge_in", "interrupted_response_id": interrupted_id or ""},
+                        )
                     elif mtype == "transcript.user":
                         txt = str(msg.get("text") or "").strip()
                         if txt:
@@ -1217,7 +1351,7 @@ async def relay_grok_realtime_websocket(
                         break
 
             async def upstream_to_client() -> None:
-                nonlocal stop_reason
+                nonlocal stop_reason, active_response_id
                 try:
                     async for raw_frame in upstream_ws:
                         touch()
@@ -1230,12 +1364,32 @@ async def relay_grok_realtime_websocket(
 
                         if ev_type == "session.updated":
                             await _send_client_json(client_ws, {"type": "recoup.session.updated"})
+                        elif ev_type == "response.created":
+                            resp_obj = ev.get("response") if isinstance(ev.get("response"), dict) else {}
+                            rid = str(resp_obj.get("id") or ev.get("response_id") or "")
+                            if rid:
+                                active_response_id = rid
                         elif ev_type == "input_audio_buffer.speech_started":
                             # In server_vad mode, xAI Grok Voice Realtime cancels the active
                             # response automatically server-side; sending client `response.cancel`
-                            # raises `invalid_request_error`. Notify client to flush speaker buffer.
-                            await _send_client_json(client_ws, {"type": "recoup.barge_in"})
+                            # raises `invalid_request_error`. Suppress stale deltas & flush speaker.
+                            interrupted_id = active_response_id
+                            if interrupted_id:
+                                cancelled_response_ids.add(interrupted_id)
+                            active_response_id = None
+                            await _send_client_json(
+                                client_ws,
+                                {
+                                    "type": "recoup.barge_in",
+                                    "interrupted_response_id": interrupted_id or "",
+                                },
+                            )
                         elif ev_type in ("response.output_audio.delta", "response.audio.delta"):
+                            rid = str(ev.get("response_id") or active_response_id or "")
+                            if rid and rid in cancelled_response_ids:
+                                continue
+                            if rid:
+                                active_response_id = rid
                             delta = ev.get("delta")
                             if isinstance(delta, (bytes, bytearray)):
                                 delta = base64.b64encode(bytes(delta)).decode("ascii")
@@ -1245,7 +1399,7 @@ async def relay_grok_realtime_websocket(
                                     {
                                         "type": "recoup.audio.delta",
                                         "audio": delta,
-                                        "response_id": str(ev.get("response_id") or ""),
+                                        "response_id": rid,
                                     },
                                 )
                         elif ev_type == "conversation.item.input_audio_transcription.updated":
@@ -1306,6 +1460,8 @@ async def relay_grok_realtime_websocket(
                                 if isinstance(ev.get("response"), dict)
                                 else ev.get("response_id") or "default"
                             )
+                            if active_response_id == rid:
+                                active_response_id = None
                             if rid not in agent_finalized and rid in agent_buffers:
                                 txt = "".join(agent_buffers.get(rid, [])).strip()
                                 if txt:
