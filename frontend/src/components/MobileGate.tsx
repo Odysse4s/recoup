@@ -672,8 +672,8 @@ function OperatorEscalationCall({
     soundFx.playUiClick();
     buzz([50, 80]);
 
-    // 1. Unlock iOS Audio & SpeechSynthesis
-    unlockAudioSession();
+    // 1. Unlock iOS Audio & SpeechSynthesis into play-and-record so mic stays 100% active
+    unlockAudioSession("play-and-record");
     onUnlockAudio();
 
     // 2. Open warm mic MediaStream once
@@ -984,7 +984,7 @@ function OperatorEscalationCall({
       style={{
         background: resolvedEnd
           ? "radial-gradient(130% 65% at 50% 0%, color-mix(in oklab, var(--ok) 25%, var(--canvas)), var(--canvas) 75%)"
-          : isHearing
+          : (isHearing || vad.manualRecording)
           ? "radial-gradient(130% 65% at 50% 12%, rgba(244, 63, 94, 0.22) 0%, var(--canvas) 75%)"
           : isSpeaking
           ? "radial-gradient(130% 65% at 50% 12%, color-mix(in oklab, var(--ok) 24%, var(--canvas)) 0%, var(--canvas) 75%)"
@@ -1038,22 +1038,22 @@ function OperatorEscalationCall({
                 "absolute inset-0 rounded-full border transition-colors",
                 resolvedEnd
                   ? "border-ok/30"
-                  : isHearing
+                  : (isHearing || vad.manualRecording)
                   ? "border-rose-500/40"
                   : isSpeaking
                   ? "border-emerald-400/40"
                   : "border-signal/30"
               )}
               animate={{
-                scale: isHearing ? [1, 1.25, 1] : isSpeaking ? [1, 1.18, 1] : [1, 1.08, 1],
+                scale: (isHearing || vad.manualRecording) ? [1, 1.25, 1] : isSpeaking ? [1, 1.18, 1] : [1, 1.08, 1],
                 opacity: [0.4, 0.8, 0.4],
               }}
-              transition={{ duration: isHearing ? 1.2 : 2.4, repeat: Infinity, ease: "easeInOut" }}
+              transition={{ duration: (isHearing || vad.manualRecording) ? 1.2 : 2.4, repeat: Infinity, ease: "easeInOut" }}
             />
             <motion.div
               className={cx(
                 "absolute -inset-4 rounded-full border border-dashed transition-colors",
-                isHearing ? "border-rose-400/30" : "border-emerald-500/25"
+                (isHearing || vad.manualRecording) ? "border-rose-400/30" : "border-emerald-500/25"
               )}
               animate={{ rotate: 360 }}
               transition={{ duration: 25, repeat: Infinity, ease: "linear" }}
@@ -1062,9 +1062,9 @@ function OperatorEscalationCall({
             {/* Embedded Canvas VoiceOrb */}
             <VoiceOrb
               variant="orb"
-              tone={resolvedEnd ? "ok" : isHearing ? "danger" : isSpeaking ? "ok" : "signal"}
+              tone={resolvedEnd ? "ok" : (isHearing || vad.manualRecording) ? "danger" : isSpeaking ? "ok" : "signal"}
               active
-              ambient={!isSpeaking && !isHearing}
+              ambient={!isSpeaking && !isHearing && !vad.manualRecording}
               className="absolute inset-2 h-48 w-48"
             />
 
@@ -1073,11 +1073,16 @@ function OperatorEscalationCall({
               type="button"
               onClick={() => {
                 soundFx.playUiClick();
-                if (isHearing) {
-                  // Fast shortcut: tap center orb while hearing to send turn immediately!
-                  vad.sendNow();
-                } else if (isSpeaking) {
+                if (isSpeaking) {
+                  // Interruption / Barge-in
                   stopSpeaking();
+                  vad.setPhase("listening");
+                } else if (isHearing || vad.manualRecording) {
+                  // Immediately finish recording and send
+                  vad.stopAndSendManualRecording();
+                } else if (isListening) {
+                  // Manual tap-to-speak fallback
+                  vad.startManualRecording();
                 } else if (!resolvedEnd) {
                   speakAgentLine(latestAgentTurn?.text || openingText, true);
                 }
@@ -1087,20 +1092,20 @@ function OperatorEscalationCall({
                 "relative z-10 flex h-20 w-20 items-center justify-center rounded-full text-white shadow-2xl transition-transform active:scale-95",
                 resolvedEnd
                   ? "bg-ok text-on-solid"
-                  : isHearing
-                  ? "bg-danger text-white shadow-[0_0_30px_rgba(244,63,94,0.6)]"
+                  : (isHearing || vad.manualRecording)
+                  ? "bg-danger text-white shadow-[0_0_30px_rgba(244,63,94,0.6)] animate-pulse"
                   : isSpeaking
                   ? "bg-ok text-on-solid shadow-[0_0_30px_rgba(16,185,129,0.5)]"
                   : isSyncing
                   ? "bg-signal text-white"
-                  : "bg-surface border border-line text-ink shadow-md"
+                  : "bg-surface border border-line text-ink shadow-md hover:border-signal/50"
               )}
             >
               {resolvedEnd ? (
                 <CheckCircle2 className="h-9 w-9" />
               ) : isSyncing ? (
                 <Loader2 className="h-9 w-9 animate-spin text-white" />
-              ) : isHearing ? (
+              ) : (isHearing || vad.manualRecording) ? (
                 <Mic className="h-9 w-9 animate-pulse" />
               ) : isSpeaking ? (
                 <Volume2 className="h-9 w-9 animate-pulse" />
@@ -1119,7 +1124,7 @@ function OperatorEscalationCall({
                   ? "text-ok"
                   : isSpeaking
                   ? "text-ok"
-                  : isHearing
+                  : (isHearing || vad.manualRecording)
                   ? "text-danger"
                   : isSyncing
                   ? "text-signal"
@@ -1130,22 +1135,48 @@ function OperatorEscalationCall({
                 ? "DECISION APPLIED · REVERSIBLE UNDO READY"
                 : isSpeaking
                 ? "RECOUP SPEAKING…"
-                : isHearing
+                : (isHearing || vad.manualRecording)
                 ? "HEARING YOU…"
                 : isSyncing
                 ? "SYNCING WITH DESKTOP…"
-                : "LISTENING LIVE — JUST SPEAK…"}
+                : "YOUR TURN — JUST SPEAK"}
             </div>
-            <p className="mt-0.5 max-w-[320px] text-[12px] font-medium text-ink-2">
+
+            {/* Live Green Mic Level Bar (`rms`) */}
+            {!resolvedEnd && (
+              <div className="mt-2 flex items-center gap-2 rounded-full border border-line bg-surface/85 px-3 py-1 shadow-sm backdrop-blur-md">
+                <Mic
+                  className={cx(
+                    "h-3.5 w-3.5 shrink-0 transition-colors",
+                    isHearing || vad.manualRecording || vad.rms > 0.012
+                      ? "text-emerald-400 animate-pulse"
+                      : "text-ink-3"
+                  )}
+                />
+                <div className="relative h-2 w-28 overflow-hidden rounded-full bg-ink/10">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-emerald-500 via-emerald-400 to-teal-300 shadow-[0_0_10px_rgba(16,185,129,0.85)] transition-all duration-75"
+                    style={{
+                      width: `${Math.min(100, Math.round(vad.rms * 600))}%`,
+                    }}
+                  />
+                </div>
+                <span className="w-8 font-mono text-[10.5px] font-semibold text-emerald-400 tabular text-right">
+                  {Math.min(100, Math.round(vad.rms * 600))}%
+                </span>
+              </div>
+            )}
+
+            <p className="mt-1.5 max-w-[320px] text-[12px] font-medium text-ink-2">
               {resolvedEnd
                 ? "ERP staged and vendor email ready · reversible receipt below"
                 : isSpeaking
-                ? "Grok Realtime Voice audio active"
-                : isHearing
-                ? "Auto-sends after 0.85s pause · or tap orb to send now"
+                ? "Grok Realtime Voice audio active · tap orb to interrupt"
+                : (isHearing || vad.manualRecording)
+                ? "Auto-sends on pause · or tap orb to send now"
                 : isSyncing
                 ? "Wizper STT & desktop synchronization in progress…"
-                : 'Try: “Show me the AADE tax filing on my screen” or “Enforce refund”'}
+                : "Hands-free Auto-VAD · or tap orb to talk / send"}
             </p>
           </div>
         </div>

@@ -65,6 +65,15 @@ export function getVoiceProviderLabel(provider: VoiceProvider): string {
 let sharedAudioContext: AudioContext | null = null;
 let sharedMediaElement: HTMLAudioElement | null = null;
 let activeSourceNode: AudioBufferSourceNode | null = null;
+let activeWarmMicStream: MediaStream | null = null;
+
+export function setActiveWarmMicStream(stream: MediaStream | null) {
+  activeWarmMicStream = stream;
+}
+
+export function getActiveWarmMicStream(): MediaStream | null {
+  return activeWarmMicStream;
+}
 
 export function getPrimedAudioElement(): HTMLAudioElement | null {
   if (typeof window === "undefined") return null;
@@ -83,14 +92,27 @@ export function getPrimedAudioElement(): HTMLAudioElement | null {
   return sharedMediaElement;
 }
 
-export function unlockAudioSession(): AudioContext | null {
+export function unlockAudioSession(mode: "playback" | "play-and-record" = "playback"): AudioContext | null {
   if (typeof window === "undefined") return null;
 
-  // 1. Configure iOS 17/18 audioSession type to 'playback' for media speaker routing
+  // 1. Configure iOS 17/18 audioSession type
+  // CRITICAL: On iOS Safari, "playback" zeroes out all microphone audio (rms === 0)!
+  // If warm mic stream is active OR if navigator.audioSession.type is ALREADY "play-and-record",
+  // NEVER overwrite "play-and-record" back to "playback".
   try {
     const nav = navigator as unknown as { audioSession?: { type: string } };
     if (nav?.audioSession) {
-      nav.audioSession.type = "playback";
+      const isMicActive = Boolean(
+        activeWarmMicStream &&
+        activeWarmMicStream.active &&
+        activeWarmMicStream.getAudioTracks().some((t) => t.readyState === "live")
+      );
+
+      if (mode === "play-and-record" || isMicActive || nav.audioSession.type === "play-and-record") {
+        nav.audioSession.type = "play-and-record";
+      } else {
+        nav.audioSession.type = "playback";
+      }
     }
   } catch {
     // Ignore audioSession configuration error
@@ -151,13 +173,18 @@ export function getSharedAudioContext(): AudioContext | null {
 export async function getWarmMicStream(): Promise<MediaStream | null> {
   if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) return null;
   try {
-    return await navigator.mediaDevices.getUserMedia({
+    // Always configure iOS audio session to play-and-record before opening mic
+    unlockAudioSession("play-and-record");
+    const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
         noiseSuppression: true,
         autoGainControl: true,
       },
     });
+    activeWarmMicStream = stream;
+    unlockAudioSession("play-and-record");
+    return stream;
   } catch (err) {
     console.warn("getWarmMicStream permission or hardware error", err);
     return null;
@@ -788,6 +815,17 @@ export interface UseAutoVadOptions {
   onRms?: (rms: number) => void;
 }
 
+export interface UseAutoVadReturn {
+  phase: AutoVadPhase;
+  setPhase: (phase: AutoVadPhase) => void;
+  rms: number;
+  sendNow: () => void;
+  startManualRecording: () => void;
+  stopAndSendManualRecording: () => void;
+  manualRecording: boolean;
+  analyser: AnalyserNode | null;
+}
+
 export function useAutoVad({
   stream,
   enabled,
@@ -796,11 +834,15 @@ export function useAutoVad({
   onUtterance,
   onPhaseChange,
   onRms,
-}: UseAutoVadOptions) {
+}: UseAutoVadOptions): UseAutoVadReturn {
   const [phase, setPhaseState] = useState<AutoVadPhase>("idle");
   const [rmsLevel, setRmsLevel] = useState(0);
+  const [manualRecording, setManualRecording] = useState(false);
 
   const phaseRef = useRef<AutoVadPhase>("idle");
+  const manualRecordingRef = useRef(false);
+  const hasSpokenInManualSessionRef = useRef(false);
+
   const onUtteranceRef = useRef(onUtterance);
   onUtteranceRef.current = onUtterance;
   const onPhaseChangeRef = useRef(onPhaseChange);
@@ -835,7 +877,10 @@ export function useAutoVad({
     if (!agentSpeaking) {
       agentStoppedAtRef.current = performance.now();
     } else {
-      // Recoup began speaking: if we were hearing something, abort recording to avoid echo
+      // Recoup began speaking: if we were hearing or manually recording, abort recording to avoid echo
+      manualRecordingRef.current = false;
+      setManualRecording(false);
+      hasSpokenInManualSessionRef.current = false;
       if (phaseRef.current === "hearing") {
         discardCurrentRecordingRef.current = true;
         if (recorderRef.current && recorderRef.current.state !== "inactive") {
@@ -850,23 +895,97 @@ export function useAutoVad({
     }
   }, [agentSpeaking, setPhase]);
 
-  // Center orb tap shortcut: send utterance immediately if currently hearing
-  const sendNow = useCallback(() => {
-    if (phaseRef.current === "hearing" && recorderRef.current && recorderRef.current.state === "recording") {
+  // Center orb tap shortcut: stop recording and send utterance immediately
+  const stopAndSendManualRecording = useCallback(() => {
+    if (recorderRef.current && recorderRef.current.state === "recording") {
       pulseVoice();
+      manualRecordingRef.current = true;
       setPhase("syncing");
       try {
         recorderRef.current.stop();
       } catch {
         setPhase("listening");
       }
+    } else {
+      setPhase("listening");
     }
   }, [setPhase]);
+
+  const sendNow = stopAndSendManualRecording;
+
+  // Manual tap-to-speak: starts recording immediately regardless of RMS threshold
+  const startManualRecording = useCallback(() => {
+    if (!enabled || !stream) return;
+    unlockAudioSession("play-and-record");
+
+    if (recorderRef.current && recorderRef.current.state !== "inactive") {
+      try {
+        discardCurrentRecordingRef.current = true;
+        recorderRef.current.stop();
+      } catch {
+        // ignore
+      }
+    }
+
+    manualRecordingRef.current = true;
+    hasSpokenInManualSessionRef.current = false;
+    setManualRecording(true);
+    consecutiveSpeechFramesRef.current = 0;
+
+    const { mimeType, ext } = pickRecorderMimeType();
+    chunksRef.current = [];
+    discardCurrentRecordingRef.current = false;
+    const now = performance.now();
+    speechStartAtRef.current = now;
+    lastActiveSpeechAtRef.current = now;
+
+    try {
+      const rec = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      rec.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size > 0) {
+          chunksRef.current.push(ev.data);
+        }
+      };
+      rec.onstop = () => {
+        const wasManual = manualRecordingRef.current;
+        manualRecordingRef.current = false;
+        setManualRecording(false);
+        hasSpokenInManualSessionRef.current = false;
+
+        if (discardCurrentRecordingRef.current) {
+          chunksRef.current = [];
+          return;
+        }
+        const blob = new Blob(chunksRef.current, { type: rec.mimeType || mimeType || "audio/mp4" });
+        chunksRef.current = [];
+        const totalSpeechDuration = lastActiveSpeechAtRef.current - speechStartAtRef.current;
+
+        // Either manual tap-to-speak or valid speech duration & size
+        if (wasManual || (blob.size >= 600 && totalSpeechDuration >= 200)) {
+          onUtteranceRef.current(blob, rec.mimeType || mimeType, ext);
+        } else {
+          setPhase("listening");
+        }
+      };
+      recorderRef.current = rec;
+      rec.start(200);
+      setPhase("hearing");
+      pulseVoice();
+    } catch (recErr) {
+      console.warn("Auto-VAD: MediaRecorder manual start failed", recErr);
+      manualRecordingRef.current = false;
+      setManualRecording(false);
+      setPhase("listening");
+    }
+  }, [enabled, setPhase, stream]);
 
   useEffect(() => {
     if (!enabled || !stream) {
       setPhase("idle");
       setRmsLevel(0);
+      manualRecordingRef.current = false;
+      setManualRecording(false);
+      hasSpokenInManualSessionRef.current = false;
       if (recorderRef.current && recorderRef.current.state !== "inactive") {
         try {
           recorderRef.current.stop();
@@ -877,7 +996,9 @@ export function useAutoVad({
       return;
     }
 
-    const ctx = unlockAudioSession();
+    activeWarmMicStream = stream;
+    // Always configure iOS audioSession to "play-and-record" when mic stream is armed
+    const ctx = unlockAudioSession("play-and-record");
     if (!ctx) return;
 
     let sourceNode: MediaStreamAudioSourceNode | null = null;
@@ -947,22 +1068,25 @@ export function useAutoVad({
       }
 
       const noiseFloor = noiseFloorRef.current;
-      const speechStartThreshold = Math.max(0.026, noiseFloor * 2.2);
-      const silenceThreshold = Math.max(0.016, noiseFloor * 1.5);
+      // Sensitive phone VAD thresholds for natural conversational phone speech
+      const speechStartThreshold = Math.max(0.012, noiseFloor * 1.8);
+      const silenceThreshold = Math.max(0.008, noiseFloor * 1.3);
 
       const currentPhase = phaseRef.current;
 
       if (currentPhase === "listening") {
         if (rms > speechStartThreshold) {
           consecutiveSpeechFramesRef.current++;
-          // ~180ms consecutive speech validation (~11 frames at 60Hz)
-          if (consecutiveSpeechFramesRef.current >= 10) {
+          // ~100ms consecutive speech validation (~6 frames at 60Hz)
+          if (consecutiveSpeechFramesRef.current >= 6) {
             consecutiveSpeechFramesRef.current = 0;
             const { mimeType, ext } = pickRecorderMimeType();
             chunksRef.current = [];
             discardCurrentRecordingRef.current = false;
             speechStartAtRef.current = now;
             lastActiveSpeechAtRef.current = now;
+            manualRecordingRef.current = false;
+            hasSpokenInManualSessionRef.current = true;
 
             try {
               const rec = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
@@ -972,6 +1096,11 @@ export function useAutoVad({
                 }
               };
               rec.onstop = () => {
+                const wasManual = manualRecordingRef.current;
+                manualRecordingRef.current = false;
+                setManualRecording(false);
+                hasSpokenInManualSessionRef.current = false;
+
                 if (discardCurrentRecordingRef.current) {
                   chunksRef.current = [];
                   return;
@@ -979,7 +1108,7 @@ export function useAutoVad({
                 const blob = new Blob(chunksRef.current, { type: rec.mimeType || mimeType || "audio/mp4" });
                 chunksRef.current = [];
                 const totalSpeechDuration = lastActiveSpeechAtRef.current - speechStartAtRef.current;
-                if (blob.size >= 1200 && totalSpeechDuration >= 320) {
+                if (wasManual || (blob.size >= 600 && totalSpeechDuration >= 200)) {
                   onUtteranceRef.current(blob, rec.mimeType || mimeType, ext);
                 } else {
                   setPhase("listening");
@@ -996,15 +1125,25 @@ export function useAutoVad({
           consecutiveSpeechFramesRef.current = Math.max(0, consecutiveSpeechFramesRef.current - 1);
         }
       } else if (currentPhase === "hearing") {
-        if (rms >= silenceThreshold) {
+        if (rms >= speechStartThreshold) {
+          hasSpokenInManualSessionRef.current = true;
+          lastActiveSpeechAtRef.current = now;
+        } else if (rms >= silenceThreshold && hasSpokenInManualSessionRef.current) {
           lastActiveSpeechAtRef.current = now;
         }
 
-        const silenceDuration = now - lastActiveSpeechAtRef.current;
+        const silenceDuration = hasSpokenInManualSessionRef.current
+          ? now - lastActiveSpeechAtRef.current
+          : manualRecordingRef.current
+          ? 0
+          : now - speechStartAtRef.current;
         const totalDuration = now - speechStartAtRef.current;
 
-        // Auto-complete turn when 850ms silence occurs OR 11s safety cap reached
-        if ((silenceDuration >= 850 && totalDuration >= 350) || totalDuration >= 11000) {
+        // Auto-complete turn when 850ms silence occurs after speech OR 11s safety cap reached
+        if (
+          (hasSpokenInManualSessionRef.current && silenceDuration >= 850 && totalDuration >= 300) ||
+          totalDuration >= 11000
+        ) {
           setPhase("syncing");
           if (recorderRef.current && recorderRef.current.state === "recording") {
             try {
@@ -1024,6 +1163,9 @@ export function useAutoVad({
     return () => {
       running = false;
       if (rafId) cancelAnimationFrame(rafId);
+      manualRecordingRef.current = false;
+      setManualRecording(false);
+      hasSpokenInManualSessionRef.current = false;
       if (recorderRef.current && recorderRef.current.state !== "inactive") {
         try {
           discardCurrentRecordingRef.current = true;
@@ -1048,6 +1190,9 @@ export function useAutoVad({
     setPhase,
     rms: rmsLevel,
     sendNow,
+    startManualRecording,
+    stopAndSendManualRecording,
+    manualRecording,
     analyser: analyserRef.current,
   };
 }

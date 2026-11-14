@@ -42,6 +42,7 @@ from .contracts import (
     GoalRequest,
     PlanPayload,
     PlanStep,
+    ServerEvent,
     ToolCall,
     UiActionPayload,
     VerifyCriterionResult,
@@ -1154,8 +1155,63 @@ def _build_run_report_markdown(run_id: str | None = None) -> tuple[str, str]:
     brand_name = brand()["brand_name"]
     if not BUS.history:
         return "none", f"# {brand_name} Audit & Execution Report\n\nNo run events recorded yet.\n"
-    target_id = run_id or BUS.history[-1].run_id
-    run_events = [e for e in BUS.history if e.run_id == target_id]
+
+    target_id: str | None = run_id
+    if not target_id:
+        audit_types = {
+            EventType.PLAN_CREATED,
+            EventType.PLAN_REVISED,
+            EventType.REHEARSE_START,
+            EventType.TOOL_CALL,
+            EventType.REHEARSE_REPORT,
+        }
+        seen_runs: list[str] = []
+        for ev in reversed(BUS.history):
+            rid = ev.run_id
+            if rid and rid not in seen_runs:
+                seen_runs.append(rid)
+
+        candidate_runs = [
+            r for r in seen_runs if not r.startswith(("consult_", "pickup_", "undo"))
+        ]
+        for r in candidate_runs:
+            if any(e.type in audit_types for e in BUS.history if e.run_id == r):
+                target_id = r
+                break
+
+        if not target_id and candidate_runs:
+            target_id = candidate_runs[0]
+
+        if not target_id:
+            target_id = BUS.history[-1].run_id
+
+    start_idx: int | None = None
+    for idx, ev in enumerate(BUS.history):
+        if ev.run_id == target_id:
+            start_idx = idx
+            break
+
+    if start_idx is None:
+        return target_id, f"# {brand_name} Audit & Execution Report\n\nNo events found for run `{target_id}`.\n"
+
+    subsequent_types = {
+        EventType.CALL_START,
+        EventType.CALL_TURN,
+        EventType.CALL_END,
+        EventType.APPROVAL_RESULT,
+        EventType.REPLAY_STEP_DONE,
+        EventType.UNDO_STEP,
+    }
+
+    run_events: list[ServerEvent] = []
+    for ev in BUS.history[start_idx:]:
+        if ev.run_id == target_id:
+            run_events.append(ev)
+        elif not ev.run_id.startswith(("consult_", "pickup_", "undo")):
+            break
+        elif ev.type in subsequent_types:
+            run_events.append(ev)
+
     if not run_events:
         return target_id, f"# {brand_name} Audit & Execution Report\n\nNo events found for run `{target_id}`.\n"
 
@@ -1176,7 +1232,9 @@ def _build_run_report_markdown(run_id: str | None = None) -> tuple[str, str]:
     plan_md: list[str] = []
     forge_md: list[str] = []
     trace_md: list[str] = []
+    diffs_md: list[str] = []
     verify_md: list[str] = []
+    call_md: list[str] = []
     gate_md: list[str] = []
 
     for ev in run_events:
@@ -1205,17 +1263,72 @@ def _build_run_report_markdown(run_id: str | None = None) -> tuple[str, str]:
             trace_md.append(f"  - OK ({ev.latency_ms} ms): `{str(p.get('preview', ''))[:140]}`")
         elif ev.type == EventType.TOOL_ERROR:
             trace_md.append(f"  - ERROR ({ev.latency_ms} ms): `{p.get('error')}`")
+        elif ev.type == EventType.REHEARSE_REPORT:
+            rep = p.get("report", {})
+            if isinstance(rep, dict):
+                created = rep.get("files_created", [])
+                if created:
+                    diffs_md.append(f"- **Files Created:** {', '.join(f'`{f}`' for f in created)}")
+                modified = rep.get("files_modified", [])
+                if modified:
+                    for mod in modified:
+                        m_path = mod.get("path") if isinstance(mod, dict) else str(mod)
+                        diffs_md.append(f"- **File Modified:** `{m_path}`")
+                deleted = rep.get("files_deleted", [])
+                if deleted:
+                    diffs_md.append(f"- **Files Deleted:** {', '.join(f'`{f}`' for f in deleted)}")
+                db_sum = rep.get("db_summary", {})
+                if db_sum:
+                    for tbl, counts in db_sum.items():
+                        ins = counts.get("inserted", 0)
+                        upd = counts.get("updated", 0)
+                        deld = counts.get("deleted", 0)
+                        diffs_md.append(f"- **Database `{tbl}`:** +{ins} / ~{upd} / -{deld}")
+                outbox = rep.get("external_outbox", [])
+                if outbox:
+                    for item in outbox:
+                        to_addr = item.get("to", "unknown")
+                        subj = item.get("subject", "")
+                        diffs_md.append(f"- **Staged Outbox Message:** to `{to_addr}` | `{subj}`")
+            muts = p.get("mutations")
+            if muts is not None and not diffs_md:
+                diffs_md.append(f"- Staged mutations count: {muts}")
         elif ev.type == EventType.VERIFY_RESULT:
             verify_md.append(f"**Overall:** {'PASSED' if p.get('passed') else 'FAILED'}")
             for cr in p.get("criteria", []):
                 ok_flag = bool(cr.get("passed", cr.get("ok")))
                 verify_md.append(f"- [{'x' if ok_flag else ' '}] {cr.get('criterion')} — {cr.get('detail')}")
+        elif ev.type == EventType.CALL_START:
+            counterparty = p.get("counterparty") or "Operator Mobile"
+            mode = p.get("mode", "user_consult")
+            cid = p.get("claim_id", "")
+            amt = p.get("claim_amount")
+            c_status = p.get("call_status", "connected")
+            detail = f" (claim `{cid}`, EUR {amt})" if cid else ""
+            call_md.append(f"- **Call Started:** {counterparty} [{mode}]{detail} — Status: `{c_status}`")
+        elif ev.type == EventType.CALL_TURN:
+            speaker = str(p.get("speaker", "agent")).capitalize()
+            text = str(p.get("text", "")).strip()
+            call_md.append(f"- **{speaker}:** \"{text}\"")
+        elif ev.type == EventType.CALL_END:
+            outcome = p.get("outcome", "ended")
+            summary = p.get("summary", "")
+            agreed = p.get("agreed_amount")
+            agreed_str = f" | Agreed: EUR {agreed}" if agreed is not None else ""
+            call_md.append(f"- **Call Ended:** Outcome `{outcome}`{agreed_str}" + (f" — {summary}" if summary else ""))
         elif ev.type == EventType.APPROVAL_NEEDED:
             gate_md.append(f"- Paused on `{p.get('tool_name')}`: {p.get('risk_reason')}")
         elif ev.type == EventType.APPROVAL_RESULT:
-            gate_md.append(
-                f"- Decision: `{p.get('outcome') or ('approved' if p.get('approved') else 'rejected')}`"
-            )
+            dec = p.get("outcome") or ("approved" if p.get("approved") else "rejected")
+            gate_md.append(f"- Decision: `{dec}`")
+            if p.get("approved") or p.get("outcome") in {"accepted", "approved"}:
+                status = "committed"
+            elif p.get("outcome") in {"rejected"}:
+                status = "rejected"
+        elif ev.type == EventType.REPLAY_STEP_DONE:
+            gate_md.append(f"- Step {p.get('step')} Replay OK: `{p.get('tool')}`")
+        elif ev.type == EventType.UNDO_STEP:
+            gate_md.append(f"- Undo Step {p.get('step')}: `{p.get('tool')}` rolled back")
         elif ev.type == EventType.RUN_DONE:
             status = str(p.get("status", status))
             if p.get("error"):
@@ -1243,8 +1356,14 @@ def _build_run_report_markdown(run_id: str | None = None) -> tuple[str, str]:
             "## Rehearsal Trace",
             *(trace_md or ["- (no tool calls)"]),
             "",
+            "## Rehearsal Diffs",
+            *(diffs_md or ["- (no rehearsal diffs recorded)"]),
+            "",
             "## Verification",
             *(verify_md or ["- (no verification emitted)"]),
+            "",
+            "## Phone Call Escalation",
+            *(call_md or ["- (no escalation call recorded)"]),
             "",
             "## Risk Gate & Outcome",
             *(gate_md or ["- (no risk gate triggered)"]),

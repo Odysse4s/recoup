@@ -91,22 +91,43 @@ export function OperatorConsultPanel({
 
   const activeReqId = pendingApproval?.req_id ?? consult?.reqId ?? null;
 
+  // Check if call ended without decision while pendingApproval is still active
+  const callEndedWithoutDecision = Boolean(
+    pendingApproval &&
+      consult &&
+      (
+        (consult.end && (consult.end.outcome === "escalated" || consult.end.outcome === "no_answer" || !consult.active)) ||
+        (!consult.active && !consult.ringing && consult.turns.length > 0 && !consult.selectedChoice)
+      )
+  );
+
   // Determine Call Status states
   const isRinging = Boolean(
-    consult?.ringing &&
+    !callEndedWithoutDecision &&
+      !consult?.end &&
+      extConsult?.callStatus !== "ended" &&
+      consult?.ringing &&
       extConsult?.callStatus !== "connected" &&
       consult.turns.length <= 1
   );
 
   const isConnected = Boolean(
-    consult &&
+    !callEndedWithoutDecision &&
+      !consult?.end &&
+      extConsult?.callStatus !== "ended" &&
+      consult &&
       (extConsult?.callStatus === "connected" ||
         consult.turns.some((t) => t.speaker === "user") ||
         (!consult.ringing && consult.active))
   );
 
   const callLive = isRinging || isConnected;
-  const callCompleted = Boolean(consult?.end || (!pendingApproval && committedClaimId));
+  const callCompleted = Boolean(
+    !callEndedWithoutDecision &&
+      ((!pendingApproval && committedClaimId) ||
+        (!pendingApproval && consult?.selectedChoice) ||
+        (!pendingApproval && consult?.end?.outcome === "accepted"))
+  );
 
   const isHighStakesApproval = Boolean(
     pendingApproval &&
@@ -123,7 +144,8 @@ export function OperatorConsultPanel({
     pendingApproval &&
       !callLive &&
       !consult?.end &&
-      !consult?.selectedChoice
+      !consult?.selectedChoice &&
+      !callEndedWithoutDecision
   );
   const countdownPaused = hovered || stayAtDesk;
   const secondsLeft = Math.max(0, Math.ceil(remainingMs / 1000));
@@ -195,7 +217,9 @@ export function OperatorConsultPanel({
 
   const resolvedChoice = inferChoice(consult, committedClaimId);
 
-  const panelTitle = isConnected
+  const panelTitle = callEndedWithoutDecision
+    ? "Decision Gate · Awaiting PC Decision"
+    : isConnected
     ? `On Call with You · ${callDurationStr}`
     : isRinging
     ? "Calling Your iPhone…"
@@ -214,9 +238,23 @@ export function OperatorConsultPanel({
     >
       <Panel
         title={panelTitle}
-        icon={isConnected ? <Smartphone className="text-ok" /> : isRinging ? <Radio className="animate-pulse text-signal" /> : <PhoneIncoming className="text-signal" />}
+        icon={
+          callEndedWithoutDecision ? (
+            <Smartphone className="text-warn" />
+          ) : isConnected ? (
+            <Smartphone className="text-ok" />
+          ) : isRinging ? (
+            <Radio className="animate-pulse text-signal" />
+          ) : (
+            <PhoneIncoming className="text-signal" />
+          )
+        }
         meta={
-          isConnected ? (
+          callEndedWithoutDecision ? (
+            <Chip tone="warn" className="font-mono text-[10px]">
+              <Dot tone="warn" live /> AWAITING PC DECISION
+            </Chip>
+          ) : isConnected ? (
             <Chip tone="ok" className="font-mono text-[10px]">
               <Dot tone="ok" live /> LIVE CALL
             </Chip>
@@ -241,11 +279,42 @@ export function OperatorConsultPanel({
             </Chip>
           ) : null
         }
-        pulseTone={callCompleted ? "ok" : isConnected ? "ok" : isRinging ? "signal" : "danger"}
+        pulseTone={
+          callCompleted
+            ? "ok"
+            : callEndedWithoutDecision
+            ? "warn"
+            : isConnected
+            ? "ok"
+            : isRinging
+            ? "signal"
+            : "danger"
+        }
       >
         <div className="space-y-2 p-2.5">
           {/* 1. 1-Line Live Call Banner */}
-          {isConnected ? (
+          {callEndedWithoutDecision ? (
+            <div className="flex h-7 items-center justify-between rounded-lg border border-warn/45 bg-warn/15 px-2.5 text-[11px] text-warn">
+              <div className="flex min-w-0 items-center gap-1.5 font-semibold text-warn">
+                <Smartphone className="h-3.5 w-3.5 shrink-0 text-warn" />
+                <span className="truncate">Call Ended Without Decision — Click an Option Below on PC (or Call Again)</span>
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    soundFx.playUiClick();
+                    if (pendingApproval?.req_id) escalatedReqIdRef.current = pendingApproval.req_id;
+                    onEscalateToPhone(activeReqId, claimId);
+                  }}
+                  className={cx(btn("signal", "sm"), "h-5 px-2 text-[10px] font-semibold")}
+                >
+                  <PhoneForwarded className="h-2.5 w-2.5" />
+                  Call Again
+                </button>
+              </div>
+            </div>
+          ) : isConnected ? (
             <div className="flex h-7 items-center justify-between rounded-lg border border-ok/40 bg-ok/10 px-2.5 text-[11.5px]">
               <div className="flex items-center gap-1.5 font-medium text-ok">
                 <Dot tone="ok" live />
@@ -334,6 +403,8 @@ export function OperatorConsultPanel({
                     "group flex flex-col items-center justify-center rounded-xl border p-2 text-center transition-all",
                     resolvedChoice === "refund"
                       ? "border-ok bg-ok/15 text-ok ring-2 ring-ok/40"
+                      : callEndedWithoutDecision
+                      ? "border-ok/80 bg-ok/15 text-ink ring-2 ring-ok/70 shadow-sm animate-pulse hover:border-ok hover:bg-ok/20 hover:animate-none"
                       : "border-ok/45 bg-ok/[0.08] text-ink hover:border-ok hover:bg-ok/15"
                   )}
                 >
@@ -356,6 +427,8 @@ export function OperatorConsultPanel({
                     "group flex flex-col items-center justify-center rounded-xl border p-2 text-center transition-all",
                     resolvedChoice === "redelivery"
                       ? "border-signal bg-signal/15 text-signal ring-2 ring-signal/40"
+                      : callEndedWithoutDecision
+                      ? "border-signal/80 bg-signal/15 text-ink ring-2 ring-signal/70 shadow-sm animate-pulse hover:border-signal hover:bg-signal/20 hover:animate-none"
                       : "border-line bg-sunken/60 text-ink hover:border-signal/50 hover:bg-surface"
                   )}
                 >
