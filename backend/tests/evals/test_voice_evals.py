@@ -49,7 +49,7 @@ def _isolated_voice_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path
 
 
 class TestBuildBriefingScript:
-    def test_hero_change_report_produces_crisp_under_35_word_script(self) -> None:
+    def test_hero_change_report_produces_crisp_under_18_word_script(self) -> None:
         notify = DOMAIN["demo"]["notify"]
         report = ChangeReport(
             files_created=["claims/CLM-D-1042.md"],
@@ -70,15 +70,13 @@ class TestBuildBriefingScript:
         script = build_briefing_script(report.model_dump())
         words = script.split()
 
-        assert len(words) < 35, f"Expected <35 words, got {len(words)}: {script!r}"
+        assert len(words) < 18, f"Expected <18 words, got {len(words)}: {script!r}"
         assert "Recoup" in script
         assert "CLM-D-1042" in script
-        assert "587 euros and 30 cents" in script
-        assert "invoice 7781 on hold" in script
-        assert "Kappa Office Systems" in script
+        assert "587 euros" in script
         assert script.endswith("Say approve to commit, or reject to roll back.")
 
-    def test_approval_needed_payload_for_call_and_followup_stay_under_35_words(self) -> None:
+    def test_approval_needed_payload_for_call_and_followup_stay_under_18_words(self) -> None:
         approval = ApprovalNeededPayload(
             req_id="req-call-1",
             tool_name="place_call",
@@ -93,10 +91,9 @@ class TestBuildBriefingScript:
             risk_reason="External vendor call requires human manager approval",
         )
         call_script = build_briefing_script(approval.model_dump())
-        assert len(call_script.split()) < 35
+        assert len(call_script.split()) < 18
         assert "CLM-D-1042" in call_script
-        assert "587 euros and 30 cents" in call_script
-        assert "staged a call to Kappa Office Systems" in call_script
+        assert "587 euros" in call_script
 
         followup_script = build_briefing_script(
             {
@@ -106,19 +103,19 @@ class TestBuildBriefingScript:
                 "external_outbox": [{"tool": "send_email", "to": "accounts@kappaoffice.example"}],
             }
         )
-        assert len(followup_script.split()) < 35
+        assert len(followup_script.split()) < 18
         assert "175 euros" in followup_script
         assert "cents" not in followup_script
 
-    def test_generic_and_verbose_summaries_always_respect_35_word_ceiling(self) -> None:
+    def test_generic_and_verbose_summaries_always_respect_18_word_ceiling(self) -> None:
         empty_script = build_briefing_script({})
-        assert len(empty_script.split()) < 35
+        assert len(empty_script.split()) < 18
         assert empty_script.endswith("Say approve to commit, or reject to roll back.")
 
         db_only_script = build_briefing_script(
             {"db_summary": {"invoices": {"inserted": 0, "updated": 1, "deleted": 0}}}
         )
-        assert len(db_only_script.split()) < 35
+        assert len(db_only_script.split()) < 18
 
         verbose_script = build_briefing_script(
             {
@@ -130,7 +127,7 @@ class TestBuildBriefingScript:
                 "external_outbox": [{"tool": "send_email", "to": "ap@continental-hardware.example"}],
             }
         )
-        assert len(verbose_script.split()) < 35
+        assert len(verbose_script.split()) < 18
         assert verbose_script.endswith("Say approve to commit, or reject to roll back.")
 
 

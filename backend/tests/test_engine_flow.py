@@ -142,7 +142,9 @@ def test_forge_ast_and_compute_supplier_claim_sandbox(tmp_path):
         tool,
         ChangeReport(),
     )
-    assert d == RiskDecision.ASK
+    # Pure forged calculators are non-mutating (sandbox.py enforces mutating=False) and
+    # already passed AST + sandbox tests, so first use auto-commits without a Risk Gate pause.
+    assert d == RiskDecision.AUTO
     out = tool.do(forge_cfg["call_args"], Env(root_dir=tmp_path, db_path=tmp_path / "app.db"))
     assert out == {
         "result": {
