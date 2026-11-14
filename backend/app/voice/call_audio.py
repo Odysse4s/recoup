@@ -1,14 +1,22 @@
-"""Dual-speaker vendor negotiation TTS and fal Wizper speech-to-text decision helpers."""
+"""Dual-speaker vendor negotiation TTS, Wizper STT, and fal Grok Voice Realtime helpers."""
 from __future__ import annotations
 
+import asyncio
 import base64
+import contextlib
 import hashlib
+import json
 import os
 import re
+import struct
+from collections.abc import Callable, Sequence
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 import httpx
+from websockets.asyncio.client import connect as ws_connect
+from websockets.exceptions import ConnectionClosed
 
 from . import elevenlabs_agent
 from .elevenlabs_agent import (
@@ -299,3 +307,1062 @@ def transcribe_and_decide(
         final_text = transcribe_audio_bytes(audio_bytes, mime_type=mime_type).strip()
     decision = parse_voice_decision(final_text)
     return {"transcript": final_text, "decision": decision}
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: fal.ai Grok Voice Realtime (`xai/grok-voice/realtime`)
+# ---------------------------------------------------------------------------
+
+DEFAULT_GROK_REALTIME_MODEL = "xai/grok-voice/realtime"
+DEFAULT_GROK_REALTIME_URL = "wss://fal.run/xai/grok-voice/realtime"
+DEFAULT_GROK_REALTIME_VOICE = "ara"
+GROK_REALTIME_SAMPLE_RATE = 24000
+GROK_REALTIME_SUPPORTED_RATES: frozenset[int] = frozenset(
+    {8000, 16000, 22050, 24000, 32000, 44100, 48000}
+)
+GROK_REALTIME_MAX_DURATION_S = 90.0
+GROK_REALTIME_HARD_MAX_DURATION_S = 120.0
+GROK_REALTIME_IDLE_TIMEOUT_S = 20.0
+GROK_REALTIME_CONNECT_TIMEOUT_S = 10.0
+GROK_REALTIME_MAX_CLIENT_FRAME_BYTES = 262_144
+
+ALLOWED_GROK_REALTIME_VOICES: frozenset[str] = frozenset(
+    {
+        "ara",
+        "eve",
+        "leo",
+        "rex",
+        "sal",
+        "carina",
+        "zagan",
+        "helix",
+        "orion",
+        "luna",
+        "iris",
+        "altair",
+        "zenith",
+        "perseus",
+        "helios",
+        "lux",
+        "kepler",
+        "rigel",
+        "cosmo",
+        "celeste",
+        "ursa",
+        "sirius",
+        "lumen",
+        "castor",
+        "naksh",
+        "atlas",
+        "aurora",
+        "liora",
+    }
+)
+
+RECOUP_REALTIME_SYSTEM_PROMPT: str = (
+    "You are Recoup, the enterprise procurement audit voice assistant on a live call with a human "
+    "operator or Kappa Office Systems representative.\n"
+    "CASE FACTS (CLM-D-1042 / Shipment D-1042 / Invoice INV-7781):\n"
+    "- Vendor: Kappa Office Systems S.A., SKU HUB-USBC (USB-C Workstation Hubs, 120 ordered, "
+    "billed EUR 2,268.00 at EUR 18.90 vs EUR 17.50 contract rate).\n"
+    "- Discrepancies: 22 missing or damaged hubs total (16 short-shipped = EUR 280.00; "
+    "6 DOA damaged = EUR 105.00), EUR 168.00 unit overcharge, and 2-day late SLA penalty = EUR 34.30.\n"
+    "- Total audited claim: EUR 587.30.\n"
+    "- Resolution options: (1) EUR 587.30 refund/credit note against INV-7781, "
+    "(2) replacement re-delivery of the 22 HUB-USBC units, or (3) hold off with no action.\n"
+    "VOICE & TURN-TAKING RULES:\n"
+    "- Speak in 1 to 2 crisp, natural sentences per turn, strictly under 30 words.\n"
+    "- Output plain spoken English only without bullet points, markdown, or numbered lists.\n"
+    "- Be polite, direct, and immediately adaptive if the caller interrupts or changes their mind.\n"
+    "STRICT GOVERNANCE BOUNDARY (NEVER VIOLATE):\n"
+    "- You CANNOT execute ERP writes, authorize or issue refunds, file AADE tax submissions, or send emails.\n"
+    "- NEVER claim that a refund was issued, an ERP record was updated, an AADE filing occurred, "
+    "or an email was sent.\n"
+    "- When the caller chooses an option, state clearly that you will stage the request behind the "
+    "Recoup Risk Gate for human approval, and that any outbound email requires separate explicit "
+    "human review and approval."
+)
+
+RealtimeDecision = Literal["refund", "redelivery", "unclear", "no_action"]
+
+DEFAULT_REALTIME_CLAIM_ID = "CLM-D-1042"
+DEFAULT_REALTIME_REFUND_EUR = 587.30
+DEFAULT_REALTIME_REPLACEMENT_UNITS = 22
+
+_REALTIME_SESSION_LOCK = asyncio.Lock()
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeCallTurn:
+    """Single conversational turn from a live Recoup realtime voice session."""
+
+    speaker: str
+    text: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def model_dump(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeCallOutcome:
+    """Governance-safe structured outcome parsed from a live realtime voice call."""
+
+    decision: RealtimeDecision
+    claim_id: str = DEFAULT_REALTIME_CLAIM_ID
+    refund_amount_eur: float | None = None
+    replacement_units: int | None = None
+    requires_risk_gate: Literal[True] = True
+    email_requires_explicit_approval: Literal[True] = True
+    erp_authorized: Literal[False] = False
+    decisive_turn_text: str = ""
+    summary: str = ""
+
+    def __post_init__(self) -> None:
+        if self.requires_risk_gate is not True:
+            raise ValueError("Governance violation: requires_risk_gate must always be True")
+        if self.email_requires_explicit_approval is not True:
+            raise ValueError("Governance violation: email_requires_explicit_approval must always be True")
+        if self.erp_authorized is not False:
+            raise ValueError("Governance violation: erp_authorized must always be False")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def model_dump(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def encode_fal_realtime_event(obj: Any) -> bytes:
+    """Encode a JSON-compatible event dict into MessagePack binary format for `fal.run`."""
+    if obj is None:
+        return b"\xc0"
+    if obj is False:
+        return b"\xc2"
+    if obj is True:
+        return b"\xc3"
+    if isinstance(obj, int):
+        if 0 <= obj <= 0x7F:
+            return bytes((obj,))
+        if -32 <= obj < 0:
+            return struct.pack("b", obj)
+        if 0 <= obj <= 0xFF:
+            return struct.pack(">BB", 0xCC, obj)
+        if 0 <= obj <= 0xFFFF:
+            return struct.pack(">BH", 0xCD, obj)
+        if 0 <= obj <= 0xFFFFFFFF:
+            return struct.pack(">BI", 0xCE, obj)
+        if 0 <= obj <= 0xFFFFFFFFFFFFFFFF:
+            return struct.pack(">BQ", 0xCF, obj)
+        if -128 <= obj <= 127:
+            return struct.pack(">Bb", 0xD0, obj)
+        if -32768 <= obj <= 32767:
+            return struct.pack(">Bh", 0xD1, obj)
+        if -2147483648 <= obj <= 2147483647:
+            return struct.pack(">Bi", 0xD2, obj)
+        return struct.pack(">Bq", 0xD3, obj)
+    if isinstance(obj, float):
+        return struct.pack(">Bd", 0xCB, obj)
+    if isinstance(obj, str):
+        raw = obj.encode("utf-8")
+        n = len(raw)
+        if n <= 31:
+            return bytes((0xA0 | n,)) + raw
+        if n <= 0xFF:
+            return struct.pack(">BB", 0xD9, n) + raw
+        if n <= 0xFFFF:
+            return struct.pack(">BH", 0xDA, n) + raw
+        return struct.pack(">BI", 0xDB, n) + raw
+    if isinstance(obj, (bytes, bytearray, memoryview)):
+        raw_b = bytes(obj)
+        n = len(raw_b)
+        if n <= 0xFF:
+            return struct.pack(">BB", 0xC4, n) + raw_b
+        if n <= 0xFFFF:
+            return struct.pack(">BH", 0xC5, n) + raw_b
+        return struct.pack(">BI", 0xC6, n) + raw_b
+    if isinstance(obj, (list, tuple)):
+        n = len(obj)
+        if n <= 15:
+            header = bytes((0x90 | n,))
+        elif n <= 0xFFFF:
+            header = struct.pack(">BH", 0xDC, n)
+        else:
+            header = struct.pack(">BI", 0xDD, n)
+        return header + b"".join(encode_fal_realtime_event(item) for item in obj)
+    if isinstance(obj, dict):
+        n = len(obj)
+        if n <= 15:
+            header = bytes((0x80 | n,))
+        elif n <= 0xFFFF:
+            header = struct.pack(">BH", 0xDE, n)
+        else:
+            header = struct.pack(">BI", 0xDF, n)
+        parts: list[bytes] = [header]
+        for k, v in obj.items():
+            parts.append(encode_fal_realtime_event(str(k)))
+            parts.append(encode_fal_realtime_event(v))
+        return b"".join(parts)
+    raise TypeError(f"Unsupported type for MessagePack encoding: {type(obj)!r}")
+
+
+def _msgpack_unpack_from(buf: memoryview, offset: int = 0) -> tuple[Any, int]:
+    if offset >= len(buf):
+        raise ValueError("Unexpected EOF while decoding MessagePack payload")
+    b = buf[offset]
+    offset += 1
+
+    if b <= 0x7F:
+        return b, offset
+    if b >= 0xE0:
+        return b - 256, offset
+    if 0xA0 <= b <= 0xBF:
+        n = b & 0x1F
+        if offset + n > len(buf):
+            raise ValueError("Truncated MessagePack fixstr")
+        return bytes(buf[offset : offset + n]).decode("utf-8", errors="replace"), offset + n
+    if 0x90 <= b <= 0x9F:
+        n = b & 0x0F
+        arr: list[Any] = []
+        for _ in range(n):
+            item, offset = _msgpack_unpack_from(buf, offset)
+            arr.append(item)
+        return arr, offset
+    if 0x80 <= b <= 0x8F:
+        n = b & 0x0F
+        out: dict[Any, Any] = {}
+        for _ in range(n):
+            k, offset = _msgpack_unpack_from(buf, offset)
+            v, offset = _msgpack_unpack_from(buf, offset)
+            out[k] = v
+        return out, offset
+
+    if b == 0xC0:
+        return None, offset
+    if b == 0xC2:
+        return False, offset
+    if b == 0xC3:
+        return True, offset
+    if b in (0xC4, 0xC5, 0xC6):
+        fmt, width = {0xC4: (">B", 1), 0xC5: (">H", 2), 0xC6: (">I", 4)}[b]
+        (n,) = struct.unpack_from(fmt, buf, offset)
+        offset += width
+        if offset + n > len(buf):
+            raise ValueError("Truncated MessagePack bin")
+        return bytes(buf[offset : offset + n]), offset + n
+    if b in (0xC7, 0xC8, 0xC9):
+        fmt, width = {0xC7: (">B", 1), 0xC8: (">H", 2), 0xC9: (">I", 4)}[b]
+        (n,) = struct.unpack_from(fmt, buf, offset)
+        offset += width + 1
+        if offset + n > len(buf):
+            raise ValueError("Truncated MessagePack ext")
+        return bytes(buf[offset : offset + n]), offset + n
+    if b == 0xCA:
+        (val,) = struct.unpack_from(">f", buf, offset)
+        return val, offset + 4
+    if b == 0xCB:
+        (val,) = struct.unpack_from(">d", buf, offset)
+        return val, offset + 8
+    if b in (0xCC, 0xCD, 0xCE, 0xCF, 0xD0, 0xD1, 0xD2, 0xD3):
+        fmt, width = {
+            0xCC: (">B", 1),
+            0xCD: (">H", 2),
+            0xCE: (">I", 4),
+            0xCF: (">Q", 8),
+            0xD0: (">b", 1),
+            0xD1: (">h", 2),
+            0xD2: (">i", 4),
+            0xD3: (">q", 8),
+        }[b]
+        (val,) = struct.unpack_from(fmt, buf, offset)
+        return val, offset + width
+    if b in (0xD4, 0xD5, 0xD6, 0xD7, 0xD8):
+        ext_len = {0xD4: 1, 0xD5: 2, 0xD6: 4, 0xD7: 8, 0xD8: 16}[b]
+        offset += 1
+        if offset + ext_len > len(buf):
+            raise ValueError("Truncated MessagePack fixext")
+        return bytes(buf[offset : offset + ext_len]), offset + ext_len
+    if b in (0xD9, 0xDA, 0xDB):
+        fmt, width = {0xD9: (">B", 1), 0xDA: (">H", 2), 0xDB: (">I", 4)}[b]
+        (n,) = struct.unpack_from(fmt, buf, offset)
+        offset += width
+        if offset + n > len(buf):
+            raise ValueError("Truncated MessagePack str")
+        return bytes(buf[offset : offset + n]).decode("utf-8", errors="replace"), offset + n
+    if b in (0xDC, 0xDD):
+        fmt, width = {0xDC: (">H", 2), 0xDD: (">I", 4)}[b]
+        (n,) = struct.unpack_from(fmt, buf, offset)
+        offset += width
+        arr = []
+        for _ in range(n):
+            item, offset = _msgpack_unpack_from(buf, offset)
+            arr.append(item)
+        return arr, offset
+    if b in (0xDE, 0xDF):
+        fmt, width = {0xDE: (">H", 2), 0xDF: (">I", 4)}[b]
+        (n,) = struct.unpack_from(fmt, buf, offset)
+        offset += width
+        out = {}
+        for _ in range(n):
+            k, offset = _msgpack_unpack_from(buf, offset)
+            v, offset = _msgpack_unpack_from(buf, offset)
+            out[k] = v
+        return out, offset
+    raise ValueError(f"Unsupported MessagePack marker byte: 0x{b:02x}")
+
+
+def decode_fal_realtime_frame(raw: str | bytes) -> dict[str, Any] | None:
+    """Decode an inbound `fal.run` hybrid frame (JSON text control frame or MessagePack binary)."""
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return None
+        with contextlib.suppress(json.JSONDecodeError):
+            parsed = json.loads(stripped)
+            if isinstance(parsed, dict):
+                return parsed
+        return None
+
+    raw_bytes = bytes(raw)
+    if not raw_bytes:
+        return None
+
+    lstrip = raw_bytes.lstrip()
+    if lstrip.startswith(b"{"):
+        with contextlib.suppress(UnicodeDecodeError, json.JSONDecodeError):
+            parsed = json.loads(lstrip.decode("utf-8"))
+            if isinstance(parsed, dict):
+                return parsed
+
+    with contextlib.suppress(Exception):
+        parsed_mp, _ = _msgpack_unpack_from(memoryview(raw_bytes), 0)
+        if isinstance(parsed_mp, dict):
+            return parsed_mp
+
+    return None
+
+
+def build_grok_realtime_session_update(
+    *,
+    voice: str | None = None,
+    instructions: str | None = None,
+    sample_rate: int = GROK_REALTIME_SAMPLE_RATE,
+    reasoning_effort: Literal["none", "high"] = "none",
+    counterparty_ai: bool = False,
+) -> dict[str, Any]:
+    """Build a singular-AI `session.update` payload for `xai/grok-voice/realtime`."""
+    if counterparty_ai:
+        raise ValueError("Dual-AI mode is prohibited: Recoup realtime uses a singular AI voice with a human.")
+
+    resolved_voice = (voice or os.getenv("GROK_VOICE", "") or DEFAULT_GROK_REALTIME_VOICE).strip().lower()
+    if not resolved_voice or "," in resolved_voice or " " in resolved_voice:
+        raise ValueError(f"Singular Grok voice required, got {voice!r}")
+    if resolved_voice not in ALLOWED_GROK_REALTIME_VOICES:
+        raise ValueError(f"Unsupported Grok realtime voice: {voice!r}")
+
+    if sample_rate not in GROK_REALTIME_SUPPORTED_RATES:
+        raise ValueError(f"Unsupported PCM sample rate {sample_rate}; expected one of {sorted(GROK_REALTIME_SUPPORTED_RATES)}")
+
+    resolved_instructions = (instructions or RECOUP_REALTIME_SYSTEM_PROMPT).strip()
+    return {
+        "type": "session.update",
+        "session": {
+            "voice": resolved_voice,
+            "instructions": resolved_instructions,
+            "reasoning": {"effort": reasoning_effort},
+            "turn_detection": {
+                "type": "server_vad",
+                "threshold": 0.5,
+                "prefix_padding_ms": 300,
+                "silence_duration_ms": 500,
+            },
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": sample_rate},
+                    "transcription": {"model": "grok-transcribe", "language_hint": "en"},
+                },
+                "output": {"format": {"type": "audio/pcm", "rate": sample_rate}},
+            },
+            "tools": [],
+        },
+    }
+
+
+_HUMAN_SPEAKER_ROLES = {"human", "user", "counterparty", "operator", "caller", "vendor", "manager"}
+_AGENT_SPEAKER_ROLES = {"agent", "assistant", "recoup", "ai", "model", "system"}
+
+_LINE_SPEAKER_RE = re.compile(
+    r"^\s*(human|user|counterparty|operator|caller|vendor|manager|agent|assistant|recoup|ai|system)\s*:\s*(.*)$",
+    re.IGNORECASE,
+)
+_BENIGN_NO_IDIOM_RE = re.compile(
+    r"\bno\s*[-\s]?(?:problem|problems|worries|worry|issue|issues|doubt|question|brainer|hesitation)\b",
+    re.IGNORECASE,
+)
+_DOUBLE_NEGATION_RE = re.compile(
+    r"\b(?:do\s+not|don'?t|dont|never)\s+(?:cancel|abort|stop|drop|hold\s+off(?:\s+on)?|skip|forget)\b",
+    re.IGNORECASE,
+)
+_INTERJECTION_NO_RE = re.compile(
+    r"(?:^|(?<=[.,;!?]))\s*\bno\b(?=\s+(?:please|just|go\s+ahead|send|ship|give|issue|process|take|we|i|let'?s|lets)\b)",
+    re.IGNORECASE,
+)
+_PIVOT_SPLIT_RE = re.compile(
+    r"\b(?:wait(?:\s+a\s+(?:second|sec|minute|moment))?|actually|on\s+second\s+thought"
+    r"|scratch\s+that|forget\s+that|correction|change\s+of\s+(?:mind|plan)|never\s+mind)\b",
+    re.IGNORECASE,
+)
+_CLAUSE_SPLIT_RE = re.compile(
+    r"[.,;!?—–]+"
+    r"|\b(?:but|however|though|although|yet|whereas)\b"
+    r"|(?=\b(?:we|i)\s+(?:want|need|prefer|would\s+like|will\s+take|'ll\s+take|choose|opt\s+for|go\s+with)\b)"
+    r"|(?=\b(?:let'?s|lets)\s+(?:take|do|go\s+with|get|issue|send|ship|have|make)\b)"
+    r"|(?<!\bdo\s)(?<!\bnot\s)(?<!\bdon't\s)(?<!\bdont\s)(?<!\bnever\s)(?<!\bto\s)(?<!\bor\s)(?<!\bnor\s)"
+    r"(?=\b(?:issue|reimburse|reship|re-ship|redeliver|re-deliver|send\s+the|ship\s+the|give\s+us)\b)",
+    re.IGNORECASE,
+)
+_INSTEAD_OF_RE = re.compile(
+    r"\b(?:instead\s+of|rather\s+than|as\s+opposed\s+to)\s+([^.,;!?]+?)"
+    r"(?=(?:\b(?:we|i|let'?s|lets|please|issue|send|ship|give|take)\b|$))",
+    re.IGNORECASE,
+)
+_OPTION_NEGATOR_RE = re.compile(
+    r"\b(?:do\s+not|don'?t|dont|no|not|never|neither|nor|without|forget|skip|drop|scratch|nix|avoid|stop|cancel|hold\s+off\s+on|against)\b",
+    re.IGNORECASE,
+)
+_REFUND_TARGET_RE = re.compile(
+    r"\b(?:"
+    r"refund(?:s|ed|ing)?"
+    r"|credit\s+notes?"
+    r"|credit\s+memos?"
+    r"|credit(?:s|ed|ing)?(?!\s+cards?)"
+    r"|reimburse(?:ment|ments|d|s)?"
+    r"|money\s+back"
+    r"|587(?:[.,]\s*30|\s+30|\s+euros?)?"
+    r")\b",
+    re.IGNORECASE,
+)
+_REDELIVERY_TARGET_RE = re.compile(
+    r"\b(?:"
+    r"re[-\s]?deliver(?:y|ies|ed|ing)?"
+    r"|replacements?"
+    r"|replace(?:d|s|ing)?"
+    r"|re[-\s]?ship(?:ment|ments|ped|ping|s)?"
+    r"|reship(?:ment|ments|ped|ping|s)?"
+    r"|send\s+(?:new|more|another|the\s+22|22)"
+    r"|ship\s+(?:new|more|another|the\s+22|22)"
+    r"|22\s+(?:[a-z0-9-]+\s+){0,2}(?:hubs?|units?)"
+    r")\b",
+    re.IGNORECASE,
+)
+_HARD_NO_ACTION_RE = re.compile(
+    r"\b(?:"
+    r"cancel\s+(?:everything|all|it|this|the\s+claim)"
+    r"|abort(?:\s+everything|\s+it|\s+all)?"
+    r"|leave\s+(?:it|everything|things|the\s+claim|the\s+invoice)\s+(?:alone|untouched|as\s+is|unchanged)"
+    r"|do\s+nothing"
+    r"|don'?t\s+do\s+anything"
+    r"|do\s+not\s+do\s+anything"
+    r"|take\s+no\s+action"
+    r"|no\s+action"
+    r"|stand\s+down"
+    r"|drop\s+(?:everything|the\s+claim|it)"
+    r"|neither(?:\s+one|\s+option)?"
+    r"|none\s+of\s+(?:them|those|the\s+options)"
+    r")\b",
+    re.IGNORECASE,
+)
+_HOLD_OFF_RE = re.compile(r"\b(?:hold\s+off|pause\s+everything|wait\s+on\s+both)\b", re.IGNORECASE)
+_UNCLEAR_RE = re.compile(
+    r"\b(?:"
+    r"not\s+sure"
+    r"|unsure"
+    r"|undecided"
+    r"|uncertain"
+    r"|don'?t\s+know"
+    r"|do\s+not\s+know"
+    r"|let\s+me\s+(?:check|verify|ask|confirm|think|look|see)"
+    r"|need\s+to\s+(?:check|verify|ask|confirm|think)"
+    r"|have\s+to\s+(?:check|verify|ask|confirm)"
+    r"|check\s+(?:our\s+|the\s+|my\s+)?(?:warehouse|inventory|stock|stockroom|team|manager)"
+    r"|get\s+back\s+to\s+you"
+    r"|call\s+(?:you\s+)?back"
+    r"|think\s+about\s+it"
+    r"|decide\s+later"
+    r")\b",
+    re.IGNORECASE,
+)
+_COMPARATIVE_QUESTION_RE = re.compile(
+    r"^\s*(?:what|which|can\s+you|could\s+you|should\s+we|do\s+you|is\s+it)\b.*\bor\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_human_utterances(
+    transcript_or_turns: str | Sequence[dict[str, Any] | RealtimeCallTurn | str],
+) -> list[str]:
+    if isinstance(transcript_or_turns, str):
+        lines = [ln.strip() for ln in transcript_or_turns.splitlines() if ln.strip()]
+        if not lines:
+            return []
+        tagged: list[tuple[str, str]] = []
+        any_tag = False
+        for ln in lines:
+            m = _LINE_SPEAKER_RE.match(ln)
+            if m:
+                any_tag = True
+                tagged.append((m.group(1).lower(), m.group(2).strip()))
+            else:
+                tagged.append(("human", ln))
+        if any_tag:
+            return [txt for role, txt in tagged if role in _HUMAN_SPEAKER_ROLES and txt]
+        return [" ".join(lines)]
+
+    utterances: list[str] = []
+    for item in transcript_or_turns:
+        if isinstance(item, str):
+            if item.strip():
+                utterances.append(item.strip())
+        elif isinstance(item, RealtimeCallTurn):
+            if item.speaker.strip().lower() in _HUMAN_SPEAKER_ROLES and item.text.strip():
+                utterances.append(item.text.strip())
+        elif isinstance(item, dict):
+            role = str(item.get("speaker") or item.get("role") or "human").strip().lower()
+            if role in _AGENT_SPEAKER_ROLES:
+                continue
+            text = str(item.get("text") or item.get("transcript") or item.get("content") or "").strip()
+            if text:
+                utterances.append(text)
+    return utterances
+
+
+def _analyze_clause_options(clause: str) -> tuple[bool, bool, bool, bool]:
+    pos_ref = neg_ref = pos_red = neg_red = False
+    normalized = _BENIGN_NO_IDIOM_RE.sub(" ", clause)
+    normalized = _DOUBLE_NEGATION_RE.sub(" proceed with ", normalized)
+
+    for m in _INSTEAD_OF_RE.finditer(normalized):
+        rejected_span = m.group(1)
+        if _REFUND_TARGET_RE.search(rejected_span):
+            neg_ref = True
+        if _REDELIVERY_TARGET_RE.search(rejected_span):
+            neg_red = True
+    working = _INSTEAD_OF_RE.sub(" ", normalized)
+
+    has_ref = bool(_REFUND_TARGET_RE.search(working))
+    has_red = bool(_REDELIVERY_TARGET_RE.search(working))
+    if not (has_ref or has_red):
+        return pos_ref, neg_ref, pos_red, neg_red
+
+    cleaned_neg = re.sub(
+        r"\b(?:not\s+sure|don'?t\s+know|do\s+not\s+know)\b",
+        " ",
+        working,
+        flags=re.IGNORECASE,
+    )
+    neg_matches = list(_OPTION_NEGATOR_RE.finditer(cleaned_neg))
+
+    if has_ref:
+        ref_m = _REFUND_TARGET_RE.search(cleaned_neg)
+        if ref_m and any(nm.start() < ref_m.start() for nm in neg_matches):
+            neg_ref = True
+        else:
+            pos_ref = True
+
+    if has_red:
+        red_m = _REDELIVERY_TARGET_RE.search(cleaned_neg)
+        if red_m and any(nm.start() < red_m.start() for nm in neg_matches):
+            neg_red = True
+        else:
+            pos_red = True
+
+    return pos_ref, neg_ref, pos_red, neg_red
+
+
+def _classify_single_human_turn(raw_text: str) -> RealtimeDecision | None:
+    if not raw_text or not raw_text.strip():
+        return None
+
+    prepped = _INTERJECTION_NO_RE.sub(".", raw_text)
+    pivot_parts = _PIVOT_SPLIT_RE.split(prepped)
+    has_pivot = len(pivot_parts) > 1
+
+    if (
+        _COMPARATIVE_QUESTION_RE.search(prepped)
+        and not has_pivot
+        and _REFUND_TARGET_RE.search(prepped)
+        and _REDELIVERY_TARGET_RE.search(prepped)
+    ):
+        return "unclear"
+
+    stage_decisions: list[RealtimeDecision] = []
+    any_neg_ref = False
+    any_neg_red = False
+    any_hard_no_action = bool(_HARD_NO_ACTION_RE.search(prepped))
+    any_hold_off = bool(_HOLD_OFF_RE.search(prepped))
+    any_unclear = bool(_UNCLEAR_RE.search(prepped))
+
+    for part in pivot_parts:
+        part = part.strip()
+        if not part:
+            continue
+        part_hard_no = bool(_HARD_NO_ACTION_RE.search(part))
+        part_hold = bool(_HOLD_OFF_RE.search(part))
+        part_unclear = bool(_UNCLEAR_RE.search(part))
+
+        clauses = [c.strip() for c in _CLAUSE_SPLIT_RE.split(part) if c.strip()]
+        pos_ref = neg_ref = pos_red = neg_red = False
+        for cl in clauses:
+            pr, nr, pd, nd = _analyze_clause_options(cl)
+            pos_ref = pos_ref or pr
+            neg_ref = neg_ref or nr
+            pos_red = pos_red or pd
+            neg_red = neg_red or nd
+
+        any_neg_ref = any_neg_ref or neg_ref
+        any_neg_red = any_neg_red or neg_red
+
+        if pos_ref and not pos_red and not part_hard_no and not part_unclear:
+            stage_decisions.append("refund")
+        elif pos_red and not pos_ref and not part_hard_no and not part_unclear:
+            stage_decisions.append("redelivery")
+        elif part_hard_no or (neg_ref and neg_red and not pos_ref and not pos_red):
+            stage_decisions.append("no_action")
+        elif part_unclear:
+            stage_decisions.append("unclear")
+        elif part_hold and not pos_ref and not pos_red:
+            stage_decisions.append("no_action")
+        elif pos_ref and pos_red:
+            stage_decisions.append("unclear")
+
+    if stage_decisions:
+        return stage_decisions[-1]
+    if any_hard_no_action or (any_neg_ref and any_neg_red):
+        return "no_action"
+    if any_unclear:
+        return "unclear"
+    if any_hold_off:
+        return "no_action"
+    if any_neg_ref or any_neg_red:
+        return "unclear"
+    return None
+
+
+def classify_realtime_call_outcome(
+    transcript_or_turns: str | Sequence[dict[str, Any] | RealtimeCallTurn | str],
+    *,
+    claim_id: str = DEFAULT_REALTIME_CLAIM_ID,
+    refund_amount_eur: float = DEFAULT_REALTIME_REFUND_EUR,
+    replacement_units: int = DEFAULT_REALTIME_REPLACEMENT_UNITS,
+) -> RealtimeCallOutcome:
+    """Deterministically classify a multi-turn realtime voice call without side effects."""
+    clean_claim = (claim_id or DEFAULT_REALTIME_CLAIM_ID).strip() or DEFAULT_REALTIME_CLAIM_ID
+    human_turns = _extract_human_utterances(transcript_or_turns)
+
+    current_decision: RealtimeDecision = "unclear"
+    decisive_text = ""
+
+    for turn_text in human_turns:
+        turn_decision = _classify_single_human_turn(turn_text)
+        if turn_decision is not None:
+            current_decision = turn_decision
+            decisive_text = turn_text
+
+    if current_decision == "refund":
+        amt = round(float(refund_amount_eur), 2)
+        return RealtimeCallOutcome(
+            decision="refund",
+            claim_id=clean_claim,
+            refund_amount_eur=amt,
+            replacement_units=None,
+            decisive_turn_text=decisive_text,
+            summary=(
+                f"Caller requested EUR {amt:.2f} refund/credit note on {clean_claim}. "
+                "Staged behind Risk Gate; ERP/AADE untouched; email requires explicit approval."
+            ),
+        )
+    if current_decision == "redelivery":
+        units = int(replacement_units)
+        return RealtimeCallOutcome(
+            decision="redelivery",
+            claim_id=clean_claim,
+            refund_amount_eur=None,
+            replacement_units=units,
+            decisive_turn_text=decisive_text,
+            summary=(
+                f"Caller requested replacement re-delivery of {units} HUB-USBC units for {clean_claim}. "
+                "Staged behind Risk Gate; ERP/AADE untouched; email requires explicit approval."
+            ),
+        )
+    if current_decision == "no_action":
+        return RealtimeCallOutcome(
+            decision="no_action",
+            claim_id=clean_claim,
+            refund_amount_eur=None,
+            replacement_units=None,
+            decisive_turn_text=decisive_text,
+            summary=f"Caller declined both refund and redelivery on {clean_claim}; workspace left untouched.",
+        )
+    return RealtimeCallOutcome(
+        decision="unclear",
+        claim_id=clean_claim,
+        refund_amount_eur=None,
+        replacement_units=None,
+        decisive_turn_text=decisive_text,
+        summary=f"Call outcome for {clean_claim} remains undecided; no ERP or email actions staged.",
+    )
+
+
+async def _send_client_json(client_ws: Any, payload: dict[str, Any]) -> None:
+    if hasattr(client_ws, "send_json"):
+        await client_ws.send_json(payload)
+    else:
+        await client_ws.send_text(json.dumps(payload))
+
+
+async def relay_grok_realtime_websocket(
+    client_ws: Any,
+    *,
+    claim_id: str = DEFAULT_REALTIME_CLAIM_ID,
+    voice: str | None = None,
+    instructions: str | None = None,
+    greet_on_connect: bool = True,
+    max_duration_s: float = GROK_REALTIME_MAX_DURATION_S,
+    idle_timeout_s: float = GROK_REALTIME_IDLE_TIMEOUT_S,
+    connect_timeout_s: float = GROK_REALTIME_CONNECT_TIMEOUT_S,
+    ws_connector: Callable[..., Any] | None = None,
+) -> RealtimeCallOutcome:
+    """Backend-mediated bidirectional relay between browser WS and `xai/grok-voice/realtime`."""
+    if hasattr(client_ws, "accept"):
+        await client_ws.accept()
+
+    clean_claim = (claim_id or DEFAULT_REALTIME_CLAIM_ID).strip() or DEFAULT_REALTIME_CLAIM_ID
+    session_update = build_grok_realtime_session_update(voice=voice, instructions=instructions)
+    clamped_max_s = max(0.02, min(float(max_duration_s), GROK_REALTIME_HARD_MAX_DURATION_S))
+    connector = ws_connector or ws_connect
+
+    if _REALTIME_SESSION_LOCK.locked():
+        outcome = classify_realtime_call_outcome([], claim_id=clean_claim)
+        with contextlib.suppress(Exception):
+            await _send_client_json(
+                client_ws,
+                {
+                    "type": "recoup.fallback",
+                    "reason": "session_busy",
+                    "fallback_available": True,
+                    "outcome": outcome.to_dict(),
+                },
+            )
+            if hasattr(client_ws, "close"):
+                await client_ws.close(code=1013)
+        return outcome
+
+    async with _REALTIME_SESSION_LOCK:
+        provider_pref = os.getenv("VOICE_PROVIDER", "").strip().lower()
+        fal_key = os.getenv("FAL_KEY", "").strip()
+        is_unmocked_pytest = (
+            "PYTEST_CURRENT_TEST" in os.environ
+            and getattr(connector, "__module__", "").startswith("websockets")
+        )
+
+        if provider_pref in ("none", "offline", "fake", "disabled") or not fal_key or is_unmocked_pytest:
+            outcome = classify_realtime_call_outcome([], claim_id=clean_claim)
+            with contextlib.suppress(Exception):
+                await _send_client_json(
+                    client_ws,
+                    {
+                        "type": "recoup.fallback",
+                        "reason": "offline_or_unconfigured",
+                        "fallback_available": True,
+                        "outcome": outcome.to_dict(),
+                    },
+                )
+                if hasattr(client_ws, "close"):
+                    await client_ws.close(code=1000)
+            return outcome
+
+        url = (os.getenv("FAL_REALTIME_URL", "").strip() or DEFAULT_GROK_REALTIME_URL).strip()
+        turns: list[RealtimeCallTurn] = []
+        agent_buffers: dict[str, list[str]] = {}
+        agent_finalized: set[str] = set()
+        user_buffers: dict[str, str] = {}
+        stop_reason = "client_hangup"
+        upstream_ws: Any = None
+
+        try:
+            try:
+                upstream_ws = await asyncio.wait_for(
+                    connector(
+                        url,
+                        additional_headers={"Authorization": f"Key {fal_key}"},
+                        open_timeout=connect_timeout_s,
+                        close_timeout=2.0,
+                        max_size=4 * 1024 * 1024,
+                    ),
+                    timeout=connect_timeout_s,
+                )
+            except Exception:  # noqa: BLE001
+                outcome = classify_realtime_call_outcome(turns, claim_id=clean_claim)
+                with contextlib.suppress(Exception):
+                    await _send_client_json(
+                        client_ws,
+                        {
+                            "type": "recoup.fallback",
+                            "reason": "upstream_connect_failed",
+                            "fallback_available": True,
+                            "outcome": outcome.to_dict(),
+                        },
+                    )
+                return outcome
+
+            await upstream_ws.send(encode_fal_realtime_event(session_update))
+            if greet_on_connect:
+                await upstream_ws.send(encode_fal_realtime_event({"type": "response.create"}))
+
+            await _send_client_json(
+                client_ws,
+                {
+                    "type": "recoup.session.ready",
+                    "call_id": f"CALL-{clean_claim}",
+                    "claim_id": clean_claim,
+                    "voice": session_update["session"]["voice"],
+                    "sample_rate": GROK_REALTIME_SAMPLE_RATE,
+                    "encoding": "pcm_s16le",
+                },
+            )
+
+            stop_event = asyncio.Event()
+            last_activity = asyncio.get_running_loop().time()
+            last_client_to_upstream = last_activity
+            keepalive_b64 = base64.b64encode(b"\x00" * 960).decode("ascii")
+
+            def touch() -> None:
+                nonlocal last_activity
+                last_activity = asyncio.get_running_loop().time()
+
+            async def idle_watchdog() -> None:
+                nonlocal stop_reason, last_client_to_upstream
+                poll_s = min(0.25, max(0.01, idle_timeout_s / 2.0))
+                while not stop_event.is_set():
+                    await asyncio.sleep(poll_s)
+                    now_t = asyncio.get_running_loop().time()
+                    if (now_t - last_activity) >= idle_timeout_s:
+                        stop_reason = "idle_timeout"
+                        stop_event.set()
+                        break
+                    # Prevent @fal.realtime's ~15s receive_bytes() timeout when browser mic is muted
+                    if idle_timeout_s >= 5.0 and (now_t - last_client_to_upstream) >= 4.0:
+                        last_client_to_upstream = now_t
+                        with contextlib.suppress(Exception):
+                            await upstream_ws.send(
+                                encode_fal_realtime_event(
+                                    {"type": "input_audio_buffer.append", "audio": keepalive_b64}
+                                )
+                            )
+
+            async def client_to_upstream() -> None:
+                nonlocal stop_reason, last_client_to_upstream
+                while not stop_event.is_set():
+                    try:
+                        raw_msg = await client_ws.receive_text()
+                    except Exception:  # noqa: BLE001
+                        stop_reason = "client_disconnected"
+                        stop_event.set()
+                        break
+
+                    touch()
+                    last_client_to_upstream = asyncio.get_running_loop().time()
+                    if len(raw_msg) > GROK_REALTIME_MAX_CLIENT_FRAME_BYTES:
+                        continue
+                    try:
+                        msg = json.loads(raw_msg)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(msg, dict):
+                        continue
+
+                    mtype = str(msg.get("type") or "")
+                    if mtype in ("audio.append", "input_audio_buffer.append"):
+                        b64_audio = str(msg.get("audio") or "").strip()
+                        if b64_audio:
+                            await upstream_ws.send(
+                                encode_fal_realtime_event(
+                                    {"type": "input_audio_buffer.append", "audio": b64_audio}
+                                )
+                            )
+                    elif mtype in ("audio.barge_in", "response.cancel"):
+                        await upstream_ws.send(encode_fal_realtime_event({"type": "response.cancel"}))
+                    elif mtype == "transcript.user":
+                        txt = str(msg.get("text") or "").strip()
+                        if txt:
+                            turns.append(RealtimeCallTurn(speaker="human", text=txt))
+                            await upstream_ws.send(
+                                encode_fal_realtime_event(
+                                    {
+                                        "type": "conversation.item.create",
+                                        "item": {
+                                            "type": "message",
+                                            "role": "user",
+                                            "content": [{"type": "input_text", "text": txt}],
+                                        },
+                                    }
+                                )
+                            )
+                            await upstream_ws.send(encode_fal_realtime_event({"type": "response.create"}))
+                    elif mtype == "call.hangup":
+                        stop_reason = "client_hangup"
+                        stop_event.set()
+                        break
+
+            async def upstream_to_client() -> None:
+                nonlocal stop_reason
+                try:
+                    async for raw_frame in upstream_ws:
+                        touch()
+                        ev = decode_fal_realtime_frame(raw_frame)
+                        if not isinstance(ev, dict):
+                            continue
+                        ev_type = str(ev.get("type") or "")
+                        if not ev_type or ev_type == "ping" or ev_type.startswith("x-fal"):
+                            continue
+
+                        if ev_type == "session.updated":
+                            await _send_client_json(client_ws, {"type": "recoup.session.updated"})
+                        elif ev_type == "input_audio_buffer.speech_started":
+                            # In server_vad mode, xAI Grok Voice Realtime cancels the active
+                            # response automatically server-side; sending client `response.cancel`
+                            # raises `invalid_request_error`. Notify client to flush speaker buffer.
+                            await _send_client_json(client_ws, {"type": "recoup.barge_in"})
+                        elif ev_type in ("response.output_audio.delta", "response.audio.delta"):
+                            delta = ev.get("delta")
+                            if isinstance(delta, (bytes, bytearray)):
+                                delta = base64.b64encode(bytes(delta)).decode("ascii")
+                            if isinstance(delta, str) and delta:
+                                await _send_client_json(
+                                    client_ws,
+                                    {
+                                        "type": "recoup.audio.delta",
+                                        "audio": delta,
+                                        "response_id": str(ev.get("response_id") or ""),
+                                    },
+                                )
+                        elif ev_type == "conversation.item.input_audio_transcription.updated":
+                            iid = str(ev.get("item_id") or "default")
+                            txt = str(ev.get("transcript") or "").strip()
+                            if txt:
+                                user_buffers[iid] = txt
+                        elif ev_type in (
+                            "conversation.item.input_audio_transcription.completed",
+                            "conversation.item.input_audio_transcription.done",
+                        ):
+                            iid = str(ev.get("item_id") or "default")
+                            txt = str(ev.get("transcript") or user_buffers.pop(iid, "")).strip()
+                            user_buffers.pop(iid, None)
+                            if txt:
+                                turns.append(RealtimeCallTurn(speaker="human", text=txt))
+                                await _send_client_json(
+                                    client_ws,
+                                    {
+                                        "type": "recoup.transcript",
+                                        "speaker": "human",
+                                        "text": txt,
+                                        "final": True,
+                                    },
+                                )
+                        elif ev_type in (
+                            "response.output_audio_transcript.delta",
+                            "response.audio_transcript.delta",
+                        ):
+                            rid = str(ev.get("response_id") or "default")
+                            dtxt = str(ev.get("delta") or "")
+                            if dtxt:
+                                agent_buffers.setdefault(rid, []).append(dtxt)
+                        elif ev_type in (
+                            "response.output_audio_transcript.done",
+                            "response.audio_transcript.done",
+                        ):
+                            rid = str(ev.get("response_id") or "default")
+                            if rid not in agent_finalized:
+                                txt = str(
+                                    ev.get("transcript") or "".join(agent_buffers.get(rid, []))
+                                ).strip()
+                                if txt:
+                                    agent_finalized.add(rid)
+                                    turns.append(RealtimeCallTurn(speaker="agent", text=txt))
+                                    await _send_client_json(
+                                        client_ws,
+                                        {
+                                            "type": "recoup.transcript",
+                                            "speaker": "agent",
+                                            "text": txt,
+                                            "final": True,
+                                        },
+                                    )
+                        elif ev_type in ("response.done", "response.cancelled"):
+                            rid = str(
+                                (ev.get("response") or {}).get("id")
+                                if isinstance(ev.get("response"), dict)
+                                else ev.get("response_id") or "default"
+                            )
+                            if rid not in agent_finalized and rid in agent_buffers:
+                                txt = "".join(agent_buffers.get(rid, [])).strip()
+                                if txt:
+                                    agent_finalized.add(rid)
+                                    turns.append(RealtimeCallTurn(speaker="agent", text=txt))
+                                    await _send_client_json(
+                                        client_ws,
+                                        {
+                                            "type": "recoup.transcript",
+                                            "speaker": "agent",
+                                            "text": txt,
+                                            "final": True,
+                                        },
+                                    )
+                        if stop_event.is_set():
+                            break
+                except ConnectionClosed:
+                    stop_reason = "upstream_closed"
+                    stop_event.set()
+                except Exception:  # noqa: BLE001
+                    stop_reason = "upstream_error"
+                    stop_event.set()
+
+            tasks = [
+                asyncio.create_task(client_to_upstream(), name="rt-client-up"),
+                asyncio.create_task(upstream_to_client(), name="rt-up-client"),
+                asyncio.create_task(idle_watchdog(), name="rt-idle"),
+            ]
+            try:
+                async with asyncio.timeout(clamped_max_s):
+                    await stop_event.wait()
+            except TimeoutError:
+                stop_reason = "max_duration_reached"
+                stop_event.set()
+            finally:
+                stop_event.set()
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+            outcome = classify_realtime_call_outcome(turns, claim_id=clean_claim)
+            with contextlib.suppress(Exception):
+                await _send_client_json(
+                    client_ws,
+                    {
+                        "type": "recoup.call.outcome",
+                        "reason": stop_reason,
+                        "turns": [t.to_dict() for t in turns],
+                        "outcome": outcome.to_dict(),
+                    },
+                )
+            return outcome
+        finally:
+            if upstream_ws is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(upstream_ws.close(), timeout=2.0)
+            if hasattr(client_ws, "close"):
+                with contextlib.suppress(Exception):
+                    await client_ws.close(code=1000)
