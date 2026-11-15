@@ -350,6 +350,12 @@ def _extract_audio_bytes_from_response(resp: httpx.Response, client: httpx.Clien
     return None
 
 
+def _briefing_tts_timeout() -> float:
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return 15.0
+    return float(os.getenv("VOICE_TTS_TIMEOUT_S", "6.5"))
+
+
 def _synthesize_via_fal(text: str, voice_id: str | None, api_key: str) -> bytes | None:
     endpoint = _resolve_fal_endpoint(os.getenv("FAL_TTS_MODEL", ""))
     url = f"https://fal.run/{endpoint}"
@@ -358,7 +364,7 @@ def _synthesize_via_fal(text: str, voice_id: str | None, api_key: str) -> bytes 
     if chosen_voice:
         body["voice"] = chosen_voice
 
-    with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+    with httpx.Client(timeout=_briefing_tts_timeout(), follow_redirects=True) as client:
         resp = client.post(
             url,
             headers={"Authorization": f"Key {api_key}", "Content-Type": "application/json"},
@@ -371,7 +377,7 @@ def _synthesize_via_fal(text: str, voice_id: str | None, api_key: str) -> bytes 
 def _synthesize_via_elevenlabs(text: str, resolved_voice: str, api_key: str) -> bytes | None:
     model_id = os.getenv("ELEVENLABS_MODEL_ID", DEFAULT_ELEVENLABS_MODEL).strip() or DEFAULT_ELEVENLABS_MODEL
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{resolved_voice}"
-    with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+    with httpx.Client(timeout=_briefing_tts_timeout(), follow_redirects=True) as client:
         resp = client.post(
             url,
             headers={
@@ -391,7 +397,7 @@ def _synthesize_via_elevenlabs(text: str, resolved_voice: str, api_key: str) -> 
 
 def _synthesize_via_wonderful(text: str, resolved_voice: str, api_key: str) -> bytes | None:
     url = os.getenv("WONDERFUL_TTS_URL", DEFAULT_WONDERFUL_TTS_URL).strip() or DEFAULT_WONDERFUL_TTS_URL
-    with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+    with httpx.Client(timeout=_briefing_tts_timeout(), follow_redirects=True) as client:
         resp = client.post(
             url,
             headers={

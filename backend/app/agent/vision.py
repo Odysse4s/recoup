@@ -175,18 +175,100 @@ def _parse_vision_response_text(raw_text: str) -> list[str]:
     return sanitized_findings or list(DEFAULT_PHOTO_FINDINGS)
 
 
+def _inspect_photo_with_fal_vision(
+    file_path: Path, raw_bytes: bytes, mime_type: str, b64_bytes: str, use_cache: bool
+) -> list[str] | None:
+    fal_key = os.getenv("FAL_KEY", "").strip()
+    if not fal_key:
+        return None
+    fal_model = os.getenv("FAL_VISION_LLM_MODEL", "google/gemini-2.5-flash")
+    cache_raw = json.dumps(
+        {
+            "provider": "fal",
+            "m": fal_model,
+            "s": VISION_SYSTEM,
+            "source": file_path.name,
+            "mime": mime_type,
+            "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+        },
+        sort_keys=True,
+    )
+    cache_file = llm_mod.CACHE_DIR / f"{hashlib.sha256(cache_raw.encode('utf-8')).hexdigest()}.json"
+    if use_cache and cache_file.exists():
+        with contextlib.suppress(Exception):
+            cached_data = json.loads(cache_file.read_text(encoding="utf-8"))
+            if isinstance(cached_data.get("findings"), list) and cached_data["findings"]:
+                return [str(x) for x in cached_data["findings"]]
+
+    fal_url = os.getenv("FAL_ROUTER_URL", "https://fal.run/openrouter/router/openai/v1").rstrip("/")
+    fal_payload = {
+        "model": fal_model,
+        "messages": [
+            {"role": "system", "content": VISION_SYSTEM},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Inspect attachment `{file_path.name}` for delivery discrepancies "
+                            "(damaged cartons, broken tamper seals, short unit counts, invoice amounts, SKUs) "
+                            "and return a JSON array of concise finding strings."
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime_type};base64,{b64_bytes}"},
+                    },
+                ],
+            },
+        ],
+        "max_tokens": 1024,
+    }
+    fal_data = llm_mod._post_with_retry(
+        f"{fal_url}/chat/completions",
+        {"Authorization": f"Key {fal_key}"},
+        fal_payload,
+    )
+    fal_txt = str(((fal_data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
+    if not fal_txt.strip():
+        return None
+    findings = _parse_vision_response_text(fal_txt)
+    if use_cache and findings:
+        llm_mod.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(
+            json.dumps({"text": fal_txt, "findings": findings}, indent=2),
+            encoding="utf-8",
+        )
+    return findings
+
+
 def _inspect_photo_with_gemini(file_path: Path, llm: LLMProvider | None = None) -> list[str]:
-    """Call Gemini multimodal `generateContent` with `inline_data` and `.llm_cache/` SHA-256 caching."""
+    """Call multimodal vision (`fal` OpenRouter Gemini or Google `generateContent`) with `.llm_cache/` caching."""
     provider_env = os.getenv("LLM_PROVIDER", "fake").strip().lower()
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    fal_key = os.getenv("FAL_KEY", "").strip()
     is_gemini = provider_env == "gemini" or isinstance(llm, GeminiProvider)
-
-    if not is_gemini or not api_key:
-        return list(DEFAULT_PHOTO_FINDINGS)
+    is_fal = (
+        provider_env in ("fal", "openrouter")
+        and bool(fal_key)
+        and "PYTEST_CURRENT_TEST" not in os.environ
+    )
 
     raw_bytes = file_path.read_bytes() if file_path.exists() else b""
     mime_type = _MIME_BY_SUFFIX.get(file_path.suffix.lower(), "image/png")
     b64_bytes = base64.b64encode(raw_bytes).decode("ascii")
+    use_cache = os.getenv("LLM_CACHE", "1") == "1"
+
+    if is_fal and not isinstance(llm, GeminiProvider):
+        with contextlib.suppress(Exception):
+            fal_res = _inspect_photo_with_fal_vision(file_path, raw_bytes, mime_type, b64_bytes, use_cache)
+            if fal_res:
+                return fal_res
+        return list(DEFAULT_PHOTO_FINDINGS)
+
+    if not is_gemini or not api_key:
+        return list(DEFAULT_PHOTO_FINDINGS)
 
     model = (
         getattr(llm, "model", None)
@@ -196,7 +278,6 @@ def _inspect_photo_with_gemini(file_path: Path, llm: LLMProvider | None = None) 
     if not model or str(model).startswith("claude-"):
         model = "gemini-3.8-flash"
 
-    use_cache = os.getenv("LLM_CACHE", "1") == "1"
     cache_raw = json.dumps(
         {
             "m": model,

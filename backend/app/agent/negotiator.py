@@ -98,7 +98,7 @@ def decide_settlement_action(
     oumi_model = os.getenv("OUMI_MODEL", "").strip()
 
     proposed: DecisionAction | None = None
-    if oumi_key and (oumi_url or oumi_model or os.getenv("OUMI_API_KEY")):
+    if oumi_key and (oumi_url or oumi_model):
         provider = OumiProvider(
             model=oumi_model or "oumi-iris-decision",
             base_url=oumi_url or "https://api.oumi.ai/v1",

@@ -113,7 +113,12 @@ export function narrate(ev: ServerEvent, brandName = "Recoup"): string {
       return `Reversible undo restored \`${r.tool ?? "step"}\` from its pre-image receipt.`;
     }
     case "call_start": {
-      return "Ringing your iPhone to resolve shipment D-1042 while away from desk…";
+      const p = ev.payload as { claim_id?: string; channel?: string };
+      const cid = p.claim_id || "active claim";
+      if (p.channel === "desktop_voice") {
+        return `Opened live Laptop Voice consult for ${cid}…`;
+      }
+      return `Ringing your iPhone to resolve ${cid} while away from desk…`;
     }
     case "call_turn": {
       const t = ev.payload as unknown as CallTurnPayload;
@@ -122,8 +127,9 @@ export function narrate(ev: ServerEvent, brandName = "Recoup"): string {
       return `${who}: “${t.text}”`;
     }
     case "call_end": {
-      const c = ev.payload as unknown as CallEndPayload;
-      return `iPhone decision call completed (${c.outcome}): ${c.summary}`;
+      const c = ev.payload as unknown as CallEndPayload & { channel?: string };
+      const label = c.channel === "desktop_voice" ? "Voice consult" : "Decision call";
+      return `${label} completed (${c.outcome}): ${c.summary}`;
     }
     case "run_done": {
       const r = ev.payload as { status?: string; fingerprint?: string };

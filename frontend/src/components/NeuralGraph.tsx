@@ -330,7 +330,7 @@ const BASE_OPACITY: Record<GEdge["state"], number> = {
   ghost: 1,
 };
 
-function GraphEdge({ e, highlight, dimmed, gradientId, reduce }: { e: GEdge; highlight: boolean; dimmed: boolean; gradientId: string; reduce: boolean }) {
+function GraphEdge({ e, highlight, dimmed, gradientId }: { e: GEdge; highlight: boolean; dimmed: boolean; gradientId: string; reduce: boolean }) {
   const color =
     e.state === "failed"
       ? "var(--danger)"
@@ -342,20 +342,23 @@ function GraphEdge({ e, highlight, dimmed, gradientId, reduce }: { e: GEdge; hig
   const energized = e.state === "active" || e.state === "done" || e.state === "held";
   const width = highlight ? 2.85 : energized ? 2.25 : 1.85;
   const opacity = dimmed ? 0.16 : highlight ? 1 : BASE_OPACITY[e.state];
-  const t = reduce ? { duration: 0 } : { type: "spring" as const, stiffness: 260, damping: 30 };
+
+  if (!e.d) return null;
 
   if (e.state === "ghost" || e.state === "held") {
     return (
-      <motion.path
-        initial={false}
-        animate={{ d: e.d, opacity }}
-        transition={t}
+      <path
+        d={e.d}
         className={e.state === "ghost" ? "graph-ghost" : "graph-held"}
         fill="none"
         stroke={e.state === "ghost" ? `url(#${gradientId})` : color}
         strokeWidth={width + 0.45}
         strokeLinecap="round"
-        style={{ filter: `drop-shadow(0 0 6px ${e.state === "ghost" ? STAGE_COLOR.anticipate : color})` }}
+        style={{
+          opacity,
+          transition: "opacity 240ms ease",
+          filter: `drop-shadow(0 0 6px ${e.state === "ghost" ? STAGE_COLOR.anticipate : color})`,
+        }}
       />
     );
   }
@@ -370,21 +373,21 @@ function GraphEdge({ e, highlight, dimmed, gradientId, reduce }: { e: GEdge; hig
 
   return (
     <g>
-      <motion.path
-        initial={reduce ? false : { pathLength: 0, opacity: 0 }}
-        animate={{ pathLength: 1, d: e.d, opacity }}
-        transition={{ ...t, pathLength: reduce ? { duration: 0 } : { duration: 0.6, ease: [0.2, 0.8, 0.2, 1] } }}
+      <path
+        d={e.d}
         fill="none"
         stroke={color}
         strokeWidth={width}
         strokeLinecap="round"
-        style={glowFilter ? { filter: glowFilter } : undefined}
+        style={{
+          opacity,
+          transition: "opacity 240ms ease, stroke 240ms ease",
+          ...(glowFilter ? { filter: glowFilter } : {}),
+        }}
       />
       {packet && !dimmed && (
-        <motion.path
-          initial={false}
-          animate={{ d: e.d }}
-          transition={t}
+        <path
+          d={e.d}
           className={packet}
           fill="none"
           stroke={color}

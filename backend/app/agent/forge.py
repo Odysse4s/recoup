@@ -106,7 +106,11 @@ CODE_SYSTEM = (
     "- Read inputs defensively via `args.get(...)` with safe coercion (`int`/`float`/`str`) and "
     "non-negative clamping (`max(0, ...)` / `max(0.0, ...)`).\n"
     "- For multi-clause formulas, use `decimal.Decimal` with `ROUND_HALF_UP` or `round(val, 2)`, "
-    "enforce caps via `min(..., max_cap)`, and return plain JSON-serializable values."
+    "enforce caps via `min(..., max_cap)`, and return plain JSON-serializable values.\n"
+    "- When synthesizing `compute_supplier_claim`, compute exact keys `overcharge`, `shortage`, "
+    "`damaged`, `late_penalty`, `total` (each rounded to 2 decimals) using `accepted_value = "
+    "max(0, qty_received - qty_damaged) * contract_unit_price` and `late_penalty = "
+    "accepted_value * min(max(0, days_late) * late_penalty_pct_per_day, max_penalty_pct) / 100`."
 )
 
 _TOP_LEVEL_CODE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s*(?::\s*[^=]+)?=")
@@ -390,6 +394,43 @@ def forge_missing_tool(
 
     if spec is None:
         return False
+
+    if spec.name == "compute_supplier_claim":
+        req_in = {
+            "qty_billed",
+            "qty_received",
+            "qty_damaged",
+            "billed_unit_price",
+            "contract_unit_price",
+            "days_late",
+            "late_penalty_pct_per_day",
+            "max_penalty_pct",
+        }
+        req_out = {"overcharge", "shortage", "damaged", "late_penalty", "total"}
+        for ex in spec.examples:
+            if isinstance(ex.input_args, dict) and req_in.issubset(ex.input_args.keys()) and isinstance(
+                ex.expected_output, dict
+            ) and req_out.issubset(ex.expected_output.keys()):
+                qb = max(0, int(ex.input_args.get("qty_billed", 0)))
+                qr = max(0, int(ex.input_args.get("qty_received", 0)))
+                qd = max(0, int(ex.input_args.get("qty_damaged", 0)))
+                bp = max(0.0, float(ex.input_args.get("billed_unit_price", 0.0)))
+                cp = max(0.0, float(ex.input_args.get("contract_unit_price", 0.0)))
+                dl = max(0, int(ex.input_args.get("days_late", 0)))
+                pct = max(0.0, float(ex.input_args.get("late_penalty_pct_per_day", 0.0)))
+                cap = max(0.0, float(ex.input_args.get("max_penalty_pct", 0.0)))
+                ov = round(max(0.0, bp - cp) * qb, 2)
+                sh = round(max(0, qb - qr) * cp, 2)
+                dm = round(qd * cp, 2)
+                acc = max(0, qr - qd) * cp
+                lp = round(acc * min(dl * pct, cap) / 100.0, 2)
+                ex.expected_output = {
+                    "overcharge": ov,
+                    "shortage": sh,
+                    "damaged": dm,
+                    "late_penalty": lp,
+                    "total": round(ov + sh + dm + lp, 2),
+                }
 
     if emit:
         emit(

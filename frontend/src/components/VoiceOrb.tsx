@@ -63,9 +63,12 @@ function sampleLevels(now: number, active: boolean, ambient: boolean, levels: Fl
 }
 
 function bar(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
+  const sw = Math.max(0.5, w);
+  const sh = Math.max(0.5, h);
+  const r = Math.max(0, Math.min(sw, sh) / 2);
   ctx.beginPath();
-  if (typeof ctx.roundRect === "function") ctx.roundRect(x, y, w, h, Math.min(w, h) / 2);
-  else ctx.rect(x, y, w, h);
+  if (typeof ctx.roundRect === "function") ctx.roundRect(x, y, sw, sh, r);
+  else ctx.rect(x, y, sw, sh);
   ctx.fill();
 }
 

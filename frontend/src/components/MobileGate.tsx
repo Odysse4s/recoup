@@ -720,7 +720,9 @@ function OperatorEscalationCall({
           data.reply_text?.trim() ||
           data.reply?.trim() ||
           data.spoken_summary?.trim() ||
-          "Kappa owes 587 euros cash back, or 22 free replacements tomorrow. Which should I take?";
+          (consult?.claimId && consult.claimId !== "CLM-D-1042"
+            ? `Claim ${consult.claimId} (€${(consult.claimAmount ?? 0).toFixed(2)}) is staged at the Risk Gate. Should I enforce the claim or hold off?`
+            : "Kappa owes 587 euros cash back, or 22 free replacements tomorrow. Which should I take?");
 
         const turnId = `agent-reply-${Date.now()}`;
         setLocalTurns((prev) => [
@@ -1139,9 +1141,10 @@ function OperatorEscalationCall({
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="absolute inset-0 z-30 flex flex-col justify-between overflow-hidden text-white"
+        className="absolute inset-0 z-30 flex flex-col justify-between overflow-hidden bg-[#08090c] text-white"
         style={{
-          background:
+          backgroundColor: "#08090c",
+          backgroundImage:
             "radial-gradient(130% 70% at 50% 18%, rgba(16, 185, 129, 0.28) 0%, rgba(12, 13, 18, 0.96) 65%, #08090c 100%)",
         }}
       >
@@ -1253,12 +1256,13 @@ function OperatorEscalationCall({
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="absolute inset-0 z-30 flex flex-col justify-between overflow-hidden"
+      className="absolute inset-0 z-30 flex flex-col justify-between overflow-hidden bg-canvas"
       style={{
-        background: resolvedEnd
+        backgroundColor: "var(--canvas)",
+        backgroundImage: resolvedEnd
           ? "radial-gradient(130% 65% at 50% 0%, color-mix(in oklab, var(--ok) 25%, var(--canvas)), var(--canvas) 75%)"
           : (isHearing || vad.manualRecording)
-          ? "radial-gradient(130% 65% at 50% 12%, rgba(244, 63, 94, 0.22) 0%, var(--canvas) 75%)"
+          ? "radial-gradient(130% 65% at 50% 12%, color-mix(in oklab, var(--danger) 24%, var(--canvas)) 0%, var(--canvas) 75%)"
           : isSpeaking
           ? "radial-gradient(130% 65% at 50% 12%, color-mix(in oklab, var(--ok) 24%, var(--canvas)) 0%, var(--canvas) 75%)"
           : "radial-gradient(130% 65% at 50% 12%, color-mix(in oklab, var(--signal) 22%, var(--canvas)) 0%, var(--canvas) 75%)",
@@ -1536,7 +1540,7 @@ function OperatorEscalationCall({
                   <Sparkles className="h-3.5 w-3.5" /> Next Audit Suggestion
                 </div>
                 <div className="mt-1 text-[13px] font-semibold text-ink">
-                  Recoup found €175.00 more on paid shipments D-1017 &amp; D-1031 — Run this next?
+                  {r.offer.prediction.need} — Run this next?
                 </div>
                 <div className="mt-2.5 flex gap-2">
                   <button
@@ -2092,7 +2096,7 @@ function GateHome({
               </div>
               <div className="mt-1.5 text-[15px] font-semibold leading-snug text-ink">{r.offer.prediction.need}</div>
               <div className="mt-1 text-[13px] text-ink-3">
-                Recoup found €175.00 more on paid shipments D-1017 &amp; D-1031 — Run this next?
+                {r.offer.prediction.evidence || "Pre-rehearsed recovery ready — Run this next?"}
               </div>
               <div className="mt-3 flex gap-2">
                 <button
@@ -2245,6 +2249,21 @@ export function MobileGate({
     setMobileCallOwnsAudio(false);
   }, [currentSessionKey]);
 
+  const resolvedMobileClaimId = useMemo(() => {
+    if (consult?.claimId) return consult.claimId;
+    const row = (r.pendingApproval?.args?.row ?? {}) as Record<string, unknown>;
+    if (typeof row.id === "string" && row.id.trim()) return row.id.trim();
+    const corpus = [
+      r.pendingApproval?.diff_preview,
+      r.pendingApproval?.risk_reason,
+      r.pendingApproval?.spoken_summary,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const match = corpus.match(/\b(CLM-[A-Z0-9-]+)\b/i);
+    return match ? match[1].toUpperCase() : DEFAULT_CLAIM_ID;
+  }, [consult?.claimId, r.pendingApproval]);
+
   const handleCallRecoupBack = useCallback(async () => {
     soundFx.playUiClick();
     buzz([40, 60]);
@@ -2257,15 +2276,15 @@ export function MobileGate({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           req_id: r.pendingApproval?.req_id,
-          claim_id: DEFAULT_CLAIM_ID,
+          claim_id: resolvedMobileClaimId,
           channel: "voice_call",
         }),
       });
     } catch {
       // offline
     }
-    setActiveCallId(`CONSULT-${DEFAULT_CLAIM_ID}`);
-  }, [r.pendingApproval?.req_id]);
+    setActiveCallId(`CONSULT-${resolvedMobileClaimId}`);
+  }, [r.pendingApproval?.req_id, resolvedMobileClaimId]);
 
   const handlePullCallToPhone = useCallback(async () => {
     soundFx.playUiClick();
@@ -2274,10 +2293,10 @@ export function MobileGate({
     setDismissedCallKey(null);
     unlockAudioSession("play-and-record");
     const reqId = r.pendingApproval?.req_id;
-    const callId = consult?.callId || `CONSULT-${DEFAULT_CLAIM_ID}`;
+    const callId = consult?.callId || `CONSULT-${resolvedMobileClaimId}`;
     setActiveCallId(callId);
     if (r.escalateToPhone) {
-      await r.escalateToPhone(reqId);
+      await r.escalateToPhone(reqId, resolvedMobileClaimId);
     } else {
       try {
         await fetch("/api/call/user-consult", {
@@ -2285,7 +2304,7 @@ export function MobileGate({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             req_id: reqId,
-            claim_id: DEFAULT_CLAIM_ID,
+            claim_id: resolvedMobileClaimId,
             channel: "iphone_transferred",
           }),
         });
@@ -2293,7 +2312,7 @@ export function MobileGate({
         // offline
       }
     }
-  }, [r, consult?.callId]);
+  }, [r, consult?.callId, resolvedMobileClaimId]);
 
   // Phone (MobileGate.tsx) MUST ONLY enter showEscalationScreen when:
   // 1. (consult?.active || consult?.ringing) is true AND isPhoneChannel (consult?.channel === "voice_call" || consult?.channel === "iphone_transferred")

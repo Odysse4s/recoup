@@ -1202,12 +1202,12 @@ async def _run_followup_offer_loop(run_id: str, offer: PreparedOffer, pace_ms: i
             output_schema={"d1017_credit_eur": "float", "d1031_credit_eur": "float", "total_credit_eur": "float"},
             examples=[
                 ForgeExample(
-                    input={"d1017_days_late": 4, "d1031_days_late": 3, "daily_rate_eur": 25.0},
+                    input_args={"d1017_days_late": 4, "d1031_days_late": 3, "daily_rate_eur": 25.0},
                     expected_output={"d1017_credit_eur": 105.0, "d1031_credit_eur": 70.0, "total_credit_eur": 175.0},
                 )
             ],
         )
-        BUS.emit(run_id, EventType.FORGE_SPEC, f_spec.model_dump(), step=2, thought="Drafted TDD spec for `compute_sla_late_credit`.")
+        BUS.emit(run_id, EventType.FORGE_SPEC, f_spec.model_dump(by_alias=True), step=2, thought="Drafted TDD spec for `compute_sla_late_credit`.")
         await _pace()
 
         fu_reg_ok = False
@@ -1219,7 +1219,7 @@ async def _run_followup_offer_loop(run_id: str, offer: PreparedOffer, pace_ms: i
                     description="Compute retroactive SLA late-delivery penalty credits across paid shipments",
                     params_schema=f_spec.input_schema,
                     code=FORGED_SLA_LATE_CREDIT_CODE,
-                    examples=[ex.model_dump() for ex in f_spec.examples],
+                    examples=[ex.model_dump(by_alias=True) for ex in f_spec.examples],
                 )
                 fu_reg_ok = bool(fu_reg.get("registered"))
         if not fu_reg_ok:
@@ -1491,6 +1491,7 @@ async def reset():
     REAL.outbox.clear()
     LOG.entries.clear()
     LOG._flush()
+    FEEDBACK_PATH.unlink(missing_ok=True)
     BUS.history.clear()
     _EXTRA_VOICE_COST_EUR = 0.0
     return {"ok": True, "fingerprint": fingerprint_env(REAL)[:12]}
@@ -2136,6 +2137,7 @@ async def voice_turn_audio(req: TurnAudioRequest):
         raise HTTPException(400, "empty turn text")
 
     audio_bytes: bytes | None = None
+    is_unpatched_turn = False
     with contextlib.suppress(Exception):
         from .voice.call_audio import synthesize_call_turn  # type: ignore[import-not-found]
 
@@ -2157,6 +2159,11 @@ async def voice_turn_audio(req: TurnAudioRequest):
             from .voice.elevenlabs_agent import synthesize_briefing
 
             is_unpatched_brief = getattr(synthesize_briefing, "__module__", "").endswith("elevenlabs_agent")
+            skip_redundant_prod_retry = (
+                "PYTEST_CURRENT_TEST" not in os.environ
+                and is_unpatched_turn
+                and is_unpatched_brief
+            )
             pytest_brief_offline = (
                 "PYTEST_CURRENT_TEST" in os.environ
                 and is_unpatched_brief
@@ -2164,7 +2171,7 @@ async def voice_turn_audio(req: TurnAudioRequest):
                 and not os.getenv("FAL_KEY", "").strip()
                 and not os.getenv("VOICE_PROVIDER", "").strip()
             )
-            if not pytest_brief_offline:
+            if not pytest_brief_offline and not skip_redundant_prod_retry:
                 candidate = await _offload_blocking(synthesize_briefing, text)
                 if candidate:
                     audio_bytes = candidate

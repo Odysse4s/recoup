@@ -124,11 +124,23 @@ def _resolve_stt_endpoint(raw_model: str) -> str:
     return f"fal-ai/{cleaned}"
 
 
+def _tts_timeout() -> float:
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return 15.0
+    return float(os.getenv("VOICE_TTS_TIMEOUT_S", "6.5"))
+
+
+def _stt_timeout() -> float:
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return 20.0
+    return float(os.getenv("VOICE_STT_TIMEOUT_S", "7.5"))
+
+
 def _fal_turn_tts(text: str, voice: str, api_key: str) -> bytes | None:
     raw_model = os.getenv("FAL_TTS_MODEL", "").strip() or DEFAULT_FAL_TTS_MODEL
     endpoint = _resolve_fal_endpoint(raw_model)
     url = f"https://fal.run/{endpoint}"
-    with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+    with httpx.Client(timeout=_tts_timeout(), follow_redirects=True) as client:
         resp = client.post(
             url,
             headers={"Authorization": f"Key {api_key}", "Content-Type": "application/json"},
@@ -145,7 +157,7 @@ def _wonderful_turn_tts(
     api_key: str,
 ) -> bytes | None:
     url = os.getenv("WONDERFUL_TTS_URL", DEFAULT_WONDERFUL_TTS_URL).strip() or DEFAULT_WONDERFUL_TTS_URL
-    with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+    with httpx.Client(timeout=_tts_timeout(), follow_redirects=True) as client:
         resp = client.post(
             url,
             headers={
@@ -162,7 +174,7 @@ def _wonderful_turn_tts(
 def _elevenlabs_turn_tts(text: str, voice_id: str, api_key: str) -> bytes | None:
     model_id = os.getenv("ELEVENLABS_MODEL_ID", DEFAULT_ELEVENLABS_MODEL).strip() or DEFAULT_ELEVENLABS_MODEL
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-    with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+    with httpx.Client(timeout=_tts_timeout(), follow_redirects=True) as client:
         resp = client.post(
             url,
             headers={
@@ -217,7 +229,7 @@ def synthesize_grok_tts(text: str, voice: str | None = None) -> bytes | None:
 
     url = os.getenv("GROK_TTS_URL", DEFAULT_GROK_TTS_URL).strip() or DEFAULT_GROK_TTS_URL
     try:
-        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+        with httpx.Client(timeout=_tts_timeout(), follow_redirects=True) as client:
             resp = client.post(
                 url,
                 headers={"Authorization": f"Key {fal_key}", "Content-Type": "application/json"},
@@ -235,7 +247,7 @@ def synthesize_grok_tts(text: str, voice: str | None = None) -> bytes | None:
     return None
 
 
-_TURN_AUDIO_LRU_MAX = 64
+_TURN_AUDIO_LRU_MAX = 128
 _turn_audio_lru: OrderedDict[str, bytes] = OrderedDict()
 _MEM_TTS_CACHE: OrderedDict[str, bytes] = _turn_audio_lru
 
@@ -263,6 +275,12 @@ STAGE_CALL_PREWARM_LINES: tuple[str, ...] = (
     "Got it—locking in 22 free replacement hubs for tomorrow morning plus the 202 euro credit, and emailing Kappa now! Anything else?",
     "Awesome—everything's applied and undo-protected. Talk soon!",
     "No problem—I'll keep everything safely paused until you're back at your desk. Talk soon!",
+    "Pulled up the Greek AADE myDATA 5.1 credit note XML on your screen! Want me to file the 587 euro refund or take replacement hubs?",
+    "Switched your desktop ledger to the invoices table—invoice 7781 is ready to freeze. Refund or replacement hubs?",
+    "On it! Launching the follow-up audit on paid Kappa shipments D-1017 and D-1031 right now—watch the new plan and live windows spin up!",
+    "Hey! I audited paid Kappa shipments D-1017 and D-1031 and rehearsed a 175 euro SLA credit recovery. Should I enforce the 175 euro claim and email Kappa, or hold off?",
+    "Hey! We audited Atlas Paper & Stationery delivery D-3005 and found a 500 euro discrepancy on invoice INV-9901. Should I enforce the 500 euro claim and email the supplier, or hold off?",
+    "Hey! We audited Orion Breakroom Supplies Ltd. delivery D-2010 and found a 14.7 euro discrepancy on invoice INV-8801. Should I enforce the 14.7 euro claim and email the supplier, or hold off?",
 )
 
 
@@ -408,7 +426,7 @@ def transcribe_audio_bytes(audio_bytes: bytes, mime_type: str = "audio/webm") ->
     language = os.getenv("FAL_STT_LANGUAGE", "en").strip() or "en"
 
     try:
-        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+        with httpx.Client(timeout=_stt_timeout(), follow_redirects=True) as client:
             resp = client.post(
                 url,
                 headers={"Authorization": f"Key {fal_key}", "Content-Type": "application/json"},

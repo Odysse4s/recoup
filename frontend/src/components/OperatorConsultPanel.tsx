@@ -127,8 +127,6 @@ export function OperatorConsultPanel({
   const lastTranscriptTimeRef = useRef<number>(0);
 
   const claimId = useMemo(() => {
-    if (consult?.claimId) return consult.claimId;
-    if (committedClaimId) return committedClaimId;
     const argRow = pendingApproval?.args?.row as Record<string, unknown> | undefined;
     const rawId =
       pendingApproval?.args?.claim_id ??
@@ -136,6 +134,8 @@ export function OperatorConsultPanel({
       argRow?.id ??
       argRow?.claim_id;
     if (typeof rawId === "string" && rawId.trim()) return rawId.trim();
+    if (consult?.claimId) return consult.claimId;
+    if (committedClaimId) return committedClaimId;
 
     const searchCorpus = [
       pendingApproval?.diff_preview,
@@ -798,20 +798,20 @@ export function OperatorConsultPanel({
               </div>
 
               {!isPhoneTransferred && !consultSessionEnded && (
-                <div className="space-y-1.5 rounded-xl border border-emerald-500/35 bg-surface/65 p-2">
-                  <div className="flex items-center justify-between gap-2">
+                <div className="space-y-1 rounded-xl border border-emerald-500/35 bg-surface/65 p-1.5">
+                  <div className="flex items-center justify-between gap-1.5">
                     <button
                       type="button"
                       onClick={toggleLaptopMic}
                       className={cx(
-                        "flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition-all",
+                        "flex min-w-0 items-center gap-1.5 rounded-lg border px-2 py-0.5 text-[10.5px] font-semibold transition-all",
                         laptopMicOn
                           ? "border-emerald-500/60 bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/40"
                           : "border-cyan-500/40 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20"
                       )}
                     >
-                      <Mic className={cx("h-3.5 w-3.5", laptopMicOn && "animate-pulse")} />
-                      <span>{laptopMicOn ? "🎙️ Still Listening — Ask Anything or Assign Next Task" : "🎙️ Resume Laptop Voice"}</span>
+                      <Mic className={cx("h-3 w-3 shrink-0", laptopMicOn && "animate-pulse")} />
+                      <span className="truncate">{laptopMicOn ? "🎙️ Still Listening — Ask or Assign Next" : "🎙️ Resume Laptop Voice"}</span>
                     </button>
                     <button
                       type="button"
@@ -819,28 +819,28 @@ export function OperatorConsultPanel({
                         stopSpeaking();
                         void handleProcessedText("No thanks, that's all");
                       }}
-                      className="rounded-lg border border-line bg-sunken px-2 py-1 text-[10px] font-medium text-ink-2 hover:border-ok/50 hover:text-ok"
+                      className="shrink-0 rounded-lg border border-line bg-sunken px-2 py-0.5 text-[9.5px] font-medium text-ink-2 hover:border-ok/50 hover:text-ok"
                     >
-                      End Voice Session
+                      Done
                     </button>
                   </div>
 
-                  <div className="flex flex-wrap gap-1">
+                  <div className="flex items-center gap-1 overflow-x-auto scroll-thin pb-0.5">
                     {[
-                      "No thanks, that's all",
-                      "Yes, audit paid shipments D-1017 & D-1031",
-                      "Check delivery D-3005 from Atlas Industrial Supply",
-                    ].map((hint) => (
+                      { label: "No thanks, all set", send: "No thanks, that's all" },
+                      { label: "Audit D-1017 & D-1031", send: "Yes, audit paid shipments D-1017 & D-1031" },
+                      { label: "Audit Atlas D-3005", send: "Check delivery D-3005 from Atlas Paper & Stationery" },
+                    ].map((item) => (
                       <button
-                        key={hint}
+                        key={item.label}
                         type="button"
                         onClick={() => {
                           stopSpeaking();
-                          void handleProcessedText(hint);
+                          void handleProcessedText(item.send);
                         }}
-                        className="rounded-full border border-line/80 bg-sunken/80 px-2 py-0.5 text-[10px] text-ink-2 hover:border-accent/50 hover:bg-accent/10 hover:text-accent transition-colors"
+                        className="shrink-0 rounded-full border border-line/80 bg-sunken/80 px-2 py-0.5 text-[9.5px] text-ink-2 hover:border-accent/50 hover:bg-accent/10 hover:text-accent transition-colors"
                       >
-                        ⚡ {hint}
+                        ⚡ {item.label}
                       </button>
                     ))}
                   </div>
@@ -860,12 +860,12 @@ export function OperatorConsultPanel({
                       value={quickAskText}
                       onChange={(e) => setQuickAskText(e.target.value)}
                       placeholder="Ask follow-up, say 'No thanks', or assign a new supplier audit…"
-                      className="h-6 flex-1 rounded border border-line bg-surface/80 px-2 text-[10.5px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none"
+                      className="h-5.5 flex-1 rounded border border-line bg-surface/80 px-2 text-[10px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none"
                     />
                     <button
                       type="submit"
                       disabled={!quickAskText.trim()}
-                      className={cx(btn("primary", "sm"), "h-6 px-2 text-[10px] font-semibold disabled:opacity-40")}
+                      className={cx(btn("primary", "sm"), "h-5.5 px-2 text-[9.5px] font-semibold disabled:opacity-40")}
                     >
                       <span>Send</span>
                       <CornerDownLeft className="h-2.5 w-2.5 opacity-80" />
@@ -1072,27 +1072,29 @@ export function OperatorConsultPanel({
             </div>
           )}
 
-          {/* 2. Plain-English Scenario Summary (Dynamic: Kappa vs Custom/Atlas/Orion) */}
-          {isKappa ? (
-            <div className="rounded-lg border border-line bg-sunken/40 px-3 py-1.5 text-[11.5px] leading-snug text-ink">
-              <span className="font-semibold text-danger">22 hubs arrived missing/broken</span> &amp; Invoice #7781 is overbilled.{" "}
-              <span className="font-semibold text-ok">Kappa owes €587.30.</span>
-            </div>
-          ) : (
-            <div className="rounded-lg border border-line bg-sunken/40 px-3 py-1.5 text-[11.5px] leading-snug text-ink">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-mono text-[10.5px] font-bold text-signal">{claimId}</span>
-                {formattedClaimAmount && (
-                  <span className="font-mono text-[11px] font-bold text-ok">{formattedClaimAmount}</span>
-                )}
+          {/* 2. Plain-English Scenario Summary (Dynamic: Kappa vs Custom/Atlas/Orion; hidden once executed to keep Undo + Anticipate above fold) */}
+          {!isExecutedLive && (
+            isKappa ? (
+              <div className="rounded-lg border border-line bg-sunken/40 px-3 py-1.5 text-[11.5px] leading-snug text-ink">
+                <span className="font-semibold text-danger">22 hubs arrived missing/broken</span> &amp; Invoice #7781 is overbilled.{" "}
+                <span className="font-semibold text-ok">Kappa owes €587.30.</span>
               </div>
-              <p className="mt-0.5 line-clamp-2 text-ink-2">
-                {pendingApproval?.risk_reason ||
-                  pendingApproval?.spoken_summary ||
-                  pendingApproval?.diff_preview ||
-                  `High-stakes audit discrepancy detected for claim ${claimId}. Operator verification required.`}
-              </p>
-            </div>
+            ) : (
+              <div className="rounded-lg border border-line bg-sunken/40 px-3 py-1.5 text-[11.5px] leading-snug text-ink">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-[10.5px] font-bold text-signal">{claimId}</span>
+                  {formattedClaimAmount && (
+                    <span className="font-mono text-[11px] font-bold text-ok">{formattedClaimAmount}</span>
+                  )}
+                </div>
+                <p className="mt-0.5 line-clamp-2 text-ink-2">
+                  {pendingApproval?.risk_reason ||
+                    pendingApproval?.spoken_summary ||
+                    pendingApproval?.diff_preview ||
+                    `High-stakes audit discrepancy detected for claim ${claimId}. Operator verification required.`}
+                </p>
+              </div>
+            )
           )}
 
           {/* 3. 2 Big Clear Choice Buttons Side-by-Side (whenever unresolved) */}
@@ -1170,11 +1172,14 @@ export function OperatorConsultPanel({
             </div>
           )}
 
-          {/* 4. Compact Live Phone / Laptop Chat (max-h-[120px] overflow-y-auto scroll-thin) */}
+          {/* 4. Compact Live Phone / Laptop Chat */}
           {consult && (consult.active || consult.ringing || sanitizedTurns.length > 0 || consult.end || laptopMicOn) && (
             <div
               ref={transcriptRef}
-              className="scroll-thin max-h-[120px] space-y-1.5 overflow-y-auto rounded-lg border border-line bg-sunken/40 p-2"
+              className={cx(
+                "scroll-thin space-y-1.5 overflow-y-auto rounded-lg border border-line bg-sunken/40 p-2",
+                isExecutedLive ? "max-h-[82px]" : "max-h-[120px]"
+              )}
               aria-live="polite"
             >
               {sanitizedTurns.length === 0 && (

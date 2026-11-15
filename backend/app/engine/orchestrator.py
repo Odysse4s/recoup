@@ -243,6 +243,14 @@ async def replay(
     if fingerprint_env(real) != fp:
         raise StaleRehearsalError("workspace changed since rehearsal")
     committed_in_run = 0
+    human_approved_run = False
+    ask_entries: list[tuple[ToolCall, str]] = []
+    for c in commit_plan:
+        if c.name in REGISTRY:
+            d_pre, r_pre = assess_risk(c, REGISTRY[c.name], report)
+            if d_pre == RiskDecision.ASK:
+                ask_entries.append((c, r_pre))
+
     for i, call in enumerate(commit_plan):
         tool = REGISTRY[call.name]
         decision, reason = assess_risk(call, tool, report)
@@ -250,13 +258,21 @@ async def replay(
             if committed_in_run:
                 log.undo_steps(committed_in_run, REGISTRY, real)
             return "blocked"
-        if decision == RiskDecision.ASK:
+        if decision == RiskDecision.ASK and not human_approved_run:
+            combined_reason = reason
+            if len(ask_entries) > 1:
+                extra_reasons = [r for c, r in ask_entries if c.id != call.id and r != reason]
+                if extra_reasons:
+                    combined_reason = f"{reason}; {'; '.join(dict.fromkeys(extra_reasons))}"
+            combined_preview = "\n".join(
+                p for c, _ in ask_entries if (p := previews.get(c.id, ""))
+            ) or previews.get(call.id, "")
             gate_payload: dict[str, Any] = {
                 "req_id": f"req_{uuid.uuid4().hex[:8]}",
                 "tool_name": call.name,
                 "args": call.args,
-                "diff_preview": previews.get(call.id, ""),
-                "risk_reason": reason,
+                "diff_preview": combined_preview,
+                "risk_reason": combined_reason,
                 "report": report.model_dump(),
             }
             gate_payload["spoken_summary"] = _spoken_summary_for(gate_payload)
@@ -278,6 +294,7 @@ async def replay(
                 if committed_in_run:
                     log.undo_steps(committed_in_run, REGISTRY, real)
                 return "timed_out" if outcome == "timed_out" else "aborted_by_human"
+            human_approved_run = True
         try:
             receipt = tool.do(call.args, real)
             tool.uses += 1
