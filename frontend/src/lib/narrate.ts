@@ -135,9 +135,20 @@ export function narrate(ev: ServerEvent, brandName = "Recoup"): string {
       return `${label} completed (${c.outcome}): ${c.summary}`;
     }
     case "run_done": {
-      const r = ev.payload as { status?: string; outcome?: string; fingerprint?: string; summary?: string };
+      const r = ev.payload as {
+        status?: string;
+        outcome?: string;
+        fingerprint?: string;
+        summary?: string;
+        clean_audit?: boolean;
+      };
       const st = r.status ?? r.outcome;
       if (st === "committed" || st === "done") {
+        if (r.clean_audit) {
+          return r.fingerprint
+            ? `✓ Clean shipment verified (SHA-256 ${r.fingerprint}) — €0.00 discrepancy, zero claims filed, live ledger untouched.`
+            : "✓ Clean shipment verified — €0.00 discrepancy, zero claims filed, live ledger untouched.";
+        }
         if (r.fingerprint) {
           return `✓ Settlement committed to live ERP (SHA-256 ${r.fingerprint}) — one-click undo ready.`;
         }
@@ -161,10 +172,8 @@ export function narrate(ev: ServerEvent, brandName = "Recoup"): string {
 
 export function briefingFor(ev: ServerEvent, brandName = "Recoup"): string | null {
   if (ev.type === "rehearse_report") {
-    const rep = (ev.payload as { report: ChangeReport }).report;
-    const c = reportCounts(rep);
-    if (c.outbox > 0 || c.db > 0) return null;
-    return `Rehearsal complete. ${plural(c.files, "file change")} and ${plural(c.db, "database mutation")} staged. Live data is untouched.`;
+    // Keep subtitle narration silent here so it never overlaps with immediately-following approval_needed or run_done voice clips
+    return null;
   }
   if (ev.type === "approval_needed") {
     const a = ev.payload as unknown as ApprovalNeededPayload;
@@ -172,10 +181,19 @@ export function briefingFor(ev: ServerEvent, brandName = "Recoup"): string | nul
     return `Rehearsal complete. Risk gate active: ${brandName} is holding ${a.tool_name.replace(/_/g, " ")}. Reason: ${a.risk_reason}. Approve to commit staged changes, or reject to roll back.`;
   }
   if (ev.type === "run_done") {
-    const r = ev.payload as { status?: string; outcome?: string; spoken_summary?: string; summary?: string };
+    const r = ev.payload as {
+      status?: string;
+      outcome?: string;
+      spoken_summary?: string;
+      summary?: string;
+      clean_audit?: boolean;
+    };
     const status = String(r.status ?? r.outcome ?? "");
     if (status === "committed" || status === "done") {
       if (r.spoken_summary && r.spoken_summary.trim()) return r.spoken_summary.trim();
+      if (r.clean_audit) {
+        return "Audit complete. Shipment verified clean with zero discrepancies—no claims filed and live ledger untouched.";
+      }
       if (r.summary && r.summary.trim()) return r.summary.trim();
       return "Audit complete and committed to the live ledger. Claim drafted, invoice placed on dispute hold, and vendor notification sent with one-click undo ready.";
     }

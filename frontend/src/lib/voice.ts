@@ -314,16 +314,19 @@ async function fetchRemoteTurnAudio(text: string): Promise<{ buffer: ArrayBuffer
   }
 }
 
+let backendUnreachable = false;
+
 async function fetchRemoteBriefing(text: string, kind: string): Promise<{ buffer: ArrayBuffer; contentType: string } | null> {
   if (Date.now() < remoteRetryAfter) return null;
   try {
-    const signal = typeof AbortSignal !== "undefined" && "timeout" in AbortSignal ? AbortSignal.timeout(4500) : undefined;
+    const signal = typeof AbortSignal !== "undefined" && "timeout" in AbortSignal ? AbortSignal.timeout(10500) : undefined;
     const res = await fetch("/api/voice/briefing", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text, kind }),
       ...(signal ? { signal } : {}),
     });
+    backendUnreachable = false;
     const rawType = res.headers.get("content-type") ?? "";
     if (!res.ok || res.status === 204 || !rawType.startsWith("audio")) {
       return null;
@@ -332,8 +335,12 @@ async function fetchRemoteBriefing(text: string, kind: string): Promise<{ buffer
     const contentType = rawType.split(";")[0].trim() || "audio/mpeg";
     const buffer = await res.arrayBuffer();
     return { buffer, contentType };
-  } catch {
-    remoteRetryAfter = Date.now() + 5000;
+  } catch (err) {
+    const isTimeout = err instanceof DOMException && (err.name === "TimeoutError" || err.name === "AbortError");
+    if (!isTimeout) {
+      backendUnreachable = true;
+      remoteRetryAfter = Date.now() + 2500;
+    }
     return null;
   }
 }
@@ -531,8 +538,9 @@ function speakOnce(text: string, kind: string, hooks: SpeechHooks) {
         }
       }
 
-      // Fallback: Web Speech Synthesis
-      if (finished || token !== generation) return done();
+      // Fallback: Web Speech Synthesis ONLY when backend is actually unreachable (offline mode).
+      // Never mix a robotic browser male voice mid-run when Cloud Grok Voice is active!
+      if (finished || token !== generation || !backendUnreachable) return done();
       const synth = window.speechSynthesis;
       if (!synth) return done();
       const u = new SpeechSynthesisUtterance(text);

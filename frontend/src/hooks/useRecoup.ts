@@ -121,6 +121,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   const [forgeTest, setForgeTest] = useState<ForgeTestPayload | null>(null);
   const [forgedCode, setForgedCode] = useState<Record<string, ForgeTestPayload>>({});
   const [report, setReport] = useState<ChangeReport | null>(null);
+  const reportRef = useRef<ChangeReport | null>(report);
+  reportRef.current = report;
   const [verify, setVerify] = useState<VerifyPayload | null>(null);
   const [pendingApproval, setPendingApproval] = useState<ApprovalNeededPayload | null>(null);
   const pendingApprovalRef = useRef<ApprovalNeededPayload | null>(pendingApproval);
@@ -340,9 +342,9 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         wsStateRef.current = data;
         setWsState(data);
 
-        // Hydrate pending approval (never revive after commit)
+        // Hydrate pending approval (authoritative whenever backend PENDING holds an unresolved gate)
         const nextPending = data.pending_approval ?? (data.pending_approvals?.length ? data.pending_approvals[0] : null);
-        if (nextPending && runStatusRef.current !== "committed") {
+        if (nextPending && (modeRef.current === "live" || runStatusRef.current !== "committed")) {
           if (!windowsEnabledRef.current) {
             // On mobile: instant hydration so phone rings immediately
             if (queueRef.current.length > 0) {
@@ -354,7 +356,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             }
             setPendingApproval(nextPending);
             setStage("gate");
-            setRunStatus((curr) => (curr === "running" || curr === "idle" ? "awaiting" : curr));
+            setRunStatus((curr) => (curr === "committing" ? curr : "awaiting"));
           } else {
             // On desktop: do NOT instant-flush if pacer queue still has live windows pacing out!
             const hasPendingPacerEvents = queueRef.current.some((e) =>
@@ -366,7 +368,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
               deferredApprovalRef.current = null;
               setPendingApproval(nextPending);
               setStage("gate");
-              setRunStatus((curr) => (curr === "running" || curr === "idle" ? "awaiting" : curr));
+              setRunStatus((curr) => (curr === "committing" ? curr : "awaiting"));
             }
           }
         } else if (modeRef.current === "live" || runStatusRef.current === "committed") {
@@ -427,7 +429,9 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             lastPolledUiActionSigRef.current = null;
           }
         } else if (data.active_call === null && modeRef.current === "live") {
-          setOperatorConsult((prev) => (prev?.active ? null : prev));
+          setOperatorConsult((prev) =>
+            prev?.active || runStatusRef.current === "running" || runStatusRef.current === "awaiting" ? null : prev
+          );
         }
 
         // Hydrate latest offer
@@ -598,7 +602,26 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   const triggerCommitCelebration = useCallback((choiceOverride?: OperatorChoice | null) => {
     if (!windowsEnabledRef.current) return;
     if (commitCelebratedRef.current) return;
+
+    const rep = reportRef.current;
+    const claimsSummary = rep?.db_summary?.claims;
+    const repClaimsChanged = ((claimsSummary?.inserted ?? 0) + (claimsSummary?.updated ?? 0)) > 0;
+    const repOutbox = (rep?.external_outbox?.length ?? 0) > 0;
+    const hasClaimOrAction = Boolean(
+      choiceOverride ||
+        operatorConsult?.selectedChoice ||
+        repClaimsChanged ||
+        repOutbox
+    );
+
     commitCelebratedRef.current = true;
+
+    // On clean zero-discrepancy control runs (0 claims, 0 outbox), keep the user's chosen view (e.g. Thought Graph)
+    // and never spawn fake claim celebration windows!
+    if (!hasClaimOrAction) {
+      soundFx.playCommitSuccess();
+      return;
+    }
 
     const choice: OperatorChoice =
       choiceOverride ??
@@ -1236,7 +1259,15 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         setStage("verify");
         break;
       case "approval_needed":
+        if (replayCommitTimerRef.current !== null) {
+          clearTimeout(replayCommitTimerRef.current);
+          replayCommitTimerRef.current = null;
+        }
         deferredApprovalRef.current = null;
+        // Clear any ended/accepted consult leftover from a prior run so Decision Gate buttons always appear
+        setOperatorConsult((prev) =>
+          prev && (!prev.active || prev.end || prev.selectedChoice) ? null : prev
+        );
         setPendingApproval(ev.payload as unknown as ApprovalNeededPayload);
         setStage("gate");
         setRunStatus("awaiting");
@@ -1269,24 +1300,39 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         break;
       }
       case "replay_step_done": {
-        setStage((curr) => (curr === "commit" ? "commit" : curr ?? "commit"));
-        setRunStatus((curr) => (curr === "committed" ? "committed" : "committing"));
-        triggerCommitCelebration();
-        if (replayCommitTimerRef.current !== null) {
-          clearTimeout(replayCommitTimerRef.current);
-        }
-        replayCommitTimerRef.current = setTimeout(() => {
-          replayCommitTimerRef.current = null;
-          setRunStatus((curr) => {
-            if (curr === "committing") {
-              setStage("commit");
-              setStageDone(true);
-              setPendingApproval(null);
-              return "committed";
+        // On live runs, auto-approved steps (< EUR 250) execute BEFORE ask_human() emits approval_needed!
+        // Never prematurely mark the run committed or wipe pendingApproval while a Risk Gate is queued or active.
+        const gatePendingOrQueued = Boolean(
+          pendingApprovalRef.current ||
+            deferredApprovalRef.current ||
+            runStatusRef.current === "awaiting" ||
+            queueRef.current.some((e) => e.type === "approval_needed")
+        );
+        if (!gatePendingOrQueued) {
+          if (modeRef.current === "demo") {
+            setStage((curr) => (curr === "commit" ? "commit" : curr ?? "commit"));
+            setRunStatus((curr) => (curr === "committed" ? "committed" : "committing"));
+            triggerCommitCelebration();
+            if (replayCommitTimerRef.current !== null) {
+              clearTimeout(replayCommitTimerRef.current);
             }
-            return curr;
-          });
-        }, 600);
+            replayCommitTimerRef.current = setTimeout(() => {
+              replayCommitTimerRef.current = null;
+              setRunStatus((curr) => {
+                if (curr === "committing" && !pendingApprovalRef.current && !deferredApprovalRef.current) {
+                  setStage("commit");
+                  setStageDone(true);
+                  setPendingApproval(null);
+                  return "committed";
+                }
+                return curr;
+              });
+            }, 600);
+          } else if (runStatusRef.current === "committing") {
+            setStage("commit");
+            triggerCommitCelebration();
+          }
+        }
         if (modeRef.current !== "demo") refreshState();
         break;
       }
@@ -1300,7 +1346,12 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           clearTimeout(replayCommitTimerRef.current);
           replayCommitTimerRef.current = null;
         }
-        const payload = ev.payload as { status?: string; outcome?: string; choice?: OperatorChoice };
+        const payload = ev.payload as {
+          status?: string;
+          outcome?: string;
+          choice?: OperatorChoice;
+          clean_audit?: boolean;
+        };
         const status = String(payload?.status ?? payload?.outcome ?? "");
         setRehearsalActive(false);
         if (status === "committed" || payload?.outcome === "committed" || status === "done" || payload?.outcome === "done") {
@@ -1316,7 +1367,9 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           setStageDone(true);
           setRunStatus("committed");
           setPendingApproval(null);
-          triggerCommitCelebration(payload?.choice);
+          if (!payload?.clean_audit) {
+            triggerCommitCelebration(payload?.choice);
+          }
           soundFx.playCommitSuccess();
         } else if (status === "aborted_by_human" || status === "blocked" || status === "timed_out" || status === "aborted" || status === "rejected") {
           setRunStatus("aborted");

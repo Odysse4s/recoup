@@ -90,7 +90,9 @@ export default function App() {
   const claimsRows = r.wsState?.tables?.claims ?? [];
   const latestClaim = claimsRows[claimsRows.length - 1];
   const committedClaimId =
-    r.runStatus === "committed" || claimsRows.length > 0 ? String(latestClaim?.id ?? "CLM-D-1042") : null;
+    !r.pendingApproval && (r.runStatus === "committed" || (r.runStatus === "idle" && claimsRows.length > 0))
+      ? String(latestClaim?.id ?? "CLM-D-1042")
+      : null;
   const desktopVoiceTurnHandler = r.sendDesktopVoiceTurn;
 
   return (

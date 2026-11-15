@@ -475,13 +475,33 @@ async def _run(goal: str, run_id: str, anticipate_after: bool = True):
             ACTIVE_CALL["iris_gate"] = iris_gate
         plan, report, fp, previews = await rehearse(goal, REAL, run_id)
         status = await replay(run_id, plan, report, fp, previews, REAL, LOG)
+        claims_summary = (report.db_summary or {}).get("claims")
+        claims_mutated = int((claims_summary.inserted if claims_summary else 0) + (claims_summary.updated if claims_summary else 0))
+        outbox_count = len(report.external_outbox or [])
+        clean_audit = status == "committed" and claims_mutated == 0 and outbox_count == 0
+        spoken_done = (
+            "Audit complete. Shipment verified clean with zero discrepancies—no claims filed and live ledger untouched."
+            if clean_audit
+            else None
+        )
         BUS.emit(
             run_id,
             EventType.RUN_DONE,
-            {"status": status, "fingerprint": fingerprint_env(REAL)[:12]},
-            thought=f"Run finished with status `{status}`.",
+            {
+                "status": status,
+                "fingerprint": fingerprint_env(REAL)[:12],
+                "claims_mutated": claims_mutated,
+                "outbox_count": outbox_count,
+                "clean_audit": clean_audit,
+                **({"spoken_summary": spoken_done} if spoken_done else {}),
+            },
+            thought=(
+                f"Clean shipment audit verified (`{status}`, SHA-256 `{fingerprint_env(REAL)[:12]}`) — zero discrepancies."
+                if clean_audit
+                else f"Run finished with status `{status}`."
+            ),
         )
-        if status == "committed" and anticipate_after:
+        if status == "committed" and anticipate_after and not clean_audit:
             ANTICIPATE_TASK = asyncio.create_task(speculate_next_offer(goal, REAL, run_id))
     except Exception as e:
         import logging

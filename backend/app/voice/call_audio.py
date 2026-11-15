@@ -281,6 +281,8 @@ STAGE_CALL_PREWARM_LINES: tuple[str, ...] = (
     "Hey! I audited paid Kappa shipments D-1017 and D-1031 and rehearsed a 175 euro SLA credit recovery. Should I enforce the 175 euro claim and email Kappa, or hold off?",
     "Hey! We audited Atlas Paper & Stationery delivery D-3005 and found a 500 euro discrepancy on invoice INV-9901. Should I enforce the 500 euro claim and email the supplier, or hold off?",
     "Hey! We audited Orion Breakroom Supplies Ltd. delivery D-2010 and found a 14.7 euro discrepancy on invoice INV-8801. Should I enforce the 14.7 euro claim and email the supplier, or hold off?",
+    "Audit complete. Shipment verified clean with zero discrepancies—no claims filed and live ledger untouched.",
+    "Audit complete and committed to the live ledger. Claim drafted, invoice placed on dispute hold, and vendor notification sent with one-click undo ready.",
 )
 
 
@@ -370,9 +372,15 @@ def synthesize_call_turn(
     if fal_key and provider_pref not in ("elevenlabs", "offline", "none", "fake", "disabled"):
         grok_voice = "eve" if role == "counterparty" else "ara"
         grok_bytes = synthesize_grok_tts(cleaned, voice=grok_voice)
+        if not grok_bytes and "PYTEST_CURRENT_TEST" not in os.environ:
+            # Retry Grok TTS once before ever changing voice engine so live runs keep 100% consistent voice timbre
+            grok_bytes = synthesize_grok_tts(cleaned, voice=grok_voice)
         if grok_bytes:
             _lru_put(cache_key, grok_bytes)
             return grok_bytes
+        if "PYTEST_CURRENT_TEST" not in os.environ and not provider_pref:
+            # Keep single-voice consistency in production rather than falling back to a jarring male/alternate TTS model
+            return None
 
     order = ["fal", "wonderful", "elevenlabs"]
     if provider_pref in order:

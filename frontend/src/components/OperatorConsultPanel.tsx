@@ -223,10 +223,11 @@ export function OperatorConsultPanel({
   const activeReqId = pendingApproval?.req_id ?? consult?.reqId ?? null;
 
   const hasCommitted = Boolean(
-    consult?.selectedChoice === "refund" ||
-      consult?.selectedChoice === "redelivery" ||
-      Boolean(committedClaimId) ||
-      consult?.end?.outcome === "accepted"
+    !pendingApproval &&
+      (consult?.selectedChoice === "refund" ||
+        consult?.selectedChoice === "redelivery" ||
+        Boolean(committedClaimId) ||
+        consult?.end?.outcome === "accepted")
   );
 
   // Check if call ended without decision while pendingApproval is still active
@@ -338,17 +339,19 @@ export function OperatorConsultPanel({
   }, [callLive, pendingApproval?.req_id]);
 
   const isExecutedLive = Boolean(
-    !consultSessionEnded &&
+    !pendingApproval &&
+      !consultSessionEnded &&
       (consult?.selectedChoice === "refund" || consult?.selectedChoice === "redelivery" || Boolean(committedClaimId)) &&
       (consult?.active || isConnected || isRinging)
   );
 
   const callCompleted = Boolean(
-    !callEndedWithoutDecision &&
+    !pendingApproval &&
+      !callEndedWithoutDecision &&
       !isExecutedLive &&
       (hasCommitted ||
-        (!pendingApproval && committedClaimId) ||
-        (!pendingApproval && consult?.selectedChoice && !consult?.active) ||
+        committedClaimId ||
+        (consult?.selectedChoice && !consult?.active) ||
         consult?.end?.outcome === "accepted")
   );
 

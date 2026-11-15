@@ -6,7 +6,6 @@ import {
   Loader2,
   Mic,
   Paperclip,
-  Sparkles,
   UploadCloud,
   Volume2,
   X,
@@ -479,7 +478,26 @@ export function CommandBar({
         {dragOver ? (
           <UploadCloud className="h-4 w-4 shrink-0 animate-bounce text-accent" />
         ) : (
-          <Sparkles className="h-4 w-4 shrink-0 text-accent" />
+          <span
+            aria-hidden="true"
+            className={cx(
+              "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border font-mono text-[11px] font-bold tracking-tighter transition-all duration-150 select-none",
+              busy
+                ? "border-accent/50 bg-accent/15 text-accent shadow-[0_0_12px_-2px_rgb(var(--accent)/0.45)]"
+                : focused
+                ? "border-accent/45 bg-accent/12 text-accent"
+                : "border-line-2 bg-surface-2/80 text-ink-2"
+            )}
+          >
+            {busy ? (
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-75" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-accent" />
+              </span>
+            ) : (
+              ">_"
+            )}
+          </span>
         )}
         <input
           ref={inputRef}
