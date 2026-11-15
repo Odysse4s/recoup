@@ -1260,6 +1260,7 @@ export function useAutoVad({
   const consecutiveBargeInFramesRef = useRef<number>(0);
   const lastContextResumeAttemptAtRef = useRef<number>(0);
   const noiseFloorRef = useRef<number>(0.01);
+  const speakingAmbientRmsRef = useRef<number>(0.025);
   const calibrationFramesRef = useRef<number>(0);
   const peakSpeechRmsRef = useRef<number>(0);
   const syncingSinceRef = useRef<number>(0);
@@ -1291,7 +1292,8 @@ export function useAutoVad({
         return;
       }
       agentSpeechStartedAtRef.current = now;
-      ttsStartGraceUntilRef.current = now + 220;
+      ttsStartGraceUntilRef.current = now + 340;
+      speakingAmbientRmsRef.current = Math.max(0.022, noiseFloorRef.current * 1.5);
       consecutiveBargeInFramesRef.current = 0;
       // Recoup began speaking: if we were hearing or manually recording, abort recording to avoid echo
       manualRecordingRef.current = false;
@@ -1530,12 +1532,17 @@ export function useAutoVad({
         return;
       }
 
-      // Compute time-domain RMS
+      // Compute time-domain RMS and waveform crest peak (close-mic proximity indicator)
       analyser.getFloatTimeDomainData(dataBuffer);
       let sumSquares = 0;
+      let maxAbsSample = 0;
       for (let i = 0; i < dataBuffer.length; i++) {
         const v = dataBuffer[i];
         sumSquares += v * v;
+        const absV = v < 0 ? -v : v;
+        if (absV > maxAbsSample) {
+          maxAbsSample = absV;
+        }
       }
       const rawRms = Math.sqrt(sumSquares / dataBuffer.length);
       const rms = Number.isFinite(rawRms) ? rawRms : 0;
@@ -1580,28 +1587,42 @@ export function useAutoVad({
       }
       const noiseFloor = noiseFloorRef.current;
 
-      // When Recoup is speaking: Live Full-Duplex Barge-In Gate
+      // When Recoup is speaking: High-Intensity Close-Mic Barge-In Gate (venue-noise immune)
       if (isAgentSpeaking) {
         consecutiveSpeechFramesRef.current = 0;
-        const graceUntil = Math.max(ttsStartGraceUntilRef.current, lastTtsAudioStartedAt + 220);
+        const graceUntil = Math.max(ttsStartGraceUntilRef.current, lastTtsAudioStartedAt + 340);
         if (now < graceUntil) {
+          // Sample live room + speakerphone ambient baseline before allowing interruption
+          speakingAmbientRmsRef.current =
+            speakingAmbientRmsRef.current * 0.82 + Math.max(0.018, Math.min(0.095, rms)) * 0.18;
           consecutiveBargeInFramesRef.current = 0;
           rafId = requestAnimationFrame(vadLoop);
           return;
         }
 
         const isMobileAec = mobileCallOwnsAudio;
-        const bargeThreshold = isMobileAec
-          ? Math.max(0.045, Math.min(0.08, noiseFloor * 3.0))
-          : Math.max(0.065, Math.min(0.1, noiseFloor * 3.6));
-        const isLoudRms = rms > bargeThreshold;
-        const isVocal = isMobileAec
-          ? (voiceBandRatio > 0.36 && peakBinEnergy > 22) || rms > 0.08
-          : (voiceBandRatio > 0.40 && peakBinEnergy > 26) || rms > 0.105;
-        const requiredFrames = isMobileAec ? 5 : 6;
+        if (rms < speakingAmbientRmsRef.current * 1.65 && consecutiveBargeInFramesRef.current === 0) {
+          speakingAmbientRmsRef.current =
+            speakingAmbientRmsRef.current * 0.96 + Math.max(0.018, Math.min(0.095, rms)) * 0.04;
+        }
+        const speakingFloor = speakingAmbientRmsRef.current;
 
-        if (isLoudRms && isVocal) {
-          consecutiveBargeInFramesRef.current += rms > bargeThreshold * 1.45 ? 2 : 1;
+        // Require loud, deliberate close-mic speech (~80% perceptual mic intensity) well above live room chatter:
+        // 1) High RMS (>= 0.115 AND >= 2.65x live speaking-phase room baseline)
+        // 2) High time-domain crest peak (>= 0.34 full-scale) from close-mouth proximity
+        // 3) Strong vocal-band harmonic concentration (peakBinEnergy >= 148/255 & voiceBandRatio >= 0.46)
+        // 4) Sustained intentional phrase (~150-180ms = 9 frames), rejecting transient claps/shouts
+        const bargeThreshold = isMobileAec
+          ? Math.max(0.115, Math.min(0.185, speakingFloor * 2.65))
+          : Math.max(0.13, Math.min(0.20, speakingFloor * 2.85));
+        const isHighVolumeRms = rms >= bargeThreshold;
+        const isHighCrestPeak = maxAbsSample >= (isMobileAec ? 0.34 : 0.38);
+        const isStrongCloseVocal =
+          voiceBandRatio >= 0.46 && peakBinEnergy >= (isMobileAec ? 148 : 158);
+        const requiredFrames = isMobileAec ? 9 : 10;
+
+        if (isHighVolumeRms && isHighCrestPeak && isStrongCloseVocal) {
+          consecutiveBargeInFramesRef.current += 1;
           if (consecutiveBargeInFramesRef.current >= requiredFrames) {
             consecutiveBargeInFramesRef.current = 0;
             agentSpeakingRef.current = false;
@@ -1610,8 +1631,12 @@ export function useAutoVad({
             onBargeInRef.current?.();
             startRecordingUtterance(now, rms);
           }
-        } else {
+        } else if (rms >= bargeThreshold * 0.75 && voiceBandRatio >= 0.40) {
+          // Brief consonant dip inside loud close-mic speech
           consecutiveBargeInFramesRef.current = Math.max(0, consecutiveBargeInFramesRef.current - 1);
+        } else {
+          // Fast decay on room chatter or transient noise spikes
+          consecutiveBargeInFramesRef.current = Math.max(0, consecutiveBargeInFramesRef.current - 2);
         }
 
         rafId = requestAnimationFrame(vadLoop);
