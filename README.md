@@ -2,6 +2,8 @@
 
 **Safety-first enterprise agent runtime for vendor audits, isolated ERP rehearsal, live voice governance, and reversible recovery.**
 
+📄 **[Pitch Deck (PDF)](docs/Recoup_GenAISummit_PitchDeck.pdf)**
+
 Enterprise finance and procurement teams lose thousands every month to vendor shipments that arrive short, damaged, past SLA, or billed above contracted rates — yet enterprises cannot let autonomous AI agents mutate production ERP ledgers, file tax credits, or contact external suppliers without deterministic guardrails.
 
 Recoup is a **rehearsal-first enterprise agent runtime** engineered so finance operations can trust autonomous execution:
