@@ -665,7 +665,20 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   const openForged = useCallback(
     (name: string) => {
       const ft = forgedCode[name];
-      if (ft) spawnWindow({ ...forgeWindow(ft), manual: true, origin: "vault" });
+      if (!ft) return;
+      const inspectId = `forge-inspect-${ft.name}`;
+      setWindows((ws) =>
+        ws.filter((w) => w.id !== inspectId && !(w.kind === "forge" && w.toolName === ft.name))
+      );
+      spawnWindow({
+        ...forgeWindow(ft),
+        id: inspectId,
+        manual: true,
+        pinned: true,
+        instant: true,
+        origin: "vault",
+        target: "vault",
+      });
     },
     [forgedCode, spawnWindow]
   );

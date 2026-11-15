@@ -809,9 +809,17 @@ function OperatorEscalationCall({
     [callKey, claimId, committedChoiceInCall, onEndWithoutDecision, onSetLocalCompletion, r, reqId, showActionToast, streamAgentTurn]
   );
 
+  const vadPhaseResetRef = useRef<(() => void) | null>(null);
+  const utteranceAbortRef = useRef<AbortController | null>(null);
+
   // Dispatch audio recorded by Auto-VAD to /api/call/user-respond
   const handleUtteranceBlob = useCallback(
-    async (blob: Blob, mimeType: string, ext: string) => {
+    async (blob: Blob, _mimeType: string, ext: string) => {
+      utteranceAbortRef.current?.abort();
+      const abortCtrl = new AbortController();
+      utteranceAbortRef.current = abortCtrl;
+      const timeoutId = window.setTimeout(() => abortCtrl.abort(), 8500);
+
       setSubmitting(true);
       buzz(25);
       try {
@@ -824,11 +832,13 @@ function OperatorEscalationCall({
         const res = await fetch("/api/call/user-respond", {
           method: "POST",
           body: form,
+          signal: abortCtrl.signal,
         });
 
         if (res.ok) {
           const body = (await res.json()) as UserRespondApiBody & { ignored_noise?: boolean };
           if (body.ignored_noise) {
+            showActionToast("Background noise ignored — speak closer or tap orb");
             return;
           }
           processRespondResponse(body, null, body.transcript?.trim() || "");
@@ -849,6 +859,8 @@ function OperatorEscalationCall({
             "refund",
             "Demand the 587 euro refund"
           );
+        } else {
+          showActionToast("Sync interrupted — tap orb or speak again");
         }
       } catch (err) {
         console.warn("Failed sending utterance", err);
@@ -865,12 +877,19 @@ function OperatorEscalationCall({
             "refund",
             "Demand the 587 euro refund"
           );
+        } else {
+          showActionToast("Loud room / slow link — ready to listen again");
         }
       } finally {
+        window.clearTimeout(timeoutId);
+        if (utteranceAbortRef.current === abortCtrl) {
+          utteranceAbortRef.current = null;
+        }
         setSubmitting(false);
+        vadPhaseResetRef.current?.();
       }
     },
-    [claimId, consult?.callId, processRespondResponse, r.mode, reqId]
+    [claimId, consult?.callId, processRespondResponse, r.mode, reqId, showActionToast]
   );
 
   // Auto-VAD hook attached to warm MediaStream
@@ -887,6 +906,11 @@ function OperatorEscalationCall({
       handleUtteranceBlob(blob, mimeType, ext);
     },
   });
+  vadPhaseResetRef.current = () => {
+    if (!resolvedEnd) {
+      vad.setPhase("listening");
+    }
+  };
 
   // Tapping "Accept Call" on Ringing Screen
   const handleAcceptCall = useCallback(async () => {
@@ -1356,7 +1380,12 @@ function OperatorEscalationCall({
               type="button"
               onClick={() => {
                 soundFx.playUiClick();
-                if (isSpeaking) {
+                if (isSyncing) {
+                  // Instant escape hatch if venue Wi-Fi / noisy upload stalls
+                  utteranceAbortRef.current?.abort();
+                  setSubmitting(false);
+                  vad.setPhase("listening");
+                } else if (isSpeaking) {
                   // Interruption / Barge-in
                   stopSpeaking();
                   vad.setPhase("listening");
@@ -1456,7 +1485,7 @@ function OperatorEscalationCall({
                 : (isHearing || vad.manualRecording)
                 ? "Auto-sends on pause · or tap orb to send now"
                 : isSyncing
-                ? "Wizper STT & desktop synchronization in progress…"
+                ? "Syncing with desktop… (tap orb to cancel & speak again)"
                 : "Live Full-Duplex · Speak anytime to interrupt"}
             </p>
           </div>

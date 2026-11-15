@@ -262,8 +262,8 @@ function DatabaseRowMorphVisual({
           className={cx(
             "inline-flex items-center gap-1 rounded px-1.5 py-0.2 text-[9px] font-bold tracking-wider transition-all duration-300",
             isCommit
-              ? "border border-emerald-400/80 bg-emerald-950/80 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.35)] animate-pulse"
-              : "border border-cyan-400/50 bg-cyan-950/60 text-cyan-300"
+              ? "border border-emerald-600/50 bg-emerald-50 text-emerald-800 dark:border-emerald-400/80 dark:bg-emerald-950/80 dark:text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.25)] animate-pulse"
+              : "border border-sky-600/40 bg-sky-50 text-sky-800 dark:border-cyan-400/50 dark:bg-cyan-950/60 dark:text-cyan-300"
           )}
         >
           {isCommit ? "⚡ LIVE ERP COMMIT" : "STAGE IN CLONE"}
@@ -295,13 +295,13 @@ function DatabaseRowMorphVisual({
             <div className="text-[9px] uppercase text-ink-3">Status Mutation</div>
             <div className="flex items-center gap-1">
               {!morphed ? (
-                <span className="inline-flex items-center rounded border border-slate-700 bg-slate-800/90 px-1 py-0.2 text-[9px] font-medium text-slate-300">
+                <span className="inline-flex items-center rounded border border-line-strong bg-surface px-1 py-0.2 text-[9px] font-medium text-ink-2 dark:border-slate-700 dark:bg-slate-800/90 dark:text-slate-300">
                   {mutation.beforeStatus ?? "active"}
                 </span>
               ) : (
                 <div className="flex items-center gap-1">
                   {mutation.beforeStatus && (
-                    <span className="text-[9px] text-rose-400/70 line-through">
+                    <span className="text-[9px] text-danger/75 line-through">
                       {mutation.beforeStatus}
                     </span>
                   )}
@@ -309,8 +309,8 @@ function DatabaseRowMorphVisual({
                     className={cx(
                       "inline-flex items-center gap-1 rounded border px-1 py-0.2 text-[9.5px] font-bold shadow-sm transition-all duration-300",
                       isCommit
-                        ? "border-emerald-500/80 bg-emerald-500/20 text-emerald-300 shadow-[0_0_8px_rgba(16,185,129,0.4)]"
-                        : "border-amber-500/80 bg-amber-500/20 text-amber-300"
+                        ? "border-emerald-600/60 bg-emerald-500/15 text-emerald-800 dark:border-emerald-500/80 dark:bg-emerald-500/20 dark:text-emerald-300 shadow-[0_0_8px_rgba(16,185,129,0.28)]"
+                        : "border-amber-600/60 bg-amber-500/15 text-amber-800 dark:border-amber-500/80 dark:bg-amber-500/20 dark:text-amber-300"
                     )}
                   >
                     {mutation.afterStatus}
@@ -322,9 +322,9 @@ function DatabaseRowMorphVisual({
         </div>
 
         {mutation.amount && (
-          <div className="mt-1 flex items-center justify-between border-t border-line/40 pt-1 text-[9.5px]">
+          <div className="mt-1 flex items-center justify-between border-t border-line/50 pt-1 text-[9.5px]">
             <span className="text-ink-3">Mutation Ledger Impact:</span>
-            <span className="font-bold text-emerald-400">{mutation.amount}</span>
+            <span className="font-bold text-ok dark:text-emerald-400">{mutation.amount}</span>
           </div>
         )}
       </div>
@@ -637,9 +637,9 @@ function LiveWindowCard({
     }
   }, [progress, phase, win.kind]);
 
-  // Stage 3 — hold: auto-dock into destination unless pinned OR focus-locked
+  // Stage 3 — hold: auto-dock into destination unless pinned, manually inspected, OR focus-locked
   useEffect(() => {
-    if (phase !== "hold" || win.pinned || isFocusLocked) return;
+    if (phase !== "hold" || win.pinned || win.manual || isFocusLocked) return;
     const isForge = win.kind === "forge";
     const holdDuration = isForge
       ? (paceRef.current.forgeHoldMs ?? 2200)
@@ -647,7 +647,7 @@ function LiveWindowCard({
     const t = window.setTimeout(() => dock(), holdDuration);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, win.pinned, isFocusLocked, win.kind]);
+  }, [phase, win.pinned, win.manual, isFocusLocked, win.kind]);
 
   // Scroll to bottom while typing
   useEffect(() => {
@@ -802,18 +802,29 @@ function LiveWindowCard({
       <div className="relative flex h-8 items-center gap-2 border-b border-line bg-sunken/85 px-3">
         <div className="flex items-center gap-1.5">
           <button
-            aria-label="Dock window now"
-            title="Dock window now"
+            aria-label="Close window"
+            title="Close & return to panel"
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation();
               dock();
             }}
-            className="flex h-3 w-3 items-center justify-center rounded-full bg-[#ff5f57] ring-1 ring-black/10 hover:brightness-110 active:scale-90 text-[8px] font-bold text-black/60 leading-none"
+            className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-[#ff5f57] ring-1 ring-black/15 hover:brightness-110 active:scale-90 text-[9px] font-bold text-black/70 leading-none"
           >
             ×
           </button>
-          <span className="h-3 w-3 rounded-full bg-[#febc2e] ring-1 ring-black/10" />
+          <button
+            aria-label="Minimize back to toolbox"
+            title="Minimize back to toolbox"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              dock();
+            }}
+            className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-[#febc2e] ring-1 ring-black/15 hover:brightness-110 active:scale-90 text-[9px] font-bold text-black/70 leading-none"
+          >
+            −
+          </button>
           <span className="h-3 w-3 rounded-full bg-[#28c840] ring-1 ring-black/10" />
         </div>
 
@@ -830,26 +841,41 @@ function LiveWindowCard({
           )}
         >
           {typing && !win.pinned && <span className={cx("h-1.5 w-1.5 rounded-full animate-pulse", TONE[status.tone].dot)} />}
-          {status.label}
+          {win.manual ? "INSPECTING" : status.label}
         </span>
 
-        <button
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            soundFx.playUiClick();
-            onTogglePin(win.id);
-          }}
-          aria-pressed={win.pinned}
-          title={win.pinned ? "Resume (unpin)" : "Pause & pin window open"}
-          className={cx(
-            "inline-flex h-5 items-center gap-1 rounded border px-1.5 text-[10px] font-medium transition-colors",
-            win.pinned ? "border-accent/40 bg-accent/10 text-accent" : "border-line text-ink-3 hover:text-ink"
-          )}
-        >
-          {win.pinned ? <PinOff className="h-2.5 w-2.5" /> : <Pin className="h-2.5 w-2.5" />}
-          {win.pinned ? "Resume" : "Pin"}
-        </button>
+        {win.manual ? (
+          <button
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              soundFx.playUiClick();
+              dock();
+            }}
+            title="Minimize back into Toolbox"
+            className="inline-flex h-5 items-center gap-1 rounded border border-forge/45 bg-forge/12 px-2 text-[10px] font-semibold text-forge transition-colors hover:bg-forge/20"
+          >
+            <span>Minimize ↙</span>
+          </button>
+        ) : (
+          <button
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              soundFx.playUiClick();
+              onTogglePin(win.id);
+            }}
+            aria-pressed={win.pinned}
+            title={win.pinned ? "Resume (unpin)" : "Pause & pin window open"}
+            className={cx(
+              "inline-flex h-5 items-center gap-1 rounded border px-1.5 text-[10px] font-medium transition-colors",
+              win.pinned ? "border-accent/40 bg-accent/10 text-accent" : "border-line text-ink-3 hover:text-ink"
+            )}
+          >
+            {win.pinned ? <PinOff className="h-2.5 w-2.5" /> : <Pin className="h-2.5 w-2.5" />}
+            {win.pinned ? "Resume" : "Pin"}
+          </button>
+        )}
       </div>
 
       {/* Security seal strip for Forged Python Tools */}
@@ -884,8 +910,8 @@ function LiveWindowCard({
           {/* Left IDE Code Editor (64%) */}
           <div className="relative flex flex-col bg-code border-b md:border-b-0 md:border-r border-line">
             <div className="flex items-center justify-between border-b border-line/60 bg-sunken/60 px-2.5 py-1 font-mono text-[10px] text-ink-3">
-              <span className="flex items-center gap-1 text-purple-300 font-semibold truncate">
-                <FileCode2 className="h-3 w-3 text-purple-400 shrink-0" />
+              <span className="flex items-center gap-1 text-purple-700 dark:text-purple-300 font-semibold truncate">
+                <FileCode2 className="h-3 w-3 text-purple-600 dark:text-purple-400 shrink-0" />
                 tools/{win.toolName || "compute_supplier_claim"}.py
               </span>
               <span className="text-[9.5px] text-ink-3 shrink-0">{pct}%</span>

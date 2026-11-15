@@ -273,9 +273,9 @@ export function ForgeVault({
                 animate={{ scale: [1, 1.08, 1], opacity: 1, y: 0 }}
                 exit={{ scale: 0.8, opacity: 0 }}
                 transition={{ duration: 0.35 }}
-                className="inline-flex h-5 items-center gap-1 rounded-md border border-emerald-400 bg-emerald-500/20 px-2 font-mono text-[10px] font-bold tracking-wider text-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.5)]"
+                className="inline-flex h-5 items-center gap-1 rounded-md border border-emerald-500/60 bg-emerald-500/15 px-2 font-mono text-[10px] font-bold tracking-wider text-emerald-700 dark:border-emerald-400 dark:bg-emerald-500/20 dark:text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.35)]"
               >
-                <Sparkles className="h-3 w-3 animate-spin text-amber-300" />
+                <Sparkles className="h-3 w-3 animate-spin text-amber-600 dark:text-amber-300" />
                 +1 NEW TOOL ADDED
               </motion.span>
             ) : (

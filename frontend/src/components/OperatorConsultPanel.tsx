@@ -848,12 +848,12 @@ export function OperatorConsultPanel({
         <div className="space-y-2 p-2.5">
           {/* Oumi Iris System-1 Scorecard */}
           {irisGate && (
-            <div className="flex h-6 items-center justify-between rounded border border-emerald-500/30 bg-emerald-950/25 px-2 font-mono text-[10.5px]">
+            <div className="flex h-6 items-center justify-between rounded border border-emerald-600/35 bg-emerald-50/90 dark:border-emerald-500/30 dark:bg-emerald-950/25 px-2 font-mono text-[10.5px]">
               <div className="flex items-center gap-1.5 truncate">
-                <span className="font-bold tracking-tight text-emerald-400">⚡ OUMI IRIS · SYSTEM-1</span>
+                <span className="font-bold tracking-tight text-emerald-700 dark:text-emerald-400">⚡ OUMI IRIS · SYSTEM-1</span>
                 <span className="text-ink-3">·</span>
                 <span className="text-ink-2">
-                  Hold Gate: <span className="font-semibold text-emerald-300">{(irisGate.gate_probability * 100).toFixed(1)}%</span>
+                  Hold Gate: <span className="font-semibold text-emerald-800 dark:text-emerald-300">{(irisGate.gate_probability * 100).toFixed(1)}%</span>
                 </span>
                 <span className="text-ink-3">·</span>
                 <span className="text-ink-2">
@@ -861,13 +861,13 @@ export function OperatorConsultPanel({
                 </span>
                 <span className="text-ink-3">·</span>
                 <span className="text-ink-2">
-                  Risk: <span className="font-semibold text-amber-400">{irisGate.risk_score.toFixed(1)}/{irisGate.risk_max}</span>
+                  Risk: <span className="font-semibold text-amber-700 dark:text-amber-400">{irisGate.risk_score.toFixed(1)}/{irisGate.risk_max}</span>
                 </span>
               </div>
               <div className="ml-1.5 shrink-0">
                 {irisGate.live ? (
-                  <span className="inline-flex items-center gap-1 rounded bg-emerald-500/20 px-1.5 py-0.5 text-[9.5px] font-medium text-emerald-300 ring-1 ring-emerald-500/40">
-                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="inline-flex items-center gap-1 rounded bg-emerald-600/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-800 ring-1 ring-emerald-600/35 dark:bg-emerald-500/20 dark:font-medium dark:text-emerald-300 dark:ring-emerald-500/40">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-600 dark:bg-emerald-400 animate-pulse" />
                     LIVE · 0 OUT-TOK · {irisGate.latency_ms}ms
                   </span>
                 ) : (
@@ -882,7 +882,7 @@ export function OperatorConsultPanel({
           {/* 1. Live Call Banner OR Prominent Laptop Voice & iPhone Transfer Actions */}
           {isExecutedLive ? (
             <div className="space-y-1.5">
-              <div className="flex h-7 items-center justify-between rounded-lg border border-ok/70 bg-ok/15 px-2.5 text-[11.5px] shadow-[0_0_12px_rgba(16,185,129,0.25)]">
+              <div className="flex h-7 items-center justify-between rounded-lg border border-ok/70 bg-ok/15 px-2.5 text-[11.5px] shadow-[0_0_12px_rgba(16,185,129,0.2)]">
                 <div className="flex min-w-0 items-center gap-1.5 font-bold text-ok">
                   <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-ok" />
                   <span className="truncate">
@@ -905,7 +905,7 @@ export function OperatorConsultPanel({
               </div>
 
               {!isPhoneTransferred && !consultSessionEnded && (
-                <div className="space-y-1 rounded-xl border border-emerald-500/35 bg-surface/65 p-1.5">
+                <div className="space-y-1 rounded-xl border border-emerald-500/40 bg-sunken/70 dark:bg-surface/65 p-1.5">
                   <div className="flex items-center justify-between gap-1.5">
                     <button
                       type="button"
@@ -913,8 +913,8 @@ export function OperatorConsultPanel({
                       className={cx(
                         "flex min-w-0 items-center gap-1.5 rounded-lg border px-2 py-0.5 text-[10.5px] font-semibold transition-all",
                         laptopMicOn
-                          ? "border-emerald-500/60 bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/40"
-                          : "border-cyan-500/40 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20"
+                          ? "border-emerald-600/50 bg-emerald-500/15 text-emerald-800 ring-1 ring-emerald-500/35 dark:border-emerald-500/60 dark:text-emerald-300 dark:ring-emerald-500/40"
+                          : "border-sky-600/40 bg-sky-500/10 text-sky-800 hover:bg-sky-500/20 dark:border-cyan-500/40 dark:bg-cyan-500/10 dark:text-cyan-300 dark:hover:bg-cyan-500/20"
                       )}
                     >
                       <Mic className={cx("h-3 w-3 shrink-0", laptopMicOn && "animate-pulse")} />
@@ -1019,13 +1019,13 @@ export function OperatorConsultPanel({
               <span className="font-mono text-[10px] text-ink-3">/mobile</span>
             </div>
           ) : callCompleted ? (
-            <div className="rounded-xl border border-ok/75 bg-gradient-to-r from-emerald-950/60 via-ok/15 to-emerald-950/60 p-2.5 shadow-[0_0_18px_rgba(16,185,129,0.22)] ring-1 ring-ok/45 space-y-1.5">
+            <div className="rounded-xl border border-emerald-500/65 bg-gradient-to-r from-emerald-50 via-emerald-100/75 to-teal-50 dark:border-ok/75 dark:from-emerald-950/60 dark:via-ok/15 dark:to-emerald-950/60 p-2.5 shadow-[0_0_18px_rgba(16,185,129,0.16)] ring-1 ring-ok/35 space-y-1.5">
               <div className="flex items-center justify-between gap-2">
-                <div className="flex min-w-0 items-center gap-1.5 text-[12px] font-bold text-ok">
+                <div className="flex min-w-0 items-center gap-1.5 text-[12px] font-bold text-emerald-800 dark:text-ok">
                   <CheckCircle2 className="h-4 w-4 shrink-0 text-ok" />
                   <span className="truncate">Process Finished Cleanly — Live ERP Updated</span>
                 </div>
-                <span className="shrink-0 rounded-md border border-ok/50 bg-ok/20 px-1.5 py-0.5 font-mono text-[9.5px] font-bold text-ok">
+                <span className="shrink-0 rounded-md border border-emerald-600/40 bg-emerald-600/15 dark:border-ok/50 dark:bg-ok/20 px-1.5 py-0.5 font-mono text-[9.5px] font-bold text-emerald-800 dark:text-ok">
                   ✓ MIC OFF · DONE
                 </span>
               </div>
@@ -1033,33 +1033,33 @@ export function OperatorConsultPanel({
                 {isKappa ? (
                   resolvedChoice === "redelivery" ? (
                     <>
-                      <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ 22 Hubs Redelivery</span>
-                      <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ €202.30 Credit</span>
-                      <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ AADE 9.3 XML</span>
-                      <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ Kappa Emailed</span>
+                      <span className="rounded border border-ok/40 bg-surface/95 px-1.5 py-0.5 font-semibold text-emerald-800 dark:text-ok">✓ 22 Hubs Redelivery</span>
+                      <span className="rounded border border-ok/40 bg-surface/95 px-1.5 py-0.5 font-semibold text-emerald-800 dark:text-ok">✓ €202.30 Credit</span>
+                      <span className="rounded border border-ok/40 bg-surface/95 px-1.5 py-0.5 font-semibold text-emerald-800 dark:text-ok">✓ AADE 9.3 XML</span>
+                      <span className="rounded border border-ok/40 bg-surface/95 px-1.5 py-0.5 font-semibold text-emerald-800 dark:text-ok">✓ Kappa Emailed</span>
                     </>
                   ) : (
                     <>
-                      <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ €587.30 Claim</span>
-                      <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ INV-7781 Frozen</span>
-                      <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ AADE 5.1 XML</span>
-                      <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ Kappa Emailed</span>
+                      <span className="rounded border border-ok/40 bg-surface/95 px-1.5 py-0.5 font-semibold text-emerald-800 dark:text-ok">✓ €587.30 Claim</span>
+                      <span className="rounded border border-ok/40 bg-surface/95 px-1.5 py-0.5 font-semibold text-emerald-800 dark:text-ok">✓ INV-7781 Frozen</span>
+                      <span className="rounded border border-ok/40 bg-surface/95 px-1.5 py-0.5 font-semibold text-emerald-800 dark:text-ok">✓ AADE 5.1 XML</span>
+                      <span className="rounded border border-ok/40 bg-surface/95 px-1.5 py-0.5 font-semibold text-emerald-800 dark:text-ok">✓ Kappa Emailed</span>
                     </>
                   )
                 ) : (
                   <>
-                    <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">
+                    <span className="rounded border border-ok/40 bg-surface/95 px-1.5 py-0.5 font-semibold text-emerald-800 dark:text-ok">
                       ✓ {claimId} {formattedClaimAmount}
                     </span>
-                    <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ AADE XML Filed</span>
-                    <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ Supplier Emailed</span>
+                    <span className="rounded border border-ok/40 bg-surface/95 px-1.5 py-0.5 font-semibold text-emerald-800 dark:text-ok">✓ AADE XML Filed</span>
+                    <span className="rounded border border-ok/40 bg-surface/95 px-1.5 py-0.5 font-semibold text-emerald-800 dark:text-ok">✓ Supplier Emailed</span>
                   </>
                 )}
               </div>
             </div>
           ) : (
             /* Prominent Laptop Voice & iPhone Transfer Action Bar on Decision Gate */
-            <div className="space-y-1.5 rounded-xl border border-cyan-500/35 bg-gradient-to-r from-cyan-950/40 via-surface/60 to-cyan-950/40 p-2 shadow-[0_0_16px_rgba(6,182,212,0.1)] ring-1 ring-cyan-500/20">
+            <div className="space-y-1.5 rounded-xl border border-sky-500/35 bg-gradient-to-r from-sky-50/90 via-surface to-indigo-50/70 dark:border-cyan-500/35 dark:from-cyan-950/40 dark:via-surface/60 dark:to-cyan-950/40 p-2 shadow-[0_0_16px_rgba(6,182,212,0.08)] ring-1 ring-sky-500/15 dark:ring-cyan-500/20">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {/* 1. Talk on Laptop Button */}
                 <button
@@ -1068,8 +1068,8 @@ export function OperatorConsultPanel({
                   className={cx(
                     "group flex items-center justify-between rounded-lg border p-2 text-left transition-all",
                     laptopMicOn
-                      ? "border-emerald-500/60 bg-emerald-500/15 shadow-[0_0_12px_rgba(16,185,129,0.25)] ring-1 ring-emerald-500/50"
-                      : "border-cyan-500/40 bg-cyan-500/10 hover:border-cyan-400 hover:bg-cyan-500/20 hover:shadow-[0_0_12px_rgba(6,182,212,0.2)]"
+                      ? "border-emerald-500/60 bg-emerald-500/12 dark:bg-emerald-500/15 shadow-[0_0_12px_rgba(16,185,129,0.2)] ring-1 ring-emerald-500/50"
+                      : "border-sky-500/40 bg-sky-500/8 hover:border-sky-500/70 hover:bg-sky-500/15 dark:border-cyan-500/40 dark:bg-cyan-500/10 dark:hover:border-cyan-400 dark:hover:bg-cyan-500/20 hover:shadow-[0_0_12px_rgba(6,182,212,0.18)]"
                   )}
                 >
                   <div className="flex items-center gap-2 min-w-0">
@@ -1077,17 +1077,17 @@ export function OperatorConsultPanel({
                       className={cx(
                         "flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition-transform group-hover:scale-105",
                         laptopMicOn
-                          ? "bg-emerald-500/25 text-emerald-300 ring-1 ring-emerald-400/50"
-                          : "bg-cyan-500/20 text-cyan-300 ring-1 ring-cyan-400/40"
+                          ? "bg-emerald-500/20 text-emerald-700 ring-1 ring-emerald-500/40 dark:bg-emerald-500/25 dark:text-emerald-300 dark:ring-emerald-400/50"
+                          : "bg-sky-500/15 text-sky-700 ring-1 ring-sky-500/35 dark:bg-cyan-500/20 dark:text-cyan-300 dark:ring-cyan-400/40"
                       )}
                     >
-                      <Mic className={cx("h-4 w-4", laptopMicOn ? "animate-pulse text-emerald-400" : "text-cyan-300")} />
+                      <Mic className={cx("h-4 w-4", laptopMicOn ? "animate-pulse text-emerald-600 dark:text-emerald-400" : "text-sky-700 dark:text-cyan-300")} />
                     </div>
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5 text-[11px] font-bold text-ink">
                         <span>{laptopMicOn ? "🎙️ Mic Active (Listening)" : "🎙️ Talk on Laptop"}</span>
                         {sttSubmitting && (
-                          <span className="font-mono text-[9px] text-amber-300 animate-pulse">
+                          <span className="font-mono text-[9px] text-amber-700 dark:text-amber-300 animate-pulse">
                             (Transcribing…)
                           </span>
                         )}
@@ -1101,7 +1101,7 @@ export function OperatorConsultPanel({
                     {laptopMicOn ? (
                       <VoiceOrb variant="bars" tone="ok" className="h-3 w-8" />
                     ) : (
-                      <span className="rounded bg-cyan-400/20 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-cyan-300 ring-1 ring-cyan-400/30">
+                      <span className="rounded bg-sky-500/15 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-sky-800 ring-1 ring-sky-500/30 dark:bg-cyan-400/20 dark:text-cyan-300 dark:ring-cyan-400/30">
                         Talk
                       </span>
                     )}
@@ -1113,27 +1113,27 @@ export function OperatorConsultPanel({
                   type="button"
                   disabled={isDialing}
                   onClick={handleTransferToPhone}
-                  className="group flex items-center justify-between rounded-lg border border-purple-500/40 bg-purple-500/10 p-2 text-left transition-all hover:border-purple-400 hover:bg-purple-500/20 hover:shadow-[0_0_12px_rgba(168,85,247,0.2)] disabled:opacity-60"
+                  className="group flex items-center justify-between rounded-lg border border-purple-500/40 bg-purple-500/8 hover:border-purple-500/70 hover:bg-purple-500/15 dark:bg-purple-500/10 dark:hover:border-purple-400 dark:hover:bg-purple-500/20 p-2 text-left transition-all hover:shadow-[0_0_12px_rgba(168,85,247,0.18)] disabled:opacity-60"
                 >
                   <div className="flex items-center gap-2 min-w-0">
-                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-purple-500/20 text-purple-300 ring-1 ring-purple-400/40 transition-transform group-hover:scale-105">
-                      <Smartphone className="h-4 w-4 text-purple-300" />
+                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-purple-500/15 text-purple-700 ring-1 ring-purple-500/35 dark:bg-purple-500/20 dark:text-purple-300 dark:ring-purple-400/40 transition-transform group-hover:scale-105">
+                      <Smartphone className="h-4 w-4 text-purple-700 dark:text-purple-300" />
                     </div>
                     <div className="min-w-0">
-                      <div className="flex items-center gap-1.5 text-[11px] font-bold text-purple-200">
+                      <div className="flex items-center gap-1.5 text-[11px] font-bold text-purple-900 dark:text-purple-200">
                         <span>📲 Transfer to iPhone</span>
                         {isDialing && (
-                          <span className="font-mono text-[9px] font-semibold text-purple-300 animate-pulse">
+                          <span className="font-mono text-[9px] font-semibold text-purple-700 dark:text-purple-300 animate-pulse">
                             (Dialing…)
                           </span>
                         )}
                       </div>
-                      <p className="truncate text-[9px] text-purple-300/80">
+                      <p className="truncate text-[9px] text-purple-700/85 dark:text-purple-300/80">
                         Continue on /mobile with Grok Voice
                       </p>
                     </div>
                   </div>
-                  <div className="ml-1.5 flex shrink-0 items-center gap-1 rounded bg-purple-400/20 px-1.5 py-0.5 font-mono text-[9.5px] font-semibold text-purple-300 ring-1 ring-purple-400/30">
+                  <div className="ml-1.5 flex shrink-0 items-center gap-1 rounded bg-purple-500/15 px-1.5 py-0.5 font-mono text-[9.5px] font-semibold text-purple-800 ring-1 ring-purple-500/30 dark:bg-purple-400/20 dark:text-purple-300 dark:ring-purple-400/30">
                     <PhoneCall className="h-2.5 w-2.5" />
                     <span>{isDialing ? "Calling…" : "Call"}</span>
                   </div>
@@ -1141,14 +1141,14 @@ export function OperatorConsultPanel({
               </div>
 
               {/* Quick-Ask Voice Hint Chips & Compact Quick-Ask Input */}
-              <div className="pt-1 border-t border-line/40 space-y-1.5">
+              <div className="pt-1 border-t border-line/50 space-y-1.5">
                 <div className="flex items-center justify-between gap-1">
                   <span className="text-[10px] font-medium text-ink-3">Try speaking or click to ask:</span>
                   {laptopMicOn && (
                     <button
                       type="button"
                       onClick={() => vad.sendNow()}
-                      className="inline-flex items-center gap-1 rounded bg-emerald-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-300 hover:bg-emerald-500/30"
+                      className="inline-flex items-center gap-1 rounded bg-emerald-600/15 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-800 hover:bg-emerald-600/25 dark:bg-emerald-500/20 dark:text-emerald-300 dark:hover:bg-emerald-500/30"
                     >
                       <Send className="h-2.5 w-2.5" />
                       Send Utterance
@@ -1387,18 +1387,18 @@ export function OperatorConsultPanel({
                               <span>{lastTurnWords.slice(0, visibleWordCount).join(" ")}</span>
                             )}
                             <span
-                              className="ml-1 inline-flex items-center gap-1 font-mono text-[11px] text-emerald-400 select-none"
+                              className="ml-1 inline-flex items-center gap-1 font-mono text-[11px] text-emerald-700 dark:text-emerald-400 select-none"
                               aria-hidden="true"
                             >
-                              <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                              <span className="animate-pulse text-cyan-400">▋</span>
+                              <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-600 dark:bg-emerald-400 animate-pulse" />
+                              <span className="animate-pulse text-sky-600 dark:text-cyan-400">▋</span>
                             </span>
                           </p>
                         ) : (
                           <p className="text-ink-2">{turn.text}</p>
                         )}
                         {isUser && turn.irisIntent && (
-                          <div className="mt-1 flex items-center gap-1 font-mono text-[9px] text-emerald-400">
+                          <div className="mt-1 flex items-center gap-1 font-mono text-[9px] font-semibold text-emerald-700 dark:font-normal dark:text-emerald-400">
                             <span>⚡ Iris → {turn.irisIntent.intent} ({Math.round(turn.irisIntent.confidence * 100)}%) · 0 out-tok</span>
                           </div>
                         )}

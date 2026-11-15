@@ -871,7 +871,7 @@ export function DatabaseStudio({
           <table className="w-full border-separate border-spacing-0 text-[12px]" style={{ perspective: 800 }}>
             <thead>
               <tr>
-                <th className="sticky top-0 z-10 w-[92px] border-b border-line bg-surface px-3 py-2 text-left font-mono text-[10px] font-medium uppercase tracking-wider text-ink-3">
+                <th className="sticky top-0 z-10 w-[92px] border-b border-line-strong/60 bg-sunken/90 backdrop-blur-sm px-3 py-2 text-left font-mono text-[10px] font-semibold uppercase tracking-wider text-ink-3">
                   Δ
                 </th>
                 {cols.map((c) => {
@@ -879,7 +879,7 @@ export function DatabaseStudio({
                   return (
                     <th
                       key={c}
-                      className="sticky top-0 z-10 whitespace-nowrap border-b border-line bg-surface px-3 py-2 text-left font-mono text-[10.5px] font-semibold tracking-wider text-ink-2"
+                      className="sticky top-0 z-10 whitespace-nowrap border-b border-line-strong/60 bg-sunken/90 backdrop-blur-sm px-3 py-2 text-left font-mono text-[10.5px] font-semibold tracking-wider text-ink-2"
                     >
                       <span className="inline-flex items-center gap-1.5">
                         <span className="uppercase">{c}</span>
