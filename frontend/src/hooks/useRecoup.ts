@@ -658,7 +658,10 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   );
 
   const openOutbox = useCallback(
-    (item: Record<string, unknown>, index: number) => spawnWindow(outboxWindow(item, index)),
+    (item: Record<string, unknown>, index: number) => {
+      setWindows((ws) => ws.filter((w) => !w.id.startsWith("outbox-inspector-")));
+      spawnWindow(outboxWindow(item, index));
+    },
     [spawnWindow]
   );
 

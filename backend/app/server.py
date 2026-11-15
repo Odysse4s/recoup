@@ -2903,6 +2903,23 @@ def _apply_consult_resolution_mutations(
     ):
         mutations += 1
 
+    if choice == "redelivery" and claim_id == "CLM-D-1042":
+        redeliv_memo = (
+            "# Settlement Memo CLM-D-1042 (Replacement + Credit)\n\n"
+            "- Supplier: Kappa Office Systems S.A. (SUP-KAPPA)\n"
+            "- Delivery: D-1042 | Correlated Invoice: INV-7781\n"
+            "- Resolution: Next-day free replacement of 22 USB-C hubs + EUR 202.30 credit\n"
+            "- Credit Breakdown: Overcharge EUR 168.00 + Late SLA Penalty EUR 34.30 = EUR 202.30\n"
+            f"- Greek AADE Filing: myDATA Type 9.3 (`{aade_xml_path}`)\n"
+        )
+        if _record_reversible_mutation(
+            run_id,
+            "write_file",
+            {"path": f"claims/{claim_id}.md", "content": redeliv_memo},
+            f"Updated audit memo `claims/{claim_id}.md` for 22-hub replacement + EUR 202.30 credit",
+        ):
+            mutations += 1
+
     if not REAL.db_path.exists() or "upsert_row" not in REGISTRY:
         return mutations
 
@@ -2989,9 +3006,17 @@ def _apply_consult_resolution_mutations(
         claims_ddl = schema_ddls.get("claims", "")
         c_col_map = {c["name"]: c for c in table_cols["claims"]}
         note = (
-            f"Operator consult: enforced EUR {agreed_amount:.2f} refund hold + AADE myDATA 5.1"
-            if choice == "refund"
-            else f"Operator consult: next-day re-delivery of 22 hubs + EUR {agreed_amount:.2f} credit (AADE 9.3)"
+            f"Enforced EUR {agreed_amount:.2f} refund hold (overcharge 168.00 + short 280.00 + damaged 105.00 + late 34.30) · AADE 5.1"
+            if choice == "refund" and claim_id == "CLM-D-1042"
+            else (
+                f"22 hubs next-day replacement + EUR {agreed_amount:.2f} credit (overcharge 168.00 + late 34.30) · AADE 9.3"
+                if choice == "redelivery" and claim_id == "CLM-D-1042"
+                else (
+                    f"Operator consult: enforced EUR {agreed_amount:.2f} refund hold + AADE myDATA 5.1"
+                    if choice == "refund"
+                    else f"Operator consult: next-day re-delivery + EUR {agreed_amount:.2f} credit (AADE 9.3)"
+                )
+            )
         )
         chosen_status = _pick_allowed_column_value(
             claims_ddl,
@@ -3031,10 +3056,7 @@ def _apply_consult_resolution_mutations(
             if "amount" in c_col_map:
                 claim_patch["amount"] = agreed_amount
             if "reason" in c_col_map:
-                prev_reason = str(existing_claim.get("reason") or "").strip()
-                claim_patch["reason"] = (
-                    f"{prev_reason} | {note}" if prev_reason and note not in prev_reason else note
-                )
+                claim_patch["reason"] = note
             if "resolution" in c_col_map:
                 claim_patch["resolution"] = choice
             if "aade_type" in c_col_map:
@@ -3050,6 +3072,33 @@ def _apply_consult_resolution_mutations(
                 f"Updated claims #{claim_id} ({choice}, EUR {agreed_amount:.2f})",
             ):
                 mutations += 1
+
+    # 1b. Dynamic `invoices` status update so Refund -> payment_hold and Replace -> credit_adjusted
+    if "invoices" in table_cols and invoice_id:
+        inv_ddl = schema_ddls.get("invoices", "")
+        inv_col_map = {c["name"]: c for c in table_cols["invoices"]}
+        inv_pks = [c["name"] for c in table_cols["invoices"] if c["pk"] > 0]
+        inv_pk = inv_pks[0] if len(inv_pks) == 1 else ("id" if "id" in inv_col_map else None)
+        if inv_pk and "status" in inv_col_map:
+            pref_inv_statuses = (
+                ["credit_adjusted", "disputed", "settled", "unpaid"]
+                if choice == "redelivery"
+                else ["payment_hold", "held", "disputed", "unpaid"]
+            )
+            chosen_inv_status = _pick_allowed_column_value(
+                inv_ddl,
+                "status",
+                pref_inv_statuses,
+                fallback="disputed",
+            )
+            with contextlib.suppress(sqlite3.Error, ValueError):
+                if _record_reversible_mutation(
+                    run_id,
+                    "upsert_row",
+                    {"table": "invoices", "pk_col": inv_pk, "row": {inv_pk: invoice_id, "status": chosen_inv_status}},
+                    f"Updated invoices #{invoice_id} status -> {chosen_inv_status}",
+                ):
+                    mutations += 1
 
     # 2. Dynamic `deliveries` upsert (when row D-1042 exists)
     if "deliveries" in table_cols and deliv_pk_col and existing_delivery is not None:
@@ -4952,44 +5001,46 @@ async def handle_user_consult_response(request: Request):
                     xml_content=xml_content,
                 )
 
-            already_queued = any(
-                m.get("to") == "accounts@kappaoffice.example"
-                and ("CLM-D-1042" in str(m.get("subject", "")) or "INV-7781" in str(m.get("subject", "")))
+            if choice == "refund":
+                email_subject = "Credit Claim CLM-D-1042 on Invoice INV-7781: EUR 587.30 (AADE myDATA 5.1)"
+                email_body = (
+                    "To: accounts@kappaoffice.example\n"
+                    "Ref: Shipment D-1042 / Invoice INV-7781 / Claim CLM-D-1042\n"
+                    "Filing: Greek AADE myDATA Type 5.1 Credit Note staged at aade/mydata_CLM-D-1042.xml\n"
+                    "Total Refund Claim: EUR 587.30 net (EUR 728.25 gross including 24% VAT).\n"
+                    "Invoice INV-7781 has been placed on payment_hold pending credit issuance.\n"
+                    "Please credit our account accordingly."
+                )
+            else:
+                email_subject = (
+                    "Settlement Notice CLM-D-1042: Next-Day Re-Delivery 22 Hubs + EUR 202.30 Credit (AADE myDATA 9.3)"
+                )
+                email_body = (
+                    "To: accounts@kappaoffice.example\n"
+                    "Ref: Shipment D-1042 / Invoice INV-7781 / Claim CLM-D-1042\n"
+                    "Filing: Greek AADE myDATA Type 9.3 Discrepancy Note staged at aade/mydata_CLM-D-1042.xml\n"
+                    "Resolution: Scheduled next-day free replacement re-delivery for 22 USB-C hubs + EUR 202.30 credit "
+                    "(EUR 168.00 unit overcharge + EUR 34.30 late SLA penalty).\n"
+                    "Please confirm morning courier dispatch."
+                )
+
+            # Ensure ONLY the exact approved scenario email sits in REAL.outbox (overwrite dry-run default if Replace chosen)
+            REAL.outbox[:] = [
+                m
                 for m in REAL.outbox
-            )
-            if not already_queued:
-                if choice == "refund":
-                    email_subject = "Credit Claim CLM-D-1042 on Invoice INV-7781: EUR 587.30 (AADE myDATA 5.1)"
-                    email_body = (
-                        "To: accounts@kappaoffice.example\n"
-                        "Ref: Shipment D-1042 / Invoice INV-7781 / Claim CLM-D-1042\n"
-                        "Filing: Greek AADE myDATA Type 5.1 Credit Note staged at aade/mydata_CLM-D-1042.xml\n"
-                        "Total Refund Claim: EUR 587.30 net (EUR 728.25 gross including 24% VAT).\n"
-                        "Please credit our account accordingly."
-                    )
-                else:
-                    email_subject = (
-                        "Settlement Notice CLM-D-1042: Next-Day Re-Delivery 22 Hubs + EUR 202.30 Credit (AADE myDATA 9.3)"
-                    )
-                    email_body = (
-                        "To: accounts@kappaoffice.example\n"
-                        "Ref: Shipment D-1042 / Invoice INV-7781 / Claim CLM-D-1042\n"
-                        "Filing: Greek AADE myDATA Type 9.3 Discrepancy Note staged at aade/mydata_CLM-D-1042.xml\n"
-                        "Resolution: Scheduled next-day replacement re-delivery for 22 hubs + EUR 202.30 unit price adjustment.\n"
-                        "Please confirm dispatch."
-                    )
-                if "send_email" in REGISTRY:
-                    REGISTRY["send_email"].do(
-                        {"to": "accounts@kappaoffice.example", "subject": email_subject, "body": email_body},
-                        REAL,
-                    )
-                else:
-                    REAL.outbox.append({
-                        "tool": "send_email",
-                        "to": "accounts@kappaoffice.example",
-                        "subject": email_subject,
-                        "body": email_body,
-                    })
+                if not (
+                    m.get("to") == "accounts@kappaoffice.example"
+                    and ("CLM-D-1042" in str(m.get("subject", "")) or "INV-7781" in str(m.get("subject", "")))
+                )
+            ]
+            REAL.outbox.append({
+                "tool": "send_email",
+                "to": "accounts@kappaoffice.example",
+                "subject": email_subject,
+                "body": email_body,
+                "resolution": choice,
+                "status": "dispatched",
+            })
 
             ui_action = UiActionPayload(
                 action="commit_resolution",
@@ -5046,7 +5097,10 @@ async def handle_user_consult_response(request: Request):
                 with contextlib.closing(sqlite3.connect(REAL.db_path)) as conn:
                     conn.row_factory = sqlite3.Row
                     with contextlib.suppress(sqlite3.Error):
-                        c_row = conn.execute("SELECT * FROM claims WHERE id = ?", (claim_id,)).fetchone()
+                        c_row = conn.execute(
+                            "SELECT * FROM claims WHERE id = ? OR (? != '' AND delivery_id = ?) OR (? != '' AND invoice_id = ?) ORDER BY rowid DESC LIMIT 1",
+                            (claim_id, delivery_id or "", delivery_id or "", invoice_id or "", invoice_id or ""),
+                        ).fetchone()
                         if c_row is None:
                             claim_row = {
                                 "id": claim_id,
@@ -5064,21 +5118,24 @@ async def handle_user_consult_response(request: Request):
                                 f"Created claim #{claim_id} ({choice}, EUR {claim_amount:.2f})",
                             )
                         else:
+                            actual_cid = str(c_row["id"])
+                            claim_id = actual_cid
+                            patch_amt = claim_amount if claim_amount > 0 else float(c_row["amount"] or 0.0)
                             _record_reversible_mutation(
                                 run_id,
                                 "upsert_row",
-                                {"table": "claims", "pk_col": "id", "row": {"id": claim_id, "status": "settled", "amount": claim_amount}},
-                                f"Updated claims #{claim_id} ({choice}, EUR {claim_amount:.2f})",
+                                {"table": "claims", "pk_col": "id", "row": {"id": actual_cid, "status": "settled", "amount": patch_amt}},
+                                f"Updated claims #{actual_cid} ({choice}, EUR {patch_amt:.2f})",
                             )
 
                         if invoice_id:
                             inv_row = conn.execute("SELECT * FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
-                            if inv_row is not None and str(inv_row["status"]).lower() not in ("held", "payment_hold", "disputed"):
+                            if inv_row is not None and str(inv_row["status"]).lower() != "payment_hold":
                                 _record_reversible_mutation(
                                     run_id,
                                     "upsert_row",
-                                    {"table": "invoices", "pk_col": "id", "row": {"id": invoice_id, "status": "held"}},
-                                    f"Updated invoice #{invoice_id} to payment hold",
+                                    {"table": "invoices", "pk_col": "id", "row": {"id": invoice_id, "status": "payment_hold"}},
+                                    f"Updated invoice #{invoice_id} to payment_hold",
                                 )
 
             # 3. Send email to supplier if recipient_email is known and not already in outbox

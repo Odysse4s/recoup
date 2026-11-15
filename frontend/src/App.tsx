@@ -182,6 +182,13 @@ export default function App() {
             rewinding={rewinding}
             pulseKey={r.pulses.diff}
             committed={r.runStatus === "committed"}
+            selectedChoice={
+              r.operatorConsult?.selectedChoice ??
+              (r.wsState?.active_call?.selected_choice === "refund" ||
+              r.wsState?.active_call?.selected_choice === "redelivery"
+                ? r.wsState.active_call.selected_choice
+                : null)
+            }
             onOpenDiff={r.openDiff}
             onOpenOutbox={r.openOutbox}
           />

@@ -484,7 +484,14 @@ export function DatabaseStudio({
   }, [rows, ghosts, active, parsedSchemas]);
 
   const marksFor = (t: string) => Object.keys(rowMarks).filter((k) => k.startsWith(`${t}:`)).length;
-  const staged = (t: string) => report?.db_summary?.[t];
+  const staged = (t: string) => {
+    const base = report?.db_summary?.[t];
+    if (base && (base.inserted || base.updated || base.deleted)) return base;
+    if (committed && ws?.undo_stack?.some((u) => u.tool === "upsert_row" && u.args?.table === t)) {
+      return { inserted: 0, updated: 1, deleted: 0 };
+    }
+    return base;
+  };
 
   const allExpanded = names.every((t) => !collapsedDdl[t]);
   const toggleAllDdl = () => {

@@ -290,6 +290,7 @@ export function DiffStack({
   rewinding,
   pulseKey,
   committed,
+  selectedChoice,
   onOpenDiff,
   onOpenOutbox,
 }: {
@@ -299,6 +300,7 @@ export function DiffStack({
   rewinding: boolean;
   pulseKey: number;
   committed: boolean;
+  selectedChoice?: "refund" | "redelivery" | null;
   onOpenDiff: (path: string, diff: string, created: boolean) => void;
   onOpenOutbox: (item: Record<string, unknown>, index: number) => void;
 }) {
@@ -308,8 +310,63 @@ export function DiffStack({
   const drawerId = useId();
   const diffs = (report?.files_modified ?? []).filter((f) => !f.path.endsWith(".db") && !f.path.endsWith(".sqlite"));
   const dbCount = Object.keys(report?.db_summary ?? {}).length;
-  const outboxCount = report?.external_outbox?.length ?? 0;
-  const totalCount = diffs.length + dbCount + outboxCount;
+
+  const baseOutbox = report?.external_outbox ?? [];
+  const isKappaOutbox = baseOutbox.some(
+    (m) =>
+      String(m.to ?? "").includes("kappaoffice.example") ||
+      String(m.subject ?? "").includes("CLM-D-1042") ||
+      String(m.subject ?? "").includes("INV-7781")
+  );
+  const effectiveChoice: "refund" | "redelivery" | null =
+    selectedChoice ??
+    ((ws?.outbox?.find((m) => m.resolution === "refund" || m.resolution === "redelivery")?.resolution as
+      | "refund"
+      | "redelivery"
+      | undefined) ??
+      (committed && isKappaOutbox ? "refund" : null));
+
+  const candidateEmails: Array<Record<string, unknown>> = isKappaOutbox
+    ? [
+        {
+          tool: "send_email",
+          to: "accounts@kappaoffice.example",
+          subject: "Credit Claim CLM-D-1042 on Invoice INV-7781: EUR 587.30 (AADE myDATA 5.1)",
+          body: [
+            "To: accounts@kappaoffice.example",
+            "Ref: Shipment D-1042 / Invoice INV-7781 / Claim CLM-D-1042",
+            "Filing: Greek AADE myDATA Type 5.1 Credit Note staged at aade/mydata_CLM-D-1042.xml",
+            "Total Refund Claim: EUR 587.30 net (EUR 728.25 gross including 24% VAT).",
+            "Invoice INV-7781 has been placed on payment_hold pending credit issuance.",
+            "Please credit our account accordingly.",
+          ].join("\n"),
+          optionKey: "refund",
+          optionLabel: "Option A · Full Refund (€587.30)",
+          status: !committed ? "held" : effectiveChoice === "refund" ? "dispatched" : "discarded",
+        },
+        {
+          tool: "send_email",
+          to: "accounts@kappaoffice.example",
+          subject: "Settlement Notice CLM-D-1042: Next-Day Re-Delivery 22 Hubs + EUR 202.30 Credit (AADE myDATA 9.3)",
+          body: [
+            "To: accounts@kappaoffice.example",
+            "Ref: Shipment D-1042 / Invoice INV-7781 / Claim CLM-D-1042",
+            "Filing: Greek AADE myDATA Type 9.3 Discrepancy Note staged at aade/mydata_CLM-D-1042.xml",
+            "Resolution: Scheduled next-day free replacement re-delivery for 22 USB-C hubs + EUR 202.30 credit (EUR 168.00 unit overcharge + EUR 34.30 late SLA penalty).",
+            "Please confirm morning courier dispatch.",
+          ].join("\n"),
+          optionKey: "redelivery",
+          optionLabel: "Option B · Replace 22 Units + €202.30 Credit",
+          status: !committed ? "held" : effectiveChoice === "redelivery" ? "dispatched" : "discarded",
+        },
+      ]
+    : baseOutbox.map((m) => ({
+        ...m,
+        status: committed ? "dispatched" : "held",
+      }));
+
+  const outboxCount = candidateEmails.length;
+  const totalCount = diffs.length + dbCount + (baseOutbox.length > 0 ? 1 : 0);
 
   return (
     <Drawer
@@ -490,38 +547,76 @@ export function DiffStack({
             ))}
           </div>
         )}
-        {report && report.external_outbox.length > 0 && (
-          <div className="overflow-hidden rounded-lg border border-warn/35">
-            <div className="flex items-center justify-between border-b border-warn/25 bg-warn/[0.07] px-3 py-1.5">
-              <span className="flex items-center gap-1.5 text-[11.5px] font-medium text-ink">
-                <Mail className="h-3.5 w-3.5 text-warn" /> Intercepted outbox email
+        {report && outboxCount > 0 && (
+          <div className={cx("overflow-hidden rounded-lg border", committed ? "border-ok/40" : "border-warn/40")}>
+            <div
+              className={cx(
+                "flex items-center justify-between border-b px-3 py-1.5",
+                committed ? "border-ok/25 bg-ok/[0.08]" : "border-warn/25 bg-warn/[0.08]"
+              )}
+            >
+              <span className="flex items-center gap-1.5 text-[11.5px] font-semibold text-ink">
+                <Mail className={cx("h-3.5 w-3.5", committed ? "text-ok" : "text-warn")} />
+                {isKappaOutbox ? "Candidate Supplier Emails (Only Approved Sends)" : "Intercepted Outbox Email"}
               </span>
-              <Chip tone="warn">dry-run held</Chip>
+              {committed ? (
+                <Chip tone="ok">1 sent · 1 blocked</Chip>
+              ) : (
+                <Chip tone="warn">{isKappaOutbox ? "2 drafts · held" : "dry-run held"}</Chip>
+              )}
             </div>
-            {report.external_outbox.map((m, i) => {
+            {candidateEmails.map((m, i) => {
               const isMail = "to" in m || m.tool === "send_email";
+              const st = String(m.status ?? "held");
+              const isSent = st === "dispatched";
+              const isBlocked = st === "discarded";
+              const optLabel = m.optionLabel ? String(m.optionLabel) : null;
               return (
                 <button
                   key={i}
                   ref={anchorRef(`outbox:${i}`)}
                   type="button"
                   onClick={() => onOpenOutbox(m, i)}
-                  title={`Inspect the intercepted ${isMail ? "email draft" : "webhook payload"}`}
-                  className="group block w-full space-y-0.5 border-b border-line px-3 py-2 text-left text-[12px] transition-colors last:border-b-0 hover:bg-warn/[0.05] focus-visible:bg-warn/[0.07] focus-visible:outline-none"
+                  title={`Click to inspect full ${optLabel ?? (isMail ? "email draft" : "webhook payload")}`}
+                  className={cx(
+                    "group block w-full space-y-1 border-b border-line px-3 py-2 text-left text-[12px] transition-colors last:border-b-0 focus-visible:outline-none",
+                    isSent
+                      ? "bg-ok/[0.06] hover:bg-ok/[0.11]"
+                      : isBlocked
+                      ? "bg-sunken/50 opacity-60 hover:opacity-85"
+                      : "hover:bg-warn/[0.06] focus-visible:bg-warn/[0.08]"
+                  )}
                 >
+                  {optLabel && (
+                    <div className="flex items-center justify-between gap-2">
+                      <span
+                        className={cx(
+                          "font-mono text-[10px] font-bold uppercase tracking-wide",
+                          isSent ? "text-ok" : isBlocked ? "text-ink-3 line-through" : "text-signal"
+                        )}
+                      >
+                        {optLabel}
+                      </span>
+                      <Chip tone={isSent ? "ok" : isBlocked ? "neutral" : "warn"} className="h-4 px-1.5 text-[8.5px]">
+                        {isSent ? "✓ approved & sent" : isBlocked ? "not sent" : "preview · held"}
+                      </Chip>
+                    </div>
+                  )}
                   <div className="flex items-center gap-2 text-ink">
                     {isMail ? (
-                      <Mail className="h-3 w-3 text-ink-3" />
+                      <Mail className={cx("h-3 w-3 shrink-0", isSent ? "text-ok" : "text-ink-3")} />
                     ) : (
-                      <Webhook className="h-3 w-3 text-ink-3" />
+                      <Webhook className="h-3 w-3 shrink-0 text-ink-3" />
                     )}
-                    <span className="font-medium">{String(m.subject ?? m.objective ?? m.event ?? m.tool ?? "action")}</span>
-                    <span className="ml-auto truncate font-mono text-[11px] text-ink-3">
-                      {String(m.to ?? m.counterparty ?? m.endpoint ?? "")}
+                    <span className={cx("truncate font-medium", isBlocked && "line-through text-ink-3")}>
+                      {String(m.subject ?? m.objective ?? m.event ?? m.tool ?? "action")}
                     </span>
-                    <Maximize2 className="h-3 w-3 shrink-0 text-ink-3 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
+                    <Maximize2 className="ml-auto h-3 w-3 shrink-0 text-ink-3 opacity-60 transition-opacity group-hover:opacity-100" />
                   </div>
-                  {m.body !== undefined && <div className="line-clamp-1 pl-5 text-ink-3">{String(m.body)}</div>}
+                  <div className="flex items-center justify-between gap-2 pl-5 text-[11px] text-ink-3">
+                    <span className="line-clamp-1">{m.body !== undefined ? String(m.body).split("\n")[3] ?? String(m.body) : ""}</span>
+                    <span className="shrink-0 font-mono text-[10px] text-accent group-hover:underline">Inspect →</span>
+                  </div>
                 </button>
               );
             })}

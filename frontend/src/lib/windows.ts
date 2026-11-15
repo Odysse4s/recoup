@@ -565,16 +565,33 @@ export function outboxWindow(item: Record<string, unknown>, index: number): Live
   );
   const isMail = tool === "send_email";
   const isCall = tool === "place_call";
-  const json = JSON.stringify(item, null, 2);
+  const deliveryState = String(item.status ?? "held");
+  const isDispatched = deliveryState === "dispatched";
+  const isDiscarded = deliveryState === "discarded";
+  const optionLabel = item.optionLabel ? String(item.optionLabel) : null;
+  const cleanPayload = { ...item };
+  delete cleanPayload.optionLabel;
+  const json = JSON.stringify(cleanPayload, null, 2);
+  const mimeBanner = isDispatched
+    ? "# Dispatched MIME message (approved_by_operator = true · sent = true)"
+    : isDiscarded
+    ? "# Discarded candidate draft (not_sent = true · alternate resolution chosen)"
+    : "# Candidate MIME draft (dry_run_external = true · held until you approve)";
+  const gateHeader = isDispatched
+    ? "X-Recoup-Risk-Gate: approved-and-dispatched"
+    : isDiscarded
+    ? "X-Recoup-Risk-Gate: discarded-not-sent"
+    : "X-Recoup-Risk-Gate: held-awaiting-choice";
   const code = isMail
     ? [
-        "# Intercepted MIME message (dry_run_external = true)",
+        mimeBanner,
+        ...(optionLabel ? [`# Scenario: ${optionLabel}`] : []),
         "From: recoup-agent@rehearsal.local",
         `To: ${mimeHeader(item.to)}`,
         `Subject: ${mimeHeader(item.subject)}`,
         "MIME-Version: 1.0",
         "Content-Type: text/plain; charset=utf-8",
-        "X-Recoup-Risk-Gate: held",
+        gateHeader,
         "",
         String(item.body ?? ""),
         "",
@@ -587,7 +604,7 @@ export function outboxWindow(item: Record<string, unknown>, index: number): Live
         `Counterparty: ${mimeHeader(item.counterparty)}`,
         `Phone: ${mimeHeader(item.phone)}`,
         `Objective: ${mimeHeader(item.objective)}`,
-        "X-Recoup-Risk-Gate: held",
+        gateHeader,
         "",
         "# Raw outbox payload",
         json,
@@ -597,7 +614,7 @@ export function outboxWindow(item: Record<string, unknown>, index: number): Live
         `POST ${String(item.endpoint ?? "")}`,
         "Content-Type: application/json",
         `X-Recoup-Event: ${mimeHeader(item.event)}`,
-        "X-Recoup-Risk-Gate: held",
+        gateHeader,
         "",
         JSON.stringify(item.payload ?? {}, null, 2),
         "",
@@ -605,11 +622,21 @@ export function outboxWindow(item: Record<string, unknown>, index: number): Live
         json,
       ].join("\n");
   return {
-    id: `outbox-${index}-${Date.now()}`,
+    id: `outbox-inspector-${index}`,
     kind: "exec",
-    categoryBadge: "STEP 7 · OUTBOX SAFETY GATE",
+    categoryBadge: isDispatched
+      ? "✓ OUTBOX · APPROVED & SENT"
+      : isDiscarded
+      ? "✗ OUTBOX · NOT SENT"
+      : "STEP 7 · OUTBOX SAFETY GATE",
     title: isMail
-      ? "📧 Holding Supplier Email for Your Approval"
+      ? isDispatched
+        ? "✓ Approved & Dispatched Supplier Email"
+        : isDiscarded
+        ? "✗ Unselected Option — Email Not Sent"
+        : optionLabel
+        ? `📧 ${optionLabel} — Held for Approval`
+        : "📧 Holding Supplier Email for Your Approval"
       : isCall
       ? "📞 Holding Supplier Call for Your Approval"
       : "Outbox Payload Inspector",
@@ -619,16 +646,34 @@ export function outboxWindow(item: Record<string, unknown>, index: number): Live
       ? `place_call → ${String(item.counterparty ?? item.phone ?? "")}`
       : `trigger_webhook → ${String(item.endpoint ?? "")}`,
     liveLabel: "OPENING…",
-    doneLabel: "HELD BY RISK GATE",
+    doneLabel: isDispatched ? "DISPATCHED" : isDiscarded ? "NOT SENT" : "HELD BY RISK GATE",
     code,
     lang: "text",
-    assertions: [
-      { label: "external call intercepted", ok: true },
-      { label: "irreversible · needs approval", ok: true },
-    ],
+    assertions: isDispatched
+      ? [
+          { label: "operator approved", ok: true },
+          { label: "dispatched to vendor", ok: true },
+        ]
+      : isDiscarded
+      ? [
+          { label: "not selected", ok: true },
+          { label: "blocked · 0 emails sent", ok: true },
+        ]
+      : [
+          { label: "external call intercepted", ok: true },
+          { label: "irreversible · needs approval", ok: true },
+        ],
     telemetry: {
-      facts: ["dry_run_external = true", `payload ${new TextEncoder().encode(json).length}B`, "not dispatched"],
-      steps: ["intercept side-effect", "serialize payload", "hold in dry-run outbox", "await approval"],
+      facts: isDispatched
+        ? ["approved = true", `payload ${new TextEncoder().encode(json).length}B`, "dispatched live"]
+        : isDiscarded
+        ? ["approved = false", "alternate option selected", "never sent"]
+        : ["dry_run_external = true", `payload ${new TextEncoder().encode(json).length}B`, "not dispatched"],
+      steps: isDispatched
+        ? ["intercept side-effect", "operator reviewed", "gate approved", "dispatched to supplier"]
+        : isDiscarded
+        ? ["intercept side-effect", "alternate option chosen", "discarded cleanly"]
+        : ["intercept side-effect", "serialize payload", "hold in dry-run outbox", "await approval"],
     },
     target: "diff",
     origin: `outbox:${index}`,

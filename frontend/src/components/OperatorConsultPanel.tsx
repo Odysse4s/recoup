@@ -1269,7 +1269,13 @@ export function OperatorConsultPanel({
                   disabled={callLive && Boolean(consult?.selectedChoice)}
                   onClick={() => {
                     soundFx.playUiClick();
-                    onSelectResolution("redelivery", activeReqId, claimId);
+                    if (isKappa) {
+                      onSelectResolution("redelivery", activeReqId, claimId);
+                    } else if (pendingApproval && onReject) {
+                      onReject(pendingApproval.req_id);
+                    } else {
+                      void handleProcessedText("Hold off for now");
+                    }
                   }}
                   className={cx(
                     "group flex flex-col items-center justify-center rounded-xl border p-2 text-center transition-all",
