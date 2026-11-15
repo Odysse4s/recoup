@@ -791,7 +791,8 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
                 window.clearTimeout(safetyTimer);
                 safetyTimer = null;
               }
-              const remainingMs = Math.max(350, (el.duration - el.currentTime) * 1000 + 280);
+              const minExpectedMs = Math.max(1800, words.length * 260);
+              const remainingMs = Math.max(minExpectedMs, (el.duration - el.currentTime) * 1000 + 650);
               safetyTimer = window.setTimeout(() => {
                 done();
               }, remainingMs);
@@ -814,10 +815,7 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
               hooks?.onProgress?.(Math.min(1, Math.max(0, el.currentTime / el.duration)));
               tightenSafetyTimer();
             }
-            if (
-              (el.currentTime > 0.25 && el.paused && !el.seeking) ||
-              (el.duration > 0 && el.currentTime >= el.duration - 0.04)
-            ) {
+            if (el.ended) {
               done();
             }
           };

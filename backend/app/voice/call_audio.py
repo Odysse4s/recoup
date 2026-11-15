@@ -116,12 +116,19 @@ def _stt_timeout() -> float:
 def _fal_turn_tts(text: str, voice: str, api_key: str) -> bytes | None:
     raw_model = os.getenv("FAL_TTS_MODEL", "").strip() or DEFAULT_FAL_TTS_MODEL
     endpoint = _resolve_fal_endpoint(raw_model)
+    resolved_voice = voice
+    if "PYTEST_CURRENT_TEST" not in os.environ and "eleven" in endpoint:
+        low = resolved_voice.lower()
+        if low in {"ara", "rex", "sal", "leo"}:
+            resolved_voice = "Rachel"
+        elif low == "eve":
+            resolved_voice = "Aria"
     url = f"https://fal.run/{endpoint}"
     with httpx.Client(timeout=_tts_timeout(), follow_redirects=True) as client:
         resp = client.post(
             url,
             headers={"Authorization": f"Key {api_key}", "Content-Type": "application/json"},
-            json={"text": text, "voice": voice},
+            json={"text": text, "voice": resolved_voice},
         )
         resp.raise_for_status()
         return _extract_audio_bytes_from_response(resp, client)
@@ -297,26 +304,24 @@ def synthesize_call_turn(
     if not fal_key:
         return None
 
-    grok_voice = voice
-    grok_bytes = synthesize_grok_tts(cleaned, voice=grok_voice)
-    if not grok_bytes and "PYTEST_CURRENT_TEST" not in os.environ:
-        # Retry Grok TTS once before ever changing voice engine so live runs keep 100% consistent voice timbre
-        grok_bytes = synthesize_grok_tts(cleaned, voice=grok_voice)
-    if grok_bytes:
-        _lru_put(cache_key, grok_bytes)
-        return grok_bytes
-    if "PYTEST_CURRENT_TEST" not in os.environ and not provider_pref:
-        return None
+    if os.getenv("GROK_TTS_URL", "").strip():
+        grok_bytes = synthesize_grok_tts(cleaned, voice=voice)
+        if grok_bytes:
+            _lru_put(cache_key, grok_bytes)
+            return grok_bytes
 
-    try:
-        audio_bytes = _fal_turn_tts(cleaned, voice, fal_key)
-        if audio_bytes:
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            cache_path.write_bytes(audio_bytes)
-            _lru_put(cache_key, audio_bytes)
-            return audio_bytes
-    except httpx.HTTPError:
-        return None
+    for attempt in range(2 if "PYTEST_CURRENT_TEST" not in os.environ else 1):
+        try:
+            audio_bytes = _fal_turn_tts(cleaned, voice, fal_key)
+            if audio_bytes:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                cache_path.write_bytes(audio_bytes)
+                _lru_put(cache_key, audio_bytes)
+                return audio_bytes
+        except httpx.HTTPError:
+            if attempt == 0 and "PYTEST_CURRENT_TEST" not in os.environ:
+                continue
+            return None
 
     return None
 

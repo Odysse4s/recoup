@@ -4507,12 +4507,20 @@ async def handle_user_consult_response(request: Request):
             )
         )
         if is_compare_intent:
-            ui_action = UiActionPayload(
-                action="switch_view",
-                view="db",
-                table="invoices",
-                label="Comparing options in Ledger",
-            ).model_dump(exclude_none=True)
+            wants_db_view = (
+                ui_command == "open_db"
+                or bool(re.search(r"\b(db|database|table|ledger|schema|sql|sqlite|invoices?)\b", lowered))
+            )
+            ui_action = (
+                UiActionPayload(
+                    action="switch_view",
+                    view="db",
+                    table="invoices",
+                    label="Comparing options in Ledger",
+                ).model_dump(exclude_none=True)
+                if wants_db_view
+                else None
+            )
             if not transcript:
                 transcript = "What are my options?"
 
@@ -5820,6 +5828,14 @@ async def handle_user_consult_response(request: Request):
         cost_eur=_voice_micro_cost(fallback_reply),
     )
 
+    if ACTIVE_CALL is None:
+        ACTIVE_CALL = {
+            "call_id": call_id,
+            "claim_id": claim_id,
+            "req_id": req_id,
+            "channel": effective_channel,
+            "turns": [],
+        }
     ACTIVE_CALL["active"] = True
     ACTIVE_CALL["ringing"] = False
     ACTIVE_CALL["call_status"] = "connected"

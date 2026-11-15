@@ -16,7 +16,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ApprovalNeededPayload, OumiIrisGate, OumiIrisIntent } from "../contracts";
 import { soundFx } from "../lib/sound";
 import type { OperatorChoice, OperatorConsultState } from "../lib/types";
-import { getWarmMicStream, mutePersistentMicStream, stopSpeaking, useAutoVad, useSpeechInput } from "../lib/voice";
+import { getWarmMicStream, mutePersistentMicStream, stopSpeaking, unlockAudioSession, useAutoVad, useSpeechInput } from "../lib/voice";
 import { btn, Chip, cx, Dot, Panel } from "./ui";
 import { VoiceOrb } from "./VoiceOrb";
 
@@ -35,6 +35,12 @@ export interface OperatorConsultPanelProps {
   committedClaimId?: string | null;
   voiceOn: boolean;
   speaking: boolean;
+  onStartDesktopConsult?: (
+    reqId?: string | null,
+    claimId?: string,
+    claimAmount?: number | null,
+    isKappa?: boolean
+  ) => void;
   onDesktopVoiceTurn?: (text: string) => Promise<void> | void;
   onEscalateToPhone: (reqId?: string | null, claimId?: string) => void;
   onSelectResolution: (choice: OperatorChoice, reqId?: string | null, claimId?: string) => void;
@@ -81,6 +87,7 @@ export function OperatorConsultPanel({
   committedClaimId = null,
   voiceOn,
   speaking,
+  onStartDesktopConsult,
   onDesktopVoiceTurn,
   onEscalateToPhone,
   onSelectResolution,
@@ -554,15 +561,20 @@ export function OperatorConsultPanel({
     return () => window.clearTimeout(t);
   }, [laptopMicOn, isPhoneTransferred, consultSessionEnded, speaking, speechInput.listening, speechInput.supported, speechInput.start, speechInput.stop]);
 
-  // Toggle Laptop Mic
+  // Toggle Voice Consult Mic — greets operator out loud on start just like answering the phone
   const toggleLaptopMic = async () => {
     cancelAutoTransfer();
     soundFx.playUiClick();
-    stopSpeaking();
 
     if (laptopMicOn) {
+      stopSpeaking();
       stopLaptopMic();
     } else {
+      unlockAudioSession("play-and-record");
+      const shouldGreet =
+        !hasCommitted &&
+        !(consult?.turns && consult.turns.some((t) => t.speaker === "agent"));
+
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         setMediaStream(stream);
@@ -570,6 +582,11 @@ export function OperatorConsultPanel({
       } catch (err) {
         console.warn("Microphone access failed", err);
         setLaptopMicOn(true);
+      }
+
+      if (shouldGreet && onStartDesktopConsult) {
+        echoGuardUntilRef.current = Date.now() + 8000;
+        onStartDesktopConsult(activeReqId, claimId, claimAmount, isKappa);
       }
     }
   };
@@ -954,7 +971,7 @@ export function OperatorConsultPanel({
                 <div className="flex min-w-0 items-center gap-1.5 font-bold text-ok">
                   <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-ok" />
                   <span className="truncate">
-                    {isPhoneTransferred ? "✓ EXECUTED LIVE VIA IPHONE VOICE: " : "✓ EXECUTED LIVE VIA LAPTOP VOICE: "}
+                    {isPhoneTransferred ? "✓ EXECUTED LIVE VIA IPHONE VOICE: " : "✓ EXECUTED LIVE VIA VOICE: "}
                     <span className="font-semibold text-ink">
                       {isKappa
                         ? resolvedChoice === "redelivery"
@@ -986,7 +1003,7 @@ export function OperatorConsultPanel({
                       )}
                     >
                       <Mic className={cx("h-3 w-3 shrink-0", laptopMicOn && "animate-pulse")} />
-                      <span className="truncate">{laptopMicOn ? "🎙️ Still Listening — Ask or Assign Next" : "🎙️ Resume Laptop Voice"}</span>
+                      <span className="truncate">{laptopMicOn ? "🎙️ Still Listening — Ask or Assign Next" : "🎙️ Resume Voice"}</span>
                     </button>
                     <button
                       type="button"
@@ -1153,7 +1170,7 @@ export function OperatorConsultPanel({
                     </div>
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5 text-[11px] font-bold text-ink">
-                        <span>{laptopMicOn ? "🎙️ Mic Active (Listening)" : "🎙️ Talk on Laptop"}</span>
+                        <span>{laptopMicOn ? "🎙️ Listening…" : "🎙️ Talk"}</span>
                         {sttSubmitting && (
                           <span className="font-mono text-[9px] text-amber-700 dark:text-amber-300 animate-pulse">
                             (Transcribing…)
@@ -1161,7 +1178,7 @@ export function OperatorConsultPanel({
                         )}
                       </div>
                       <p className="truncate text-[9px] text-ink-3">
-                        {laptopMicOn ? "Hands-free Auto-VAD active" : "Ask or Approve by Voice"}
+                        {laptopMicOn ? "Hands-free Auto-VAD active" : "Start live voice consult"}
                       </p>
                     </div>
                   </div>
@@ -1432,7 +1449,7 @@ export function OperatorConsultPanel({
                   <span>
                     {isPhoneTransferred
                       ? "Ringing your iPhone… Hands-free Grok Voice ready"
-                      : "Laptop Voice ready — ask a question or approve/reject by voice"}
+                      : "Voice consult active — ask a question or approve/reject by voice"}
                   </span>
                 </div>
               )}
@@ -1470,7 +1487,7 @@ export function OperatorConsultPanel({
                       >
                         <div className="mb-0.5 flex items-center justify-between gap-1.5 text-[9.5px] font-semibold">
                           <span className={isUser ? "text-signal" : "text-ok"}>
-                            {isUser ? (isPhoneTransferred ? "You (iPhone)" : "You (Laptop)") : brandName}
+                            {isUser ? (isPhoneTransferred ? "You (iPhone)" : "You") : brandName}
                           </span>
                           {!isUser && onReplayTurn && (
                             <button

@@ -628,8 +628,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       operatorConsult?.selectedChoice ??
       "refund";
 
-    // 1. Switch deck view to live SQLite ERP database view with claims table
-    setRequestedDeckView({ view: "db", seq: Date.now() });
+    // 1. Pre-select claims table in case operator switches to Ledger & Schema (keep Thought Graph default!)
     setRequestedDbTable({ table: "claims", seq: Date.now() });
 
     // 2. Play commit success chime
@@ -882,8 +881,11 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         }
       } else if (ev.type === "offer") {
         brief(b, ev.type, false);
+      } else if (ev.type === "approval_needed") {
+        // Keep Decision Gate silent until operator clicks Talk (or answers on iPhone)
+        setLastBriefing(b);
       } else {
-        brief(b, ev.type, ev.type === "approval_needed");
+        brief(b, ev.type, false);
       }
     }
 
@@ -895,6 +897,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         setStageDone(false);
         setRunStatus("running");
         setRunStartedAt((t) => t ?? Date.now());
+        setRequestedDeckView({ view: "graph", seq: Date.now() });
         break;
       case "evidence": {
         const evPayload = ev.payload as unknown as EvidencePayload;
@@ -2492,6 +2495,110 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     }
   };
 
+  const startDesktopConsult = useCallback(
+    (reqIdArg?: string | null, claimIdArg?: string, claimAmountArg?: number | null, isKappaArg?: boolean) => {
+      phoneCallActiveRef.current = false;
+      phoneTransferredRef.current = false;
+
+      const pending = pendingApprovalRef.current ?? pendingApproval;
+      const reqId = reqIdArg ?? pending?.req_id ?? operatorConsult?.reqId ?? null;
+      const claimId = claimIdArg || operatorConsult?.claimId || "CLM-D-1042";
+      const amt =
+        typeof claimAmountArg === "number" && claimAmountArg > 0
+          ? claimAmountArg
+          : operatorConsult?.claimAmount ?? 587.3;
+      const isKappa =
+        typeof isKappaArg === "boolean"
+          ? isKappaArg
+          : claimId === "CLM-D-1042" || /kappa|1042/i.test(claimId);
+
+      const corpus = [pending?.risk_reason, pending?.diff_preview, pending?.spoken_summary]
+        .filter(Boolean)
+        .join(" ");
+
+      let openingLine: string;
+      if (isKappa) {
+        openingLine =
+          "Hey! Kappa's delivery is short 22 hubs—they owe us 587 euros. Should I demand the full refund, or take replacement hubs?";
+      } else if (/atlas|d-3005|inv-9901/i.test(corpus) || /3005/i.test(claimId)) {
+        openingLine =
+          "Hey! We audited Atlas Paper & Stationery delivery D-3005 and found a 500 euro discrepancy on invoice INV-9901. Should I enforce the 500 euro claim and email the supplier, or hold off?";
+      } else if (/orion|d-2010|inv-8801/i.test(corpus) || /2010/i.test(claimId)) {
+        openingLine =
+          "Hey! We audited Orion Breakroom Supplies Ltd. delivery D-2010 and found a 14.7 euro discrepancy on invoice INV-8801. Should I enforce the 14.7 euro claim and email the supplier, or hold off?";
+      } else if (/d-1017|d-1031|followup/i.test(corpus) || /followup/i.test(claimId)) {
+        openingLine =
+          "Hey! I audited paid Kappa shipments D-1017 and D-1031 and rehearsed a 175 euro SLA credit recovery. Should I enforce the 175 euro claim and email Kappa, or hold off?";
+      } else if (
+        pending?.spoken_summary &&
+        !/say approve to commit/i.test(pending.spoken_summary) &&
+        pending.spoken_summary.trim().length > 12
+      ) {
+        openingLine = pending.spoken_summary.trim();
+      } else {
+        const amtText = amt > 0 ? ` for ${amt % 1 === 0 ? amt : amt.toFixed(2)} euros` : "";
+        openingLine = `Hey! I staged claim ${claimId}${amtText} at the Decision Gate. Should I enforce the claim and email the supplier, or hold off?`;
+      }
+
+      setOperatorConsult((prev) => {
+        const hasAgentTurn = Boolean(prev?.turns?.some((t) => t.speaker === "agent"));
+        const nextTurns: OperatorConsultTurn[] = hasAgentTurn
+          ? prev!.turns
+          : [
+              ...(prev?.turns ?? []),
+              {
+                speaker: "agent",
+                text: openingLine,
+                audioUrl: "/api/voice/turn-audio",
+                ts: Date.now() / 1000,
+              },
+            ];
+        return {
+          active: true,
+          ringing: false,
+          callStatus: "connected",
+          connectedAt: prev?.connectedAt ?? Date.now(),
+          mode: "user_consult",
+          channel: "desktop_voice",
+          callId: prev?.callId || `CONSULT-${claimId}`,
+          reqId,
+          claimId,
+          claimAmount: amt,
+          counterparty: "Operator",
+          turns: nextTurns,
+          activeSpeaker: "agent",
+          selectedChoice: prev?.selectedChoice ?? null,
+          lastUiAction: prev?.lastUiAction ?? null,
+          end: null,
+          irisGate: prev?.irisGate ?? null,
+        };
+      });
+
+      lastSpokenTurnKeyRef.current = `agent:${openingLine.trim()}`;
+      lastAgentTurnSpokenAtRef.current = Date.now();
+      speakCallTurn(
+        "agent",
+        openingLine,
+        {
+          onStart: () => {
+            setSpokenText(openingLine);
+            setSpeechProgress(0);
+            setSpeaking(true);
+            setOperatorConsult((c) => (c ? { ...c, activeSpeaker: "agent" } : c));
+          },
+          onEnd: () => {
+            setSpeaking(false);
+            setSpeechProgress(1);
+            setOperatorConsult((c) => (c && c.activeSpeaker === "agent" ? { ...c, activeSpeaker: null } : c));
+          },
+          onProgress: (f) => setSpeechProgress((p) => Math.max(p, f)),
+        },
+        true
+      );
+    },
+    [operatorConsult, pendingApproval]
+  );
+
   const pickupCall = useCallback(async () => {
     phoneTransferredRef.current = true;
     phoneCallActiveRef.current = true;
@@ -2620,6 +2727,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     dismissEvidence,
     replayTurnAudio,
     operatorConsult,
+    startDesktopConsult,
     escalateToPhone,
     respondOperatorConsult,
     sendDesktopVoiceTurn,

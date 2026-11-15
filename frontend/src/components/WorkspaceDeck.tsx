@@ -1,9 +1,8 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { BrainCircuit, Database, FileCode2, Rows2 } from "lucide-react";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { RecoupRuntime } from "../hooks/useRecoup";
 import { soundFx } from "../lib/sound";
-import { usePersistentState } from "../lib/usePersistentState";
 import { DatabaseStudio } from "./DatabaseStudio";
 import { NeuralGraph } from "./NeuralGraph";
 import { cx, Segmented } from "./ui";
@@ -47,7 +46,7 @@ function CountPill({ n, active, tone = "accent" }: { n: number; active: boolean;
 
 /** Centre-column deck: Decision & Thought Graph (default on desktop), SQLite Ledger / Schema / Files, or Split View. */
 export function WorkspaceDeck({ r }: { r: RecoupRuntime }) {
-  const [rawView, setView] = usePersistentState<DeckView>("recoup.workspaceView.v2", defaultView());
+  const [rawView, setView] = useState<DeckView>(defaultView);
   const view = normalizeView(rawView);
   const nodes = r.graph.nodes.length;
 

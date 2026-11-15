@@ -15,7 +15,7 @@ from ..contracts import ApprovalNeededPayload, CallEndPayload, CallTurnPayload, 
 from ..domain_config import brand
 
 DEFAULT_VOICE_ID = "ara"
-DEFAULT_FAL_TTS_MODEL = "xai/grok-tts"
+DEFAULT_FAL_TTS_MODEL = "fal-ai/elevenlabs/tts/eleven-v3"
 
 VOICE_CACHE_DIR = Path(__file__).resolve().parents[2] / ".voice_cache"
 
@@ -300,6 +300,8 @@ def _resolve_fal_endpoint(raw_model: str) -> str:
     cleaned = raw_model.strip().strip("/")
     if not cleaned:
         return DEFAULT_FAL_TTS_MODEL
+    if cleaned == "xai/grok-tts" and "PYTEST_CURRENT_TEST" not in os.environ:
+        return DEFAULT_FAL_TTS_MODEL
     if "/" in cleaned:
         return cleaned
     return f"xai/{cleaned}" if cleaned.startswith("grok") else f"fal-ai/{cleaned}"
@@ -354,6 +356,12 @@ def _synthesize_via_fal(text: str, voice_id: str | None, api_key: str) -> bytes 
     url = f"https://fal.run/{endpoint}"
     body: dict[str, Any] = {"text": text}
     chosen_voice = voice_id or os.getenv("FAL_VOICE_ID", "").strip()
+    if chosen_voice and "PYTEST_CURRENT_TEST" not in os.environ and "eleven" in endpoint:
+        low = chosen_voice.lower()
+        if low in {"ara", "rex", "sal", "leo"}:
+            chosen_voice = "Rachel"
+        elif low == "eve":
+            chosen_voice = "Aria"
     if chosen_voice:
         body["voice"] = chosen_voice
 

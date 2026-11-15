@@ -169,6 +169,7 @@ export default function App() {
             committedClaimId={committedClaimId}
             voiceOn={r.voiceOn}
             speaking={r.speaking}
+            onStartDesktopConsult={r.startDesktopConsult}
             onDesktopVoiceTurn={desktopVoiceTurnHandler}
             onEscalateToPhone={r.escalateToPhone}
             onSelectResolution={r.respondOperatorConsult}
