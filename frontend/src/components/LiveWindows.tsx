@@ -1068,7 +1068,7 @@ export function LiveWindowLayer({
   };
 
   return (
-    <div className="fixed right-5 bottom-5 lg:right-auto lg:left-1/2 lg:-translate-x-1/2 z-40 w-[min(560px,92vw)] h-[440px] pointer-events-none">
+    <div className="fixed right-4 bottom-4 z-40 w-[min(490px,92vw)] h-[410px] pointer-events-none">
       <AnimatePresence initial={false}>
         {currentDeck.map((w) => {
           let stackIndex = 0;

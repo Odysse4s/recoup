@@ -427,3 +427,112 @@ def test_post_commit_voice_close_and_stage_followup_offer_loop(tmp_path: Path, m
             ev.type == EventType.FORGE_REGISTERED and ev.payload.get("name") == "compute_sla_late_credit"
             for ev in BUS.history
         )
+
+
+def test_voice_math_breakdown_and_ui_action_clearing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    ws = tmp_path / "ws"
+    populate_default_seed(ws)
+    real = Env(root_dir=ws, db_path=ws / "app.db")
+    log = UndoLog(tmp_path / "undo_log.json")
+
+    monkeypatch.setattr(server, "WS", ws)
+    monkeypatch.setattr(server, "REAL", real)
+    monkeypatch.setattr(server, "LOG", log)
+    monkeypatch.setenv("VOICE_PROVIDER", "offline")
+    monkeypatch.delenv("FAL_KEY", raising=False)
+
+    BUS.history.clear()
+    PENDING.clear()
+    PENDING_PAYLOADS.clear()
+    server.ACTIVE_CALL = None
+
+    with TestClient(server.app) as client:
+        client.post("/api/call/user-consult", json={"claim_id": "CLM-D-1042"})
+
+        # 1. "break down the math" & clipped "down the math" return instant breakdown WITHOUT popping file window
+        for phrase in ("break down the math", "down the math", "explain the math"):
+            resp = client.post(
+                "/api/call/user-respond",
+                json={"transcript": phrase, "claim_id": "CLM-D-1042"},
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert "Sixteen missing hubs" in body["reply_text"]
+            assert body["ui_action"] is None
+            assert server.ACTIVE_CALL["last_ui_action"] is None
+
+        # 2. Explicit file request DOES return open_file ui_action
+        open_resp = client.post(
+            "/api/call/user-respond",
+            json={"transcript": "open the receiving note file", "claim_id": "CLM-D-1042"},
+        )
+        assert open_resp.status_code == 200
+        open_body = open_resp.json()
+        assert open_body["ui_action"] is not None
+        assert open_body["ui_action"]["action"] == "open_file"
+        assert open_body["ui_action"]["path"] == "inbox/D-1042_receiving_note.md"
+        assert server.ACTIVE_CALL["last_ui_action"] is not None
+
+        # 3. Follow-up conversational turn clears stale last_ui_action
+        next_resp = client.post(
+            "/api/call/user-respond",
+            json={"transcript": "who is the supplier?", "claim_id": "CLM-D-1042"},
+        )
+        assert next_resp.status_code == 200
+        assert next_resp.json()["ui_action"] is None
+        assert server.ACTIVE_CALL["last_ui_action"] is None
+
+
+def test_stage_demo_report_clean_diffs_previews_and_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    ws = tmp_path / "ws"
+    populate_default_seed(ws)
+    real = Env(root_dir=ws, db_path=ws / "app.db")
+    log = UndoLog(tmp_path / "undo_log.json")
+
+    monkeypatch.setattr(server, "WS", ws)
+    monkeypatch.setattr(server, "REAL", real)
+    monkeypatch.setattr(server, "LOG", log)
+    monkeypatch.setenv("LLM_PROVIDER", "fal")
+    monkeypatch.setenv("FAL_MODEL", "google/gemini-2.5-flash")
+    monkeypatch.setenv("VOICE_PROVIDER", "offline")
+    monkeypatch.delenv("FAL_KEY", raising=False)
+
+    BUS.history.clear()
+    PENDING.clear()
+    PENDING_PAYLOADS.clear()
+    server.ACTIVE_CALL = None
+
+    async def _exercise() -> None:
+        rehearsal_env = server.make_rehearsal_env(real)
+        task = asyncio.create_task(
+            server._run_stage_demo(
+                run_id="demo_rep01",
+                pace_ms=0,
+                anticipate_after=False,
+                rehearsal_env=rehearsal_env,
+            )
+        )
+        for _ in range(100):
+            if PENDING:
+                break
+            await asyncio.sleep(0.01)
+        assert len(PENDING) == 1
+
+        _, md_at_gate = server._build_run_report_markdown("demo_rep01")
+        assert "`fal` (`google/gemini-2.5-flash`)" in md_at_gate
+        assert "**Status:** `awaiting_approval`" in md_at_gate
+        assert "D-1042_receiving_note.md" not in md_at_gate.split("## Rehearsal Diffs")[1].split("## Verification")[0]
+        assert "`claims/CLM-D-1042.md`" in md_at_gate
+        assert "OK (0 ms): ``" not in md_at_gate
+
+        req_id = next(iter(PENDING.keys()))
+        PENDING[req_id].set_result(True)
+        await task
+
+    asyncio.run(_exercise())
+    memo_text = (ws / "claims" / "CLM-D-1042.md").read_text(encoding="utf-8")
+    assert "16 units missing" in memo_text
+    assert "6 units DOA" in memo_text
+    assert "2 days late" in memo_text
+    assert "8 units missing" not in memo_text
+

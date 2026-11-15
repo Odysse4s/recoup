@@ -165,6 +165,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   const triggerGoalRef = useRef<((goalText: string) => Promise<void>) | null>(null);
   const acceptOfferRef = useRef<((offerId: string) => Promise<void>) | null>(null);
   const lastUiActionRef = useRef<{ key: string; ts: number } | null>(null);
+  const lastPolledUiActionSigRef = useRef<string | null>(null);
+  const lastSentVoiceTurnRef = useRef<{ text: string; ts: number } | null>(null);
 
   const queueRef = useRef<ServerEvent[]>([]);
   const liveCountRef = useRef(0);
@@ -416,7 +418,13 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           });
 
           if (ac.last_ui_action) {
-            executeUiActionRef.current?.(ac.last_ui_action);
+            const polledSig = `${ac.call_id ?? ""}:${(ac.turns ?? []).length}:${ac.last_ui_action.action}:${ac.last_ui_action.path ?? ""}:${ac.last_ui_action.view ?? ""}:${ac.last_ui_action.table ?? ""}:${ac.last_ui_action.choice ?? ""}`;
+            if (lastPolledUiActionSigRef.current !== polledSig) {
+              lastPolledUiActionSigRef.current = polledSig;
+              executeUiActionRef.current?.(ac.last_ui_action);
+            }
+          } else {
+            lastPolledUiActionSigRef.current = null;
           }
         } else if (data.active_call === null && modeRef.current === "live") {
           setOperatorConsult((prev) => (prev?.active ? null : prev));
@@ -667,7 +675,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       if (!uiAction || !uiAction.action) return;
       const actionKey = `${uiAction.action}:${uiAction.path || ""}:${uiAction.view || ""}:${uiAction.table || ""}:${uiAction.choice || ""}`;
       const now = Date.now();
-      if (lastUiActionRef.current && lastUiActionRef.current.key === actionKey && now - lastUiActionRef.current.ts < 3000) {
+      if (lastUiActionRef.current && lastUiActionRef.current.key === actionKey && now - lastUiActionRef.current.ts < 12000) {
         return;
       }
       lastUiActionRef.current = { key: actionKey, ts: now };
@@ -722,7 +730,6 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           pinned: true,
           instant: false,
         });
-        soundFx.playWindowPop();
       } else if (uiAction.action === "switch_view") {
         const targetView: "graph" | "db" | "split" =
           uiAction.view === "graph" ? "graph" : uiAction.view === "split" ? "split" : "db";
@@ -1542,6 +1549,9 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     }
     lastAgentTurnSpokenAtRef.current = 0;
     lastSpokenTurnKeyRef.current = null;
+    lastUiActionRef.current = null;
+    lastPolledUiActionSigRef.current = null;
+    lastSentVoiceTurnRef.current = null;
     commitCelebratedRef.current = false;
     forgeTestReceivedRef.current = false;
     forgeHeroUntilRef.current = 0;
@@ -2113,6 +2123,24 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     const trimmed = text.trim();
     if (!trimmed) return;
 
+    const normVoice = (s: string) =>
+      s
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    const nowVoice = Date.now();
+    if (lastSentVoiceTurnRef.current && nowVoice - lastSentVoiceTurnRef.current.ts < 4200) {
+      const a = normVoice(trimmed);
+      const b = normVoice(lastSentVoiceTurnRef.current.text);
+      const shorter = a.length <= b.length ? a : b;
+      const longer = a.length <= b.length ? b : a;
+      if (a && b && (a === b || (shorter.length >= 6 && longer.includes(shorter)))) {
+        return;
+      }
+    }
+    lastSentVoiceTurnRef.current = { text: trimmed, ts: nowVoice };
+
     phoneCallActiveRef.current = false;
     phoneTransferredRef.current = false;
 
@@ -2369,6 +2397,9 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     }
     lastAgentTurnSpokenAtRef.current = 0;
     lastSpokenTurnKeyRef.current = null;
+    lastUiActionRef.current = null;
+    lastPolledUiActionSigRef.current = null;
+    lastSentVoiceTurnRef.current = null;
     deferredApprovalRef.current = null;
     clearWorkspaceUi();
     setMode("live");

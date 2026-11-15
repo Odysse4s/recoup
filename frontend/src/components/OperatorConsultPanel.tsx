@@ -371,7 +371,32 @@ export function OperatorConsultPanel({
     return `${m}:${s}`;
   }, [timerTick]);
 
-  // Central speech text dispatcher with deduplication
+  // Central speech text dispatcher with fuzzy echo/clipping deduplication
+  const lastWebSpeechActivityRef = useRef<number>(0);
+
+  const isNearDuplicateTranscript = useCallback((a: string, b: string): boolean => {
+    const norm = (s: string) =>
+      s
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    const na = norm(a);
+    const nb = norm(b);
+    if (!na || !nb) return false;
+    if (na === nb) return true;
+    const shorter = na.length <= nb.length ? na : nb;
+    const longer = na.length <= nb.length ? nb : na;
+    if (shorter.length >= 6 && longer.includes(shorter)) return true;
+    const wa = na.split(" ").filter((w) => w.length >= 2);
+    const wb = new Set(nb.split(" ").filter((w) => w.length >= 2));
+    if (Math.min(wa.length, wb.size) >= 2) {
+      const shared = wa.filter((w) => wb.has(w)).length;
+      if (shared / Math.min(wa.length, wb.size) >= 0.65) return true;
+    }
+    return false;
+  }, []);
+
   const handleProcessedText = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
@@ -379,8 +404,8 @@ export function OperatorConsultPanel({
 
       const now = Date.now();
       if (
-        trimmed.toLowerCase() === lastProcessedTranscriptRef.current.toLowerCase() &&
-        now - lastTranscriptTimeRef.current < 2500
+        now - lastTranscriptTimeRef.current < 4500 &&
+        isNearDuplicateTranscript(trimmed, lastProcessedTranscriptRef.current)
       ) {
         return;
       }
@@ -392,13 +417,19 @@ export function OperatorConsultPanel({
         await onDesktopVoiceTurn(trimmed);
       }
     },
-    [onDesktopVoiceTurn]
+    [isNearDuplicateTranscript, onDesktopVoiceTurn]
   );
 
-  // Send recorded Audio Blob to Backend /api/voice/stt
+  // Send recorded Audio Blob to Backend /api/voice/stt (only when Web Speech API hasn't already handled the utterance!)
   const handleUtteranceBlob = useCallback(
     async (blob: Blob, ext: string) => {
       if (blob.size < 400) return;
+      const now = Date.now();
+      if (speakingRef.current || now < echoGuardUntilRef.current) return;
+      if (now - lastTranscriptTimeRef.current < 4200) return;
+      if (lastWebSpeechActivityRef.current > 0 && now - lastWebSpeechActivityRef.current < 3500) {
+        return;
+      }
       setSttSubmitting(true);
       try {
         const formData = new FormData();
@@ -410,6 +441,10 @@ export function OperatorConsultPanel({
         if (res.ok) {
           const data = (await res.json()) as { ok?: boolean; text?: string; transcript?: string };
           const sttText = (data.text || data.transcript || "").trim();
+          // If Web Speech API already fired and started agent TTS while STT upload was in flight, ignore clipped duplicate
+          if (speakingRef.current && Date.now() - lastTranscriptTimeRef.current < 5500) {
+            return;
+          }
           if (sttText) {
             await handleProcessedText(sttText);
           }
@@ -450,8 +485,11 @@ export function OperatorConsultPanel({
   // Web Speech API fallback / instant recognizer (strictly paused while laptop TTS is speaking so speaker audio never echoes back!)
   const speechInput = useSpeechInput((text, final) => {
     if (speakingRef.current || Date.now() < echoGuardUntilRef.current) return;
-    if (final && text.trim() && laptopMicOn && !isPhoneTransferred && !consultSessionEnded) {
-      void handleProcessedText(text.trim());
+    if (text.trim() && laptopMicOn && !isPhoneTransferred && !consultSessionEnded) {
+      lastWebSpeechActivityRef.current = Date.now();
+      if (final) {
+        void handleProcessedText(text.trim());
+      }
     }
   });
 
@@ -547,6 +585,10 @@ export function OperatorConsultPanel({
   );
 
   const completedTurnSigsRef = useRef<Set<string>>(new Set());
+  const startedTurnSigRef = useRef<string | null>(null);
+  const revealStartedAtRef = useRef<number>(0);
+  const revealIntervalRef = useRef<ReturnType<typeof window.setInterval> | null>(null);
+  const revealTimeoutRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const initialMountCheckRef = useRef<boolean>(true);
   const speakingRef = useRef(speaking);
   speakingRef.current = speaking;
@@ -556,21 +598,34 @@ export function OperatorConsultPanel({
   const [revealingSig, setRevealingSig] = useState<string | null>(null);
   const [visibleWordCount, setVisibleWordCount] = useState<number>(Infinity);
 
+  const clearRevealTimers = useCallback(() => {
+    if (revealTimeoutRef.current !== null) {
+      window.clearTimeout(revealTimeoutRef.current);
+      revealTimeoutRef.current = null;
+    }
+    if (revealIntervalRef.current !== null) {
+      window.clearInterval(revealIntervalRef.current);
+      revealIntervalRef.current = null;
+    }
+  }, []);
+
   useEffect(() => {
-    if (!lastTurnSig || !lastTurn || !isLastTurnAgent) {
+    return () => clearRevealTimers();
+  }, [clearRevealTimers]);
+
+  useEffect(() => {
+    if (!lastTurnSig || !isLastTurnAgent) {
+      clearRevealTimers();
+      startedTurnSigRef.current = null;
       setRevealingSig(null);
       setVisibleWordCount(Infinity);
       return;
     }
 
-    if (isConsultEndedOrPast) {
+    if (isConsultEndedOrPast || completedTurnSigsRef.current.has(lastTurnSig)) {
+      clearRevealTimers();
       completedTurnSigsRef.current.add(lastTurnSig);
-      setRevealingSig(null);
-      setVisibleWordCount(Infinity);
-      return;
-    }
-
-    if (completedTurnSigsRef.current.has(lastTurnSig)) {
+      startedTurnSigRef.current = null;
       setRevealingSig(null);
       setVisibleWordCount(Infinity);
       return;
@@ -580,46 +635,60 @@ export function OperatorConsultPanel({
       initialMountCheckRef.current = false;
       if (!speakingRef.current && activeSpeakerRef.current !== "agent") {
         completedTurnSigsRef.current.add(lastTurnSig);
+        startedTurnSigRef.current = null;
         setRevealingSig(null);
         setVisibleWordCount(Infinity);
         return;
       }
     }
 
+    // Never restart or tear down an already-running word reveal on 1.5s state poll ticks!
+    if (startedTurnSigRef.current === lastTurnSig) {
+      return;
+    }
+
+    clearRevealTimers();
     const totalWords = lastTurnWords.length;
     if (totalWords <= 1) {
       completedTurnSigsRef.current.add(lastTurnSig);
+      startedTurnSigRef.current = null;
       setRevealingSig(null);
       setVisibleWordCount(Infinity);
       return;
     }
 
+    startedTurnSigRef.current = lastTurnSig;
+    revealStartedAtRef.current = Date.now();
     setRevealingSig(lastTurnSig);
-    setVisibleWordCount(0);
+    setVisibleWordCount(1);
 
-    let intervalId: ReturnType<typeof window.setInterval> | null = null;
-
-    const timeoutId = window.setTimeout(() => {
-      setVisibleWordCount(1);
-      intervalId = window.setInterval(() => {
+    revealTimeoutRef.current = window.setTimeout(() => {
+      revealIntervalRef.current = window.setInterval(() => {
         setVisibleWordCount((prev) => {
           const next = prev + 1;
           if (next >= totalWords) {
-            if (intervalId !== null) window.clearInterval(intervalId);
+            clearRevealTimers();
             completedTurnSigsRef.current.add(lastTurnSig);
+            startedTurnSigRef.current = null;
             setRevealingSig(null);
             return Infinity;
           }
           return next;
         });
-      }, 310);
-    }, 350);
+      }, 155);
+    }, 90);
+  }, [lastTurnSig, isLastTurnAgent, lastTurnWords.length, isConsultEndedOrPast, clearRevealTimers]);
 
-    return () => {
-      window.clearTimeout(timeoutId);
-      if (intervalId !== null) window.clearInterval(intervalId);
-    };
-  }, [lastTurnSig, lastTurn, isLastTurnAgent, lastTurnWords.length, isConsultEndedOrPast]);
+  // Ensure caption completes cleanly once audio playback finishes
+  useEffect(() => {
+    if (!speaking && revealingSig && Date.now() - revealStartedAtRef.current > 900) {
+      clearRevealTimers();
+      completedTurnSigsRef.current.add(revealingSig);
+      startedTurnSigRef.current = null;
+      setRevealingSig(null);
+      setVisibleWordCount(Infinity);
+    }
+  }, [speaking, revealingSig, clearRevealTimers]);
 
   const turnsCount = sanitizedTurns.length;
   useEffect(() => {

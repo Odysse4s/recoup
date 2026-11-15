@@ -603,9 +603,8 @@ async def _run_stage_demo(
         commit_plan: list[ToolCall] = []
         previews: dict[str, str] = {}
 
-        # Step 1: read_file (deliveries/D-1042_receiving_note.md)
-        note_p1 = rehearsal_env.root_dir / "deliveries" / "D-1042_receiving_note.md"
-        note_p2 = rehearsal_env.root_dir / "inbox" / "D-1042_receiving_note.md"
+        # Step 1: read_file (inbox/D-1042_receiving_note.md — matches REAL seed so rehearsal diff stays clean)
+        note_rel = "inbox/D-1042_receiving_note.md"
         note_text = (
             "# IT Receiving Log: Shipment D-1042\n\n"
             "- Vendor: Kappa Office Systems S.A.\n"
@@ -613,16 +612,33 @@ async def _run_stage_demo(
             "- PO quantity: 120 units of HUB-USBC; IT stockroom counted 104 units delivered.\n"
             "- 6 units arrived with crushed enclosures / DOA ports, quarantined for RMA.\n"
         )
-        for np in (note_p1, note_p2):
-            if not np.exists():
+        real_note_fp = REAL.root_dir / note_rel
+        rehearsal_note_fp = rehearsal_env.root_dir / note_rel
+        if not real_note_fp.exists() and not rehearsal_note_fp.exists():
+            for np in (real_note_fp, rehearsal_note_fp):
                 np.parent.mkdir(parents=True, exist_ok=True)
                 np.write_text(note_text, encoding="utf-8")
+        elif real_note_fp.exists() and not rehearsal_note_fp.exists():
+            rehearsal_note_fp.parent.mkdir(parents=True, exist_ok=True)
+            rehearsal_note_fp.write_text(real_note_fp.read_text(encoding="utf-8"), encoding="utf-8")
 
-        call_rf = ToolCall(id="call_rf_1", name="read_file", args={"path": "deliveries/D-1042_receiving_note.md"})
+        call_rf = ToolCall(id="call_rf_1", name="read_file", args={"path": note_rel})
         BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_rf.model_dump()}, step=1, thought="Reading receiving inspection note.")
         rf_out = REGISTRY["read_file"].do(call_rf.args, rehearsal_env) if "read_file" in REGISTRY else {}
-        previews[call_rf.id] = REGISTRY["read_file"].preview(call_rf.args, rehearsal_env) if "read_file" in REGISTRY else ""
-        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_rf.model_dump(), "output": rf_out}, step=1)
+        previews[call_rf.id] = (
+            REGISTRY["read_file"].preview(call_rf.args, rehearsal_env)
+            if "read_file" in REGISTRY
+            else "read inbox/D-1042_receiving_note.md (104 received, 6 damaged, 2d late)"
+        )
+        if not previews[call_rf.id]:
+            previews[call_rf.id] = "read inbox/D-1042_receiving_note.md (104 received, 6 damaged, 2d late)"
+        BUS.emit(
+            run_id,
+            EventType.TOOL_DONE,
+            {"call": call_rf.model_dump(), "output": rf_out, "preview": previews[call_rf.id]},
+            step=1,
+            latency_ms=14,
+        )
         await _pace()
 
         # Step 2: query_db (contracts & invoices for INV-7781 / Kappa Office Systems)
@@ -633,8 +649,20 @@ async def _run_stage_demo(
         )
         BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_q.model_dump()}, step=2, thought="Querying deliveries & invoices for INV-7781.")
         q_out = REGISTRY["query_db"].do(call_q.args, rehearsal_env) if "query_db" in REGISTRY else {}
-        previews[call_q.id] = REGISTRY["query_db"].preview(call_q.args, rehearsal_env) if "query_db" in REGISTRY else ""
-        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_q.model_dump(), "output": q_out}, step=2)
+        previews[call_q.id] = (
+            REGISTRY["query_db"].preview(call_q.args, rehearsal_env)
+            if "query_db" in REGISTRY
+            else "1 row: D-1042 | SUP-KAPPA | INV-7781 | unpaid"
+        )
+        if not previews[call_q.id]:
+            previews[call_q.id] = "1 row: D-1042 | SUP-KAPPA | INV-7781 | unpaid"
+        BUS.emit(
+            run_id,
+            EventType.TOOL_DONE,
+            {"call": call_q.model_dump(), "output": q_out, "preview": previews[call_q.id]},
+            step=2,
+            latency_ms=19,
+        )
         await _pace()
 
         # Step 3: FORGE_SPEC -> FORGE_TEST -> FORGE_REGISTERED
@@ -749,8 +777,14 @@ async def _run_stage_demo(
             REGISTRY["compute_supplier_claim"].uses += 1
         else:
             calc_out = {"result": {"total": 587.30}}
-        previews[call_calc.id] = "total: 587.30 EUR"
-        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_calc.model_dump(), "output": calc_out}, step=4)
+        previews[call_calc.id] = "total: 587.30 EUR (overcharge 168.00 + shortfall 280.00 + damaged 105.00 + late 34.30)"
+        BUS.emit(
+            run_id,
+            EventType.TOOL_DONE,
+            {"call": call_calc.model_dump(), "output": calc_out, "preview": previews[call_calc.id]},
+            step=4,
+            latency_ms=22,
+        )
         await _pace()
 
         # Step 5: upsert_row on claims & invoices
@@ -771,8 +805,18 @@ async def _run_stage_demo(
         commit_plan.append(call_c)
         BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_c.model_dump()}, step=5, thought="Drafting CLM-D-1042 in claims ledger.")
         c_out = REGISTRY["upsert_row"].do(claims_args, rehearsal_env) if "upsert_row" in REGISTRY else {}
-        previews[call_c.id] = REGISTRY["upsert_row"].preview(claims_args, rehearsal_env) if "upsert_row" in REGISTRY else ""
-        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_c.model_dump(), "output": c_out}, step=5)
+        previews[call_c.id] = (
+            REGISTRY["upsert_row"].preview(claims_args, rehearsal_env)
+            if "upsert_row" in REGISTRY
+            else "upsert claims[id='CLM-D-1042'] amount=587.30"
+        )
+        BUS.emit(
+            run_id,
+            EventType.TOOL_DONE,
+            {"call": call_c.model_dump(), "output": c_out, "preview": previews[call_c.id]},
+            step=5,
+            latency_ms=16,
+        )
         await _pace()
 
         invoices_args = {
@@ -787,8 +831,18 @@ async def _run_stage_demo(
         commit_plan.append(call_i)
         BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_i.model_dump()}, step=5, thought="Placing invoice INV-7781 on dispute hold.")
         i_out = REGISTRY["upsert_row"].do(invoices_args, rehearsal_env) if "upsert_row" in REGISTRY else {}
-        previews[call_i.id] = REGISTRY["upsert_row"].preview(invoices_args, rehearsal_env) if "upsert_row" in REGISTRY else ""
-        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_i.model_dump(), "output": i_out}, step=5)
+        previews[call_i.id] = (
+            REGISTRY["upsert_row"].preview(invoices_args, rehearsal_env)
+            if "upsert_row" in REGISTRY
+            else "upsert invoices[id='INV-7781'] status='disputed'"
+        )
+        BUS.emit(
+            run_id,
+            EventType.TOOL_DONE,
+            {"call": call_i.model_dump(), "output": i_out, "preview": previews[call_i.id]},
+            step=5,
+            latency_ms=15,
+        )
         await _pace()
 
         # Step 6: write_file claims/CLM-D-1042.md
@@ -799,10 +853,10 @@ async def _run_stage_demo(
             "- Delivery: D-1042\n"
             "- Total Claim Amount: EUR 587.30\n\n"
             "### Itemized Breakdown\n"
-            "1. Overcharge: EUR 168.00\n"
-            "2. Shortfall (8 units missing): EUR 280.00\n"
-            "3. Damaged goods (3 units): EUR 105.00\n"
-            "4. SLA delivery delay penalty (7 days): EUR 34.30\n"
+            "1. Overcharge (120 units @ +EUR 1.40/unit): EUR 168.00\n"
+            "2. Shortfall (16 units missing @ EUR 17.50/unit): EUR 280.00\n"
+            "3. Damaged goods (6 units DOA @ EUR 17.50/unit): EUR 105.00\n"
+            "4. SLA delivery delay penalty (2 days late): EUR 34.30\n"
         )
         write_args = {
             "path": "claims/CLM-D-1042.md",
@@ -812,8 +866,18 @@ async def _run_stage_demo(
         commit_plan.append(call_w)
         BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_w.model_dump()}, step=6, thought="Staging credit memo document claims/CLM-D-1042.md.")
         w_out = REGISTRY["write_file"].do(write_args, rehearsal_env) if "write_file" in REGISTRY else {}
-        previews[call_w.id] = REGISTRY["write_file"].preview(write_args, rehearsal_env) if "write_file" in REGISTRY else ""
-        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_w.model_dump(), "output": w_out}, step=6)
+        previews[call_w.id] = (
+            REGISTRY["write_file"].preview(write_args, rehearsal_env)
+            if "write_file" in REGISTRY
+            else "write claims/CLM-D-1042.md (EUR 587.30 itemized memo)"
+        )
+        BUS.emit(
+            run_id,
+            EventType.TOOL_DONE,
+            {"call": call_w.model_dump(), "output": w_out, "preview": previews[call_w.id]},
+            step=6,
+            latency_ms=12,
+        )
         await _pace()
 
         # Step 7: send_email (queued in rehearsal_env.outbox, ZERO vendor calls!)
@@ -832,8 +896,18 @@ async def _run_stage_demo(
         commit_plan.append(call_e)
         BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_e.model_dump()}, step=7, thought="Queuing outbound vendor credit claim email.")
         e_out = REGISTRY["send_email"].do(email_args, rehearsal_env) if "send_email" in REGISTRY else {}
-        previews[call_e.id] = REGISTRY["send_email"].preview(email_args, rehearsal_env) if "send_email" in REGISTRY else ""
-        BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_e.model_dump(), "output": e_out}, step=7)
+        previews[call_e.id] = (
+            REGISTRY["send_email"].preview(email_args, rehearsal_env)
+            if "send_email" in REGISTRY
+            else "staged email -> accounts@kappaoffice.example (EUR 587.30)"
+        )
+        BUS.emit(
+            run_id,
+            EventType.TOOL_DONE,
+            {"call": call_e.model_dump(), "output": e_out, "preview": previews[call_e.id]},
+            step=7,
+            latency_ms=9,
+        )
         await _pace()
 
         # VERIFY_RESULT + REHEARSE_REPORT
@@ -1191,7 +1265,12 @@ async def _run_followup_offer_loop(run_id: str, offer: PreparedOffer, pace_ms: i
         if "query_db" in REGISTRY:
             with contextlib.suppress(Exception):
                 q_out = REGISTRY["query_db"].do(sql_args, rehearsal_env)
-        BUS.emit(run_id, EventType.TOOL_DONE, {"call": c1.model_dump(), "output": q_out}, step=1)
+        fu_q_prev = (
+            REGISTRY["query_db"].preview(sql_args, rehearsal_env)
+            if "query_db" in REGISTRY
+            else "2 rows: D-1017 (INV-7702), D-1031 (INV-7735)"
+        ) or "2 rows: D-1017 (INV-7702), D-1031 (INV-7735)"
+        BUS.emit(run_id, EventType.TOOL_DONE, {"call": c1.model_dump(), "output": q_out, "preview": fu_q_prev}, step=1, latency_ms=17)
         await _pace()
 
         # Step 2: Forge compute_sla_late_credit
@@ -1259,7 +1338,13 @@ async def _run_followup_offer_loop(run_id: str, offer: PreparedOffer, pace_ms: i
             REGISTRY["compute_sla_late_credit"].uses += 1
         else:
             calc_out = {"result": {"total_credit_eur": 175.0}}
-        BUS.emit(run_id, EventType.TOOL_DONE, {"call": c3.model_dump(), "output": calc_out}, step=3)
+        BUS.emit(
+            run_id,
+            EventType.TOOL_DONE,
+            {"call": c3.model_dump(), "output": calc_out, "preview": "total_credit_eur: 175.00 (105.00 + 70.00)"},
+            step=3,
+            latency_ms=21,
+        )
         await _pace()
 
         # Step 4: Stage claims CLM-D-1017 & CLM-D-1031
@@ -1300,7 +1385,14 @@ async def _run_followup_offer_loop(run_id: str, offer: PreparedOffer, pace_ms: i
             previews[c4b.id] = REGISTRY["upsert_row"].preview(c4_b_args, rehearsal_env)
         else:
             out_4a = {}
-        BUS.emit(run_id, EventType.TOOL_DONE, {"call": c4a.model_dump(), "output": out_4a}, step=4)
+            previews[c4a.id] = "upsert claims[id='CLM-D-1017'] & claims[id='CLM-D-1031']"
+        BUS.emit(
+            run_id,
+            EventType.TOOL_DONE,
+            {"call": c4a.model_dump(), "output": out_4a, "preview": previews.get(c4a.id, "staged CLM-D-1017 & CLM-D-1031")},
+            step=4,
+            latency_ms=15,
+        )
         await _pace()
 
         # Step 5: Stage consolidated recovery email
@@ -1318,8 +1410,14 @@ async def _run_followup_offer_loop(run_id: str, offer: PreparedOffer, pace_ms: i
         commit_plan.append(c5)
         BUS.emit(run_id, EventType.TOOL_CALL, {"call": c5.model_dump()}, step=5, thought="Staging EUR 175.00 retroactive SLA recovery email.")
         e5_out = REGISTRY["send_email"].do(fu_email_args, rehearsal_env) if "send_email" in REGISTRY else {}
-        previews[c5.id] = REGISTRY["send_email"].preview(fu_email_args, rehearsal_env) if "send_email" in REGISTRY else ""
-        BUS.emit(run_id, EventType.TOOL_DONE, {"call": c5.model_dump(), "output": e5_out}, step=5)
+        previews[c5.id] = REGISTRY["send_email"].preview(fu_email_args, rehearsal_env) if "send_email" in REGISTRY else "staged email -> accounts@kappaoffice.example"
+        BUS.emit(
+            run_id,
+            EventType.TOOL_DONE,
+            {"call": c5.model_dump(), "output": e5_out, "preview": previews[c5.id]},
+            step=5,
+            latency_ms=11,
+        )
         await _pace()
 
         vp = VerifyPayload(
@@ -1570,7 +1668,9 @@ def _build_run_report_markdown(run_id: str | None = None) -> tuple[str, str]:
 
     provider = os.getenv("LLM_PROVIDER", "fake")
     model = (
-        os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+        os.getenv("FAL_MODEL", "google/gemini-2.5-flash")
+        if provider == "fal"
+        else os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
         if provider == "groq"
         else os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
         if provider == "gemini"
@@ -1671,6 +1771,8 @@ def _build_run_report_markdown(run_id: str | None = None) -> tuple[str, str]:
             call_md.append(f"- **Call Ended:** Outcome `{outcome}`{agreed_str}" + (f" — {summary}" if summary else ""))
         elif ev.type == EventType.APPROVAL_NEEDED:
             gate_md.append(f"- Paused on `{p.get('tool_name')}`: {p.get('risk_reason')}")
+            if status == "running":
+                status = "awaiting_approval"
         elif ev.type == EventType.APPROVAL_RESULT:
             dec = p.get("outcome") or ("approved" if p.get("approved") else "rejected")
             gate_md.append(f"- Decision: `{dec}`")
@@ -3762,11 +3864,15 @@ _HANGUP_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 _COMPARE_INTENT_RE = re.compile(
-    r"\b(options|what\s+are\s+(?:my|the|our)\s+options|compare|break\s+it\s+down|difference|explain|what\s+if|vs|versus|database|ledger|table)\b",
+    r"\b(options|what\s+are\s+(?:my|the|our)\s+options|compare|difference|what\s+if|vs|versus|database|ledger|table)\b",
     re.IGNORECASE,
 )
 _WHY_INTENT_RE = re.compile(
-    r"\b(why\s+(?:587|do\s+they\s+owe|they\s+owe)|how\s+did\s+you\s+calculate|how\s+was\s+this\s+calculated|proof|missing|broken)\b",
+    r"\b(break\s*(?:it\s*)?down|(?:down\s+)?the\s+math|math|calculat\w*|itemiz\w*|numbers|why\s+(?:587|500|175|14|71|do\s+they\s+owe|they\s+owe)|how\s+(?:did\s+you|was\s+this|much\s+do\s+they\s+owe)|proof|missing|broken)\b",
+    re.IGNORECASE,
+)
+_OPEN_NOTE_CMD_RE = re.compile(
+    r"\b(open|show|view|read|pull\s+up|inspect)\b.*\b(note|file|receipt|log|document|proof)\b",
     re.IGNORECASE,
 )
 _STAGED_INFO_RE = re.compile(
@@ -4310,10 +4416,23 @@ async def handle_user_consult_response(request: Request):
 
     # Questions & UI Exploration (only if not an explicit button commit)
     if explicit_choice not in ("refund", "redelivery"):
-        # Intent 2: Compare / options / break it down
+        # Intent 3 (evaluated before Compare when math/breakdown is asked): Why 587 / Break down the math / Proof
+        is_why_intent = (
+            ui_command == "open_receiving_note"
+            or bool(_OPEN_NOTE_CMD_RE.search(lowered))
+            or bool(_WHY_INTENT_RE.search(lowered))
+            or (bool(re.search(r"\bwhy\b", lowered)) and "option" not in lowered)
+        )
+        # Intent 2: Compare / options / ledger
         is_compare_intent = (
             ui_command in ("open_db", "compare_options")
-            or bool(_COMPARE_INTENT_RE.search(lowered))
+            or (
+                not is_why_intent
+                and (
+                    bool(_COMPARE_INTENT_RE.search(lowered))
+                    or (bool(re.search(r"\bexplain\b", lowered)) and "option" in lowered)
+                )
+            )
         )
         if is_compare_intent:
             ui_action = UiActionPayload(
@@ -4410,42 +4529,42 @@ async def handle_user_consult_response(request: Request):
                 "iris_intent": iris_res,
             }
 
-        # Intent 3: Why 587 / Proof / Missing / Broken
-        is_why_intent = (
-            ui_command == "open_receiving_note"
-            or bool(_WHY_INTENT_RE.search(lowered))
-            or (bool(re.search(r"\bwhy\b", lowered)) and "option" not in lowered)
-        )
         if is_why_intent:
-            target_deliv = "D-1042" if is_kappa else delivery_id
-            note_rel: str | None = None
-            note_content: str | None = None
-            if target_deliv:
-                for cand_rel in (f"inbox/{target_deliv}_receiving_note.md", f"deliveries/{target_deliv}_receiving_note.md"):
-                    cand_fp = REAL.root_dir / cand_rel
-                    if cand_fp.is_file():
-                        note_rel = cand_rel
-                        with contextlib.suppress(Exception):
-                            note_content = cand_fp.read_text(encoding="utf-8")
-                        break
-                if note_rel is None:
-                    note_rel = f"inbox/{target_deliv}_receiving_note.md"
-            if is_kappa:
-                ui_action = UiActionPayload(
-                    action="open_file",
-                    path=note_rel or "inbox/D-1042_receiving_note.md",
-                    content=note_content,
-                    label="Opening delivery receiving note",
-                ).model_dump(exclude_none=True)
-            else:
-                ui_action = UiActionPayload(
-                    action="open_file" if note_rel else "switch_view",
-                    path=note_rel,
-                    content=note_content,
-                    view="db" if not note_rel else None,
-                    table="invoices" if not note_rel else None,
-                    label=f"Opening delivery receiving note {delivery_id}" if note_rel else "Opening invoices table",
-                ).model_dump(exclude_none=True)
+            wants_note_window = (
+                ui_command == "open_receiving_note"
+                or bool(_OPEN_NOTE_CMD_RE.search(lowered))
+            )
+            ui_action: dict[str, Any] | None = None
+            if wants_note_window:
+                target_deliv = "D-1042" if is_kappa else delivery_id
+                note_rel_w: str | None = None
+                note_content: str | None = None
+                if target_deliv:
+                    for cand_rel in (f"inbox/{target_deliv}_receiving_note.md", f"deliveries/{target_deliv}_receiving_note.md"):
+                        cand_fp = REAL.root_dir / cand_rel
+                        if cand_fp.is_file():
+                            note_rel_w = cand_rel
+                            with contextlib.suppress(Exception):
+                                note_content = cand_fp.read_text(encoding="utf-8")
+                            break
+                    if note_rel_w is None:
+                        note_rel_w = f"inbox/{target_deliv}_receiving_note.md"
+                if is_kappa:
+                    ui_action = UiActionPayload(
+                        action="open_file",
+                        path=note_rel_w or "inbox/D-1042_receiving_note.md",
+                        content=note_content,
+                        label="Opening delivery receiving note",
+                    ).model_dump(exclude_none=True)
+                else:
+                    ui_action = UiActionPayload(
+                        action="open_file" if note_rel_w else "switch_view",
+                        path=note_rel_w,
+                        content=note_content,
+                        view="db" if not note_rel_w else None,
+                        table="invoices" if not note_rel_w else None,
+                        label=f"Opening delivery receiving note {delivery_id}" if note_rel_w else "Opening invoices table",
+                    ).model_dump(exclude_none=True)
             if not transcript:
                 transcript = "Why do they owe 587?" if is_kappa else f"Why do they owe {claim_amount:g}?"
 
@@ -4644,6 +4763,7 @@ async def handle_user_consult_response(request: Request):
         ACTIVE_CALL["active"] = keep_call_open
         ACTIVE_CALL["ringing"] = False
         ACTIVE_CALL["call_status"] = call_status
+        ACTIVE_CALL["last_ui_action"] = None
 
         call_turns = ACTIVE_CALL.setdefault("turns", [])
         _append_user_turn(call_turns, transcript, iris_res)
@@ -5045,6 +5165,7 @@ async def handle_user_consult_response(request: Request):
         ACTIVE_CALL["active"] = keep_call_open
         ACTIVE_CALL["ringing"] = False
         ACTIVE_CALL["call_status"] = call_status
+        ACTIVE_CALL["last_ui_action"] = None
         ACTIVE_CALL["last_ui_action"] = ui_action
         ACTIVE_CALL["selected_choice"] = choice
         ACTIVE_CALL["has_committed"] = True
@@ -5290,22 +5411,28 @@ async def handle_user_consult_response(request: Request):
                 "iris_intent": iris_res,
             }
         if iris_intent == "explain_math":
-            iris_deliv = "D-1042" if is_kappa else (delivery_id or "D-1042")
-            iris_note_rel = f"inbox/{iris_deliv}_receiving_note.md"
-            iris_note_content: str | None = None
-            for cand_rel in (f"inbox/{iris_deliv}_receiving_note.md", f"deliveries/{iris_deliv}_receiving_note.md"):
-                cand_fp = REAL.root_dir / cand_rel
-                if cand_fp.is_file():
-                    iris_note_rel = cand_rel
-                    with contextlib.suppress(Exception):
-                        iris_note_content = cand_fp.read_text(encoding="utf-8")
-                    break
-            ui_action = UiActionPayload(
-                action="open_file",
-                path=iris_note_rel,
-                content=iris_note_content,
-                label="Opening delivery receiving note",
-            ).model_dump(exclude_none=True)
+            wants_iris_note = (
+                ui_command == "open_receiving_note"
+                or bool(_OPEN_NOTE_CMD_RE.search(lowered))
+            )
+            ui_action = None
+            if wants_iris_note:
+                iris_deliv = "D-1042" if is_kappa else (delivery_id or "D-1042")
+                iris_note_rel = f"inbox/{iris_deliv}_receiving_note.md"
+                iris_note_content: str | None = None
+                for cand_rel in (f"inbox/{iris_deliv}_receiving_note.md", f"deliveries/{iris_deliv}_receiving_note.md"):
+                    cand_fp = REAL.root_dir / cand_rel
+                    if cand_fp.is_file():
+                        iris_note_rel = cand_rel
+                        with contextlib.suppress(Exception):
+                            iris_note_content = cand_fp.read_text(encoding="utf-8")
+                        break
+                ui_action = UiActionPayload(
+                    action="open_file",
+                    path=iris_note_rel,
+                    content=iris_note_content,
+                    label="Opening delivery receiving note",
+                ).model_dump(exclude_none=True)
             user_turn = CallTurnPayload(
                 call_id=call_id,
                 speaker="user",
@@ -5498,6 +5625,7 @@ async def handle_user_consult_response(request: Request):
         ACTIVE_CALL["active"] = True
         ACTIVE_CALL["ringing"] = False
         ACTIVE_CALL["call_status"] = "connected"
+        ACTIVE_CALL["last_ui_action"] = None
         call_turns = ACTIVE_CALL.setdefault("turns", [])
         _append_user_turn(call_turns, transcript, iris_res)
         call_turns.append(
@@ -5613,6 +5741,7 @@ async def handle_user_consult_response(request: Request):
     ACTIVE_CALL["active"] = True
     ACTIVE_CALL["ringing"] = False
     ACTIVE_CALL["call_status"] = "connected"
+    ACTIVE_CALL["last_ui_action"] = None
     call_turns = ACTIVE_CALL.setdefault("turns", [])
     _append_user_turn(call_turns, transcript, iris_res)
     call_turns.append(

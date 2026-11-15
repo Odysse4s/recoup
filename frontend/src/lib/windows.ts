@@ -483,11 +483,25 @@ export function toolWindow(
 
 export function fileWindow(path: string, content: string): LiveWin {
   const lowerPath = path.toLowerCase();
+  const baseName = path.split("/").pop() || path;
+  const isTaxXml = lowerPath.startsWith("aade/") || lowerPath.endsWith(".xml");
+  const isClaimMemo = lowerPath.startsWith("claims/");
+  const isIntakeNote = lowerPath.startsWith("inbox/") || lowerPath.startsWith("deliveries/");
+  const categoryBadge = isTaxXml
+    ? "AADE myDATA · TAX ARTIFACT"
+    : isClaimMemo
+    ? "CLAIM MEMO · STAGED DOC"
+    : isIntakeNote
+    ? "WORKSPACE · INTAKE EVIDENCE"
+    : "WORKSPACE · FILE VIEWER";
+  const title = isTaxXml
+    ? "🏛️ Greek AADE myDATA XML"
+    : `📄 ${baseName}`;
   return {
     id: `file-${path}-${Date.now()}`,
     kind: "editor",
-    categoryBadge: "STEP 6 · TAX & CLAIM DOCS",
-    title: "Workspace File Viewer",
+    categoryBadge,
+    title,
     path: `workspace/${path}`,
     liveLabel: "OPENING…",
     doneLabel: "VERIFIED ARTIFACT",
