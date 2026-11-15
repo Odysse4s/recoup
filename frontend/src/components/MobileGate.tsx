@@ -728,6 +728,10 @@ function OperatorEscalationCall({
       }
 
       if (keepCallOpen) {
+        if ((data as { barge_in_ack?: boolean }).barge_in_ack) {
+          showActionToast("Listening — go ahead");
+          return;
+        }
         // Multi-Turn: Call stays connected! Recoup speaks reply and Auto-VAD re-arms!
         const replyText =
           data.reply_text?.trim() ||
@@ -906,12 +910,12 @@ function OperatorEscalationCall({
     [claimId, consult?.callId, processRespondResponse, r.mode, reqId, showActionToast]
   );
 
-  // Auto-VAD hook attached to warm MediaStream
+  // Auto-VAD hook attached to warm MediaStream (kept continuously wired throughout active call)
   const vad = useAutoVad({
     stream: warmStream,
-    enabled: answered && !resolvedEnd && !submitting,
+    enabled: answered && !resolvedEnd,
     agentSpeaking: agentSpeaking || r.speaking,
-    muted: isMuted,
+    muted: isMuted || submitting,
     onBargeIn: () => {
       stopSpeaking();
       setAgentSpeaking(false);
@@ -1410,6 +1414,7 @@ function OperatorEscalationCall({
                 } else if (isSpeaking) {
                   // Interruption / Barge-in
                   stopSpeaking();
+                  setAgentSpeaking(false);
                   vad.setPhase("listening");
                 } else if (isHearing || vad.manualRecording) {
                   // Immediately finish recording and send

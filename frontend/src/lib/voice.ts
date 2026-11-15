@@ -1255,10 +1255,11 @@ export function useAutoVad({
   const agentStoppedAtRef = useRef<number>(0);
   const agentSpeechStartedAtRef = useRef<number>(0);
   const ttsStartGraceUntilRef = useRef<number>(0);
+  const bargeInLockoutUntilRef = useRef<number>(0);
   const consecutiveSpeechFramesRef = useRef<number>(0);
   const consecutiveBargeInFramesRef = useRef<number>(0);
   const lastContextResumeAttemptAtRef = useRef<number>(0);
-  const noiseFloorRef = useRef<number>(0.015);
+  const noiseFloorRef = useRef<number>(0.01);
   const calibrationFramesRef = useRef<number>(0);
   const peakSpeechRmsRef = useRef<number>(0);
   const syncingSinceRef = useRef<number>(0);
@@ -1276,14 +1277,21 @@ export function useAutoVad({
     onPhaseChangeRef.current?.(next);
   }, []);
 
-  // Track when agent finishes speaking for the 220ms post-TTS cooldown, and track when agent starts speaking
+  // Track when agent finishes speaking for brief post-TTS settle, and track when agent starts speaking
   useEffect(() => {
+    const now = performance.now();
     if (!agentSpeaking) {
-      agentStoppedAtRef.current = performance.now();
+      agentStoppedAtRef.current = now;
       consecutiveBargeInFramesRef.current = 0;
+      lastContextResumeAttemptAtRef.current = 0;
+      sharedAudioContext?.resume().catch(() => undefined);
     } else {
-      agentSpeechStartedAtRef.current = performance.now();
-      ttsStartGraceUntilRef.current = performance.now() + 700;
+      // Ignore stale agentSpeaking=true renders right after an active user barge-in
+      if (now < bargeInLockoutUntilRef.current) {
+        return;
+      }
+      agentSpeechStartedAtRef.current = now;
+      ttsStartGraceUntilRef.current = now + 220;
       consecutiveBargeInFramesRef.current = 0;
       // Recoup began speaking: if we were hearing or manually recording, abort recording to avoid echo
       manualRecordingRef.current = false;
@@ -1364,7 +1372,7 @@ export function useAutoVad({
         const totalSpeechDuration = lastActiveSpeechAtRef.current - speechStartAtRef.current;
 
         // Either manual tap-to-speak or valid speech duration & size
-        if (wasManual || (blob.size >= 600 && totalSpeechDuration >= 200)) {
+        if (wasManual || (blob.size >= 350 && totalSpeechDuration >= 80)) {
           onUtteranceRef.current(blob, rec.mimeType || mimeType, ext);
         } else {
           setPhase("listening");
@@ -1410,13 +1418,20 @@ export function useAutoVad({
 
     let sourceNode: MediaStreamAudioSourceNode | null = null;
     let analyser: AnalyserNode | null = null;
+    let zeroGain: GainNode | null = null;
 
     try {
       sourceNode = ctx.createMediaStreamSource(stream);
       analyser = ctx.createAnalyser();
       analyser.fftSize = 1024;
-      analyser.smoothingTimeConstant = 0.42;
+      analyser.smoothingTimeConstant = 0.25;
+      // Connect analyser to a silent 0-gain destination sink so iOS Safari WebKit continuously pulls
+      // live microphone quanta even while HTMLAudioElement (<audio>) TTS is playing or finishing.
+      zeroGain = ctx.createGain();
+      zeroGain.gain.value = 0;
       sourceNode.connect(analyser);
+      analyser.connect(zeroGain);
+      zeroGain.connect(ctx.destination);
       analyserRef.current = analyser;
     } catch (err) {
       console.warn("Auto-VAD: Could not connect stream to AudioContext analyser", err);
@@ -1435,7 +1450,8 @@ export function useAutoVad({
       const { mimeType, ext } = pickRecorderMimeType();
       const localChunks: BlobPart[] = [];
       let discarded = false;
-      speechStartAtRef.current = now;
+      // Account for ~80ms of pre-trigger VAD frames already spoken before MediaRecorder spun up
+      speechStartAtRef.current = now - 80;
       lastActiveSpeechAtRef.current = now;
       peakSpeechRmsRef.current = initialRms;
       manualRecordingRef.current = false;
@@ -1469,7 +1485,7 @@ export function useAutoVad({
           }
           const blob = new Blob(localChunks, { type: rec.mimeType || mimeType || "audio/mp4" });
           const totalSpeechDuration = lastActiveSpeechAtRef.current - speechStartAtRef.current;
-          if (wasManual || (blob.size >= 600 && totalSpeechDuration >= 200)) {
+          if (wasManual || (blob.size >= 350 && totalSpeechDuration >= 80)) {
             onUtteranceRef.current(blob, rec.mimeType || mimeType, ext);
           } else {
             setPhase("listening");
@@ -1489,11 +1505,11 @@ export function useAutoVad({
       if (!running) return;
 
       const now = performance.now();
-      const isAgentSpeaking = agentSpeakingRef.current;
+      const isAgentSpeaking = agentSpeakingRef.current && now >= bargeInLockoutUntilRef.current;
       const isMuted = mutedRef.current;
 
-      // AudioContext state resume guard (throttled to at most once every 500ms)
-      if (ctx.state !== "running" && now - lastContextResumeAttemptAtRef.current > 500) {
+      // AudioContext state resume guard (fast 150ms check so iOS wakes immediately after <audio> turn ends)
+      if (ctx.state !== "running" && now - lastContextResumeAttemptAtRef.current > 150) {
         lastContextResumeAttemptAtRef.current = now;
         ctx.resume().catch(() => undefined);
       }
@@ -1506,7 +1522,7 @@ export function useAutoVad({
       }
 
       const currentPhase = phaseRef.current;
-      const isPostTtsCooldown = !isAgentSpeaking && currentPhase === "listening" && (now - agentStoppedAtRef.current < 220);
+      const isPostTtsCooldown = !isAgentSpeaking && currentPhase === "listening" && (now - agentStoppedAtRef.current < 45);
       if (isPostTtsCooldown) {
         consecutiveSpeechFramesRef.current = 0;
         consecutiveBargeInFramesRef.current = 0;
@@ -1549,41 +1565,53 @@ export function useAutoVad({
       }
       const voiceBandRatio = vocalEnergy / (totalEnergy + 1e-6);
 
-      // Dynamic ambient noise floor calibration: fast initial lock + continuous slow tracking in loud venues
-      if (!isAgentSpeaking) {
-        if (calibrationFramesRef.current < 35) {
+      // Dynamic ambient noise floor calibration: NEVER calibrate upward on speech-level energy
+      // so speaking the instant the orb turns blue cannot poison noiseFloor with the user's own voice.
+      if (!isAgentSpeaking && currentPhase === "listening" && consecutiveSpeechFramesRef.current === 0) {
+        if (rms < 0.024 && calibrationFramesRef.current < 25) {
           calibrationFramesRef.current++;
-          noiseFloorRef.current = noiseFloorRef.current * 0.90 + Math.max(0.005, Math.min(0.075, rms)) * 0.10;
-        } else if (currentPhase === "listening" && consecutiveSpeechFramesRef.current === 0) {
-          noiseFloorRef.current = noiseFloorRef.current * 0.975 + Math.max(0.006, Math.min(0.085, rms)) * 0.025;
+          noiseFloorRef.current = noiseFloorRef.current * 0.88 + Math.max(0.005, rms) * 0.12;
+        } else if (rms < 0.028) {
+          noiseFloorRef.current = noiseFloorRef.current * 0.97 + Math.max(0.005, rms) * 0.03;
+        } else if (voiceBandRatio < 0.30) {
+          // Non-vocal steady room rumble only, strictly capped so human speech stays sensitive
+          noiseFloorRef.current = Math.min(0.032, noiseFloorRef.current * 0.992 + Math.min(0.035, rms) * 0.008);
         }
       }
       const noiseFloor = noiseFloorRef.current;
 
-      // When Recoup is speaking: Live Barge-In Gate
+      // When Recoup is speaking: Live Full-Duplex Barge-In Gate
       if (isAgentSpeaking) {
         consecutiveSpeechFramesRef.current = 0;
-        const graceUntil = Math.max(ttsStartGraceUntilRef.current, lastTtsAudioStartedAt + 700);
+        const graceUntil = Math.max(ttsStartGraceUntilRef.current, lastTtsAudioStartedAt + 220);
         if (now < graceUntil) {
           consecutiveBargeInFramesRef.current = 0;
           rafId = requestAnimationFrame(vadLoop);
           return;
         }
 
-        const isLoudRms = rms > Math.max(0.115, noiseFloorRef.current * 5.8);
-        const isVocalRatio = voiceBandRatio > 0.66;
-        const isPeakHarmonic = peakBinEnergy > 45;
+        const isMobileAec = mobileCallOwnsAudio;
+        const bargeThreshold = isMobileAec
+          ? Math.max(0.045, Math.min(0.08, noiseFloor * 3.0))
+          : Math.max(0.065, Math.min(0.1, noiseFloor * 3.6));
+        const isLoudRms = rms > bargeThreshold;
+        const isVocal = isMobileAec
+          ? (voiceBandRatio > 0.36 && peakBinEnergy > 22) || rms > 0.08
+          : (voiceBandRatio > 0.40 && peakBinEnergy > 26) || rms > 0.105;
+        const requiredFrames = isMobileAec ? 5 : 6;
 
-        if (isLoudRms && isVocalRatio && isPeakHarmonic) {
-          consecutiveBargeInFramesRef.current++;
-          if (consecutiveBargeInFramesRef.current >= 22) {
+        if (isLoudRms && isVocal) {
+          consecutiveBargeInFramesRef.current += rms > bargeThreshold * 1.45 ? 2 : 1;
+          if (consecutiveBargeInFramesRef.current >= requiredFrames) {
             consecutiveBargeInFramesRef.current = 0;
+            agentSpeakingRef.current = false;
+            bargeInLockoutUntilRef.current = now + 650;
             stopSpeaking();
             onBargeInRef.current?.();
             startRecordingUtterance(now, rms);
           }
         } else {
-          consecutiveBargeInFramesRef.current = Math.max(0, consecutiveBargeInFramesRef.current - 2);
+          consecutiveBargeInFramesRef.current = Math.max(0, consecutiveBargeInFramesRef.current - 1);
         }
 
         rafId = requestAnimationFrame(vadLoop);
@@ -1593,14 +1621,16 @@ export function useAutoVad({
       // Normal listening: keep VoiceOrb reactive to live microphone energy
       if (signal.mode !== "speaking") {
         setSignal({ mode: "listening", provider: "mic", analyser });
-        if (rms > 0.02) pulseVoice();
+        if (rms > 0.018) pulseVoice();
       }
 
       if (currentPhase === "listening") {
-        const speechStartThreshold = Math.max(0.03, noiseFloor * 2.6);
-        if (rms > speechStartThreshold && voiceBandRatio > 0.54) {
-          consecutiveSpeechFramesRef.current++;
-          if (consecutiveSpeechFramesRef.current >= 7) {
+        const speechStartThreshold = Math.max(0.018, noiseFloor * 2.0);
+        const isStrongSpeech = rms > speechStartThreshold * 1.35 && voiceBandRatio > 0.40;
+        const isSpeechFrame = rms > speechStartThreshold && (voiceBandRatio > 0.34 || rms > 0.042);
+        if (isSpeechFrame) {
+          consecutiveSpeechFramesRef.current += isStrongSpeech ? 2 : 1;
+          if (consecutiveSpeechFramesRef.current >= 3) {
             consecutiveSpeechFramesRef.current = 0;
             startRecordingUtterance(now, rms);
           }
@@ -1611,9 +1641,13 @@ export function useAutoVad({
         if (rms > peakSpeechRmsRef.current) {
           peakSpeechRmsRef.current = rms;
         }
-        // Require close-mic vocal energy above ambient venue chatter AND >=38% of user's own speech peak
-        const speechActiveThreshold = Math.max(0.02, noiseFloor * 1.85, peakSpeechRmsRef.current * 0.38);
-        if (rms >= speechActiveThreshold && voiceBandRatio > 0.45) {
+        // Track sustained speech without letting an initial loud plosive starve trailing syllables
+        const speechActiveThreshold = Math.max(
+          0.016,
+          noiseFloor * 1.65,
+          Math.min(0.038, peakSpeechRmsRef.current * 0.25)
+        );
+        if (rms >= speechActiveThreshold && (voiceBandRatio > 0.32 || rms > 0.04)) {
           hasSpokenInManualSessionRef.current = true;
           lastActiveSpeechAtRef.current = now;
         }
@@ -1625,9 +1659,9 @@ export function useAutoVad({
           : now - speechStartAtRef.current;
         const totalDuration = now - speechStartAtRef.current;
 
-        // Auto-complete turn when 700ms pause occurs after speech OR 6.5s loud-venue cap reached
+        // Auto-complete turn when 680ms pause occurs after speech OR 6.5s loud-venue cap reached
         if (
-          (hasSpokenInManualSessionRef.current && silenceDuration >= 700 && totalDuration >= 280) ||
+          (hasSpokenInManualSessionRef.current && silenceDuration >= 680 && totalDuration >= 240) ||
           totalDuration >= 6500
         ) {
           const rec = recorderRef.current;
@@ -1665,6 +1699,7 @@ export function useAutoVad({
       try {
         sourceNode?.disconnect();
         analyser?.disconnect();
+        zeroGain?.disconnect();
       } catch {
         // ignore
       }

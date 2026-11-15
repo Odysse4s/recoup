@@ -4377,6 +4377,54 @@ async def handle_user_consult_response(request: Request):
             "iris_intent": iris_res,
         }
 
+    # Standalone barge-in interruption words ("stop", "wait", "hold on") silence Recoup without hanging up
+    is_barge_in_stop_only = bool(
+        clean_utt
+        and not hangup
+        and explicit_choice is None
+        and not ui_command
+        and not has_commit_words
+        and re.match(
+            r"^(?:hey\s+|ok\s+|okay\s+)?(?:stop(?:\s+talking|\s+it)?|wait(?:\s+a\s+(?:sec|second|moment))?|hold\s+on(?:\s+a\s+(?:sec|second|moment))?|pause|quiet|listen(?:\s+up|\s+to\s+me)?|one\s+(?:sec|second|moment)|let\s+me\s+(?:speak|talk))$",
+            clean_utt,
+        )
+    )
+    if is_barge_in_stop_only:
+        user_turn_b = CallTurnPayload(
+            call_id=call_id,
+            channel=effective_channel,
+            call_status="connected",
+            speaker="user",
+            text=transcript,
+            keep_call_open=True,
+            iris_intent=iris_intent or "barge_in",
+            iris_gate=LATEST_IRIS_GATE,
+        )
+        BUS.emit(
+            run_id,
+            EventType.CALL_TURN,
+            user_turn_b.model_dump(),
+            step=2,
+            thought=f"Operator barge-in: {transcript}",
+            cost_eur=_voice_micro_cost(transcript) if stt_ran else 0.0,
+        )
+        if ACTIVE_CALL is not None:
+            call_turns = ACTIVE_CALL.setdefault("turns", [])
+            _append_user_turn(call_turns, transcript, iris_res)
+        return {
+            "ok": True,
+            "call_id": call_id,
+            "channel": effective_channel,
+            "keep_call_open": True,
+            "call_status": "connected",
+            "barge_in_ack": True,
+            "choice": ACTIVE_CALL.get("selected_choice") if ACTIVE_CALL else None,
+            "outcome": None,
+            "transcript": transcript,
+            "reply_text": "",
+            "iris_intent": iris_res,
+        }
+
     is_pure_hangup = (
         is_escalated_choice
         or is_post_commit_close
