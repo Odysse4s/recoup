@@ -339,12 +339,117 @@ export function OperatorConsultPanel({
     });
   }, [consult?.turns, hasCommitted, activeCall?.turns]);
 
+  // Audio-synced progressive word reveal for the newest agent turn
+  const lastIdx = sanitizedTurns.length - 1;
+  const lastTurn = lastIdx >= 0 ? sanitizedTurns[lastIdx] : null;
+  const isLastTurnAgent = Boolean(lastTurn && lastTurn.speaker !== "user");
+
+  const lastTurnWords = useMemo(() => {
+    if (!lastTurn || !isLastTurnAgent) return [];
+    return lastTurn.text.trim().split(/\s+/).filter(Boolean);
+  }, [lastTurn?.text, isLastTurnAgent]);
+
+  const lastTurnSig = useMemo(() => {
+    if (!lastTurn || !isLastTurnAgent) return null;
+    return `${consult?.callId ?? "call"}:${lastIdx}:${lastTurn.text}`;
+  }, [consult?.callId, lastIdx, isLastTurnAgent, lastTurn?.text]);
+
+  const isConsultEndedOrPast = Boolean(
+    consult?.end ||
+      consult?.callStatus === "ended" ||
+      extConsult?.callStatus === "ended" ||
+      (!callLive && !consult?.active && !consult?.ringing)
+  );
+
+  const completedTurnSigsRef = useRef<Set<string>>(new Set());
+  const initialMountCheckRef = useRef<boolean>(true);
+  const speakingRef = useRef(speaking);
+  speakingRef.current = speaking;
+  const activeSpeakerRef = useRef(consult?.activeSpeaker);
+  activeSpeakerRef.current = consult?.activeSpeaker;
+
+  const [revealingSig, setRevealingSig] = useState<string | null>(null);
+  const [visibleWordCount, setVisibleWordCount] = useState<number>(Infinity);
+
+  useEffect(() => {
+    if (!lastTurnSig || !lastTurn || !isLastTurnAgent) {
+      setRevealingSig(null);
+      setVisibleWordCount(Infinity);
+      return;
+    }
+
+    // If call is already ended/completed or inactive, show full text immediately
+    if (isConsultEndedOrPast) {
+      completedTurnSigsRef.current.add(lastTurnSig);
+      setRevealingSig(null);
+      setVisibleWordCount(Infinity);
+      return;
+    }
+
+    // If this turn was already completely revealed, keep showing full text
+    if (completedTurnSigsRef.current.has(lastTurnSig)) {
+      setRevealingSig(null);
+      setVisibleWordCount(Infinity);
+      return;
+    }
+
+    // On initial mount, if agent is not actively speaking, do not animate historical turn
+    if (initialMountCheckRef.current) {
+      initialMountCheckRef.current = false;
+      if (!speakingRef.current && activeSpeakerRef.current !== "agent") {
+        completedTurnSigsRef.current.add(lastTurnSig);
+        setRevealingSig(null);
+        setVisibleWordCount(Infinity);
+        return;
+      }
+    }
+
+    const totalWords = lastTurnWords.length;
+    if (totalWords <= 1) {
+      completedTurnSigsRef.current.add(lastTurnSig);
+      setRevealingSig(null);
+      setVisibleWordCount(Infinity);
+      return;
+    }
+
+    // Brand-new agent turn in active call: begin progressive reveal!
+    setRevealingSig(lastTurnSig);
+    setVisibleWordCount(0);
+
+    let intervalId: ReturnType<typeof window.setInterval> | null = null;
+
+    // 1. Wait 350ms (matching TTS audio start latency)
+    const timeoutId = window.setTimeout(() => {
+      // 2. Reveal first word
+      setVisibleWordCount(1);
+
+      // 3. Progressively reveal words at ~3.2 words/sec (1 word every ~310ms)
+      intervalId = window.setInterval(() => {
+        setVisibleWordCount((prev) => {
+          const next = prev + 1;
+          if (next >= totalWords) {
+            if (intervalId !== null) window.clearInterval(intervalId);
+            completedTurnSigsRef.current.add(lastTurnSig);
+            setRevealingSig(null);
+            return Infinity;
+          }
+          return next;
+        });
+      }, 310);
+    }, 350);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+      if (intervalId !== null) window.clearInterval(intervalId);
+    };
+  }, [lastTurnSig, lastTurn, isLastTurnAgent, lastTurnWords.length, isConsultEndedOrPast]);
+
   const turnsCount = sanitizedTurns.length;
   useEffect(() => {
-    if (transcriptRef.current && turnsCount > 0) {
+    if (transcriptRef.current && (turnsCount > 0 || visibleWordCount > 0)) {
       transcriptRef.current.scrollTo({ top: transcriptRef.current.scrollHeight, behavior: "smooth" });
     }
-  }, [turnsCount, consult?.end]);
+  }, [turnsCount, visibleWordCount, consult?.end]);
 
   if (!visible) return null;
 
@@ -698,10 +803,17 @@ export function OperatorConsultPanel({
               <AnimatePresence initial={false}>
                 {sanitizedTurns.map((turn, idx) => {
                   const isUser = turn.speaker === "user";
+                  const isLatest = idx === sanitizedTurns.length - 1;
                   const isActiveAgentTurn =
                     !isUser &&
                     (consult.activeSpeaker === "agent" || speaking) &&
-                    idx === sanitizedTurns.length - 1;
+                    isLatest;
+
+                  const isRevealing =
+                    !isUser &&
+                    isLatest &&
+                    revealingSig === lastTurnSig &&
+                    visibleWordCount < lastTurnWords.length;
                   return (
                     <motion.div
                       key={`${consult.callId}-turn-${idx}`}
@@ -738,7 +850,24 @@ export function OperatorConsultPanel({
                             </button>
                           )}
                         </div>
-                        <p className="text-ink-2">{turn.text}</p>
+                        {isRevealing ? (
+                          <p className="text-ink-2">
+                            {visibleWordCount === 0 ? (
+                              <span className="text-ink-3 italic">…</span>
+                            ) : (
+                              <span>{lastTurnWords.slice(0, visibleWordCount).join(" ")}</span>
+                            )}
+                            <span
+                              className="ml-1 inline-flex items-center gap-1 font-mono text-[11px] text-emerald-400 select-none"
+                              aria-hidden="true"
+                            >
+                              <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                              <span className="animate-pulse text-cyan-400">▋</span>
+                            </span>
+                          </p>
+                        ) : (
+                          <p className="text-ink-2">{turn.text}</p>
+                        )}
                         {isUser && turn.irisIntent && (
                           <div className="mt-1 flex items-center gap-1 font-mono text-[9px] text-emerald-400">
                             <span>⚡ Iris → {turn.irisIntent.intent} ({Math.round(turn.irisIntent.confidence * 100)}%) · 0 out-tok</span>

@@ -1044,7 +1044,7 @@ function LiveWindowCard({
 
 /**
  * Fixed Bottom-Right Cascading Card Deck with Click-to-Front 8s Focus Lock.
- * Up to 4 windows peek cleanly without pushing off-screen.
+ * Up to 6 windows peek cleanly without pushing off-screen.
  */
 export function LiveWindowLayer({
   windows,
@@ -1070,8 +1070,9 @@ export function LiveWindowLayer({
     return () => clearInterval(interval);
   }, [focusLockedUntil]);
 
-  // Keep up to 4 windows in the deck simultaneously
-  const currentDeck = windows.slice(-4);
+  // Keep up to 6 windows in the deck simultaneously
+  const MAX_DECK_WINDOWS = 6;
+  const currentDeck = windows.slice(-MAX_DECK_WINDOWS);
 
   const now = Date.now();
   const hasActiveFocus =
@@ -1093,7 +1094,7 @@ export function LiveWindowLayer({
   };
 
   return (
-    <div className="fixed right-5 bottom-5 z-40 w-[min(560px,92vw)] h-[340px] pointer-events-none">
+    <div className="fixed right-5 bottom-5 z-40 w-[min(560px,92vw)] h-[440px] pointer-events-none">
       <AnimatePresence initial={false}>
         {currentDeck.map((w) => {
           let stackIndex = 0;
@@ -1118,9 +1119,9 @@ export function LiveWindowLayer({
               key={w.id}
               initial={{ opacity: 0, scale: 0.88, y: 30 }}
               animate={{
-                opacity: stackIndex === 0 ? 1 : 0.92,
-                scale: 1 - stackIndex * 0.035,
-                y: -stackIndex * 38,
+                opacity: stackIndex === 0 ? 1 : Math.max(0.72, 0.94 - stackIndex * 0.04),
+                scale: 1 - stackIndex * 0.028,
+                y: -stackIndex * 34,
                 zIndex: stackIndex === 0 ? (isFocusLocked ? 60 : 50) : 50 - stackIndex,
               }}
               exit={{ opacity: 0, scale: 0.8, y: 40 }}

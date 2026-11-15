@@ -210,7 +210,10 @@ async def evaluate_gate_with_iris(state_payload: dict[str, Any] | str) -> dict[s
 def _fallback_intent(transcript: str) -> tuple[str, float, float]:
     """Infer intent, binding status, and confidence via deterministic regex."""
     lowered = (transcript or "").lower()
-    if re.search(r"\b(refund|freeze|cash|money)\b", lowered):
+    if re.search(
+        r"\b(refund|freeze|cash|money|force|enforce|approve|demand|claim|lock\s*in|proceed|confirm|execute|yes|go)\b",
+        lowered,
+    ) and not re.search(r"\b(don'?t|do\s+not|never|not|hold\s+off|wait)\b", lowered):
         return ("commit_refund", 0.92, 0.88)
     if re.search(r"\b(redeliver|replace|replacement|tomorrow|22)\b", lowered):
         return ("commit_replacement", 0.92, 0.88)
@@ -260,7 +263,7 @@ async def classify_voice_turn_with_iris(
                 "criteria": {
                     "explain_options": "Asking what choices or settlement remedies are available.",
                     "explain_math": "Asking for breakdown of figures, calculations, tax, or missing hub counts.",
-                    "commit_refund": "Directing or confirming full cash refund and invoice freeze.",
+                    "commit_refund": "Directing, enforcing, forcing, approving, saying yes/go ahead/do it, or confirming the claim, refund, invoice freeze, or supplier email.",
                     "commit_replacement": "Directing or confirming replacement shipment of 22 hubs.",
                     "reject_rollback": "Cancelling or rejecting the claim process or asking to undo.",
                     "hangup": "Ending the call or saying goodbye.",

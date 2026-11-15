@@ -86,8 +86,27 @@ const checkIsMobileRoute = (): boolean =>
   typeof window !== "undefined" &&
   (window.location.pathname.startsWith("/mobile") || window.location.hash === "#mobile");
 
-const MAX_LIVE_WINDOWS = 4;
+const MAX_LIVE_WINDOWS = 6;
 const sleep = (ms: number) => new Promise((r) => window.setTimeout(r, ms));
+
+const isWindowSpawningEvent = (type: string): boolean =>
+  type === "tool_call" || type === "forge_spec" || type === "forge_test";
+
+const getMinWindowGapMs = (s: Speed): number => {
+  const profile = PACE[s];
+  if (profile?.minWindowGapMs) return profile.minWindowGapMs;
+  switch (s) {
+    case "0.5x":
+      return 3200;
+    case "2x":
+      return 1250;
+    case "turbo":
+      return 550;
+    case "1x":
+    default:
+      return 2300;
+  }
+};
 
 export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }) {
   const windowsEnabledRef = useRef(opts.liveWindows);
@@ -124,6 +143,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   const forgeFallbackTimerRef = useRef<number | null>(null);
   const forgeHeroUntilRef = useRef<number>(0);
   const forgeTestReceivedRef = useRef<boolean>(false);
+  const lastWindowPopAtRef = useRef<number>(0);
+  const lastEventPopAtRef = useRef<number>(0);
   const [pulses, setPulses] = useState<Record<DockTarget, number>>({ vault: 0, diff: 0, db: 0 });
   const [rowMarks, setRowMarks] = useState<Record<string, RowMark>>({});
   const [ghostRows, setGhostRows] = useState<Record<string, Row[]>>({});
@@ -719,6 +740,9 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     });
 
   const applyEvent = (ev: ServerEvent) => {
+    if (isWindowSpawningEvent(ev.type)) {
+      lastWindowPopAtRef.current = Date.now();
+    }
     setEvents((prev) => [...prev.slice(-120), ev]);
     const activeBrandName = brandOf(wsStateRef.current?.domain).brand_name;
     const line = narrate(ev, activeBrandName);
@@ -953,7 +977,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         setForgedCode((m) => ({ ...m, [ft.name]: ft }));
         setStage("forge");
         forgeTestReceivedRef.current = true;
-        forgeHeroUntilRef.current = Date.now() + 1800;
+        const heroMs = speedRef.current === "turbo" ? 450 : speedRef.current === "2x" ? 950 : speedRef.current === "0.5x" ? 2800 : 1800;
+        forgeHeroUntilRef.current = Date.now() + heroMs;
         if (forgeFallbackTimerRef.current !== null) {
           window.clearTimeout(forgeFallbackTimerRef.current);
           forgeFallbackTimerRef.current = null;
@@ -1149,7 +1174,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
 
   // ---------------------------------------------------------------- pacer
   useEffect(() => {
-    const pacerInterval = Math.max(PACE[speed].eventMs, speed === "1x" ? 950 : 0);
+    const PACER_TICK_MS = 140;
     const timer = window.setInterval(() => {
       const next = queueRef.current[0];
       if (!next) {
@@ -1169,41 +1194,76 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         }
         return;
       }
-      // While forge_spec is waiting for forge_test, allow forge_test through immediately.
-      // Once forge_test has updated the window, wait ~1800ms before subsequent step cards cascade.
+
+      const now = Date.now();
+      const currentSpeed = speedRef.current;
+      const eventPaceMs = PACE[currentSpeed]?.eventMs ?? 950;
+      const minWindowGapMs = getMinWindowGapMs(currentSpeed);
+      const isWindowSpawn = isWindowSpawningEvent(next.type);
+
+      // 1. If next is a window-spawning event, enforce minWindowGapMs from last window pop
+      if (isWindowSpawn && lastWindowPopAtRef.current > 0) {
+        if (now - lastWindowPopAtRef.current < minWindowGapMs) {
+          return;
+        }
+      }
+
+      // 2. Normal event pacing gap: enforce eventPaceMs since last popped event
+      // Exception: call_start, call_turn, approval_needed have priority dispatch
+      const isPriorityEvent =
+        next.type === "call_start" ||
+        next.type === "call_turn" ||
+        next.type === "approval_needed";
+
+      if (!isPriorityEvent && lastEventPopAtRef.current > 0) {
+        if (now - lastEventPopAtRef.current < eventPaceMs) {
+          return;
+        }
+      }
+
+      // While forge_spec is waiting for forge_test, allow forge_test through.
+      // Once forge_test has updated the window, wait until forgeHeroUntilRef before subsequent step cards cascade.
       const forgeActive = windowsRef.current.some((w) => w.kind === "forge" && !w.manual);
       if (forgeActive && !forgeTestReceivedRef.current && next.type !== "forge_test") {
         return;
       }
-      if (Date.now() < forgeHeroUntilRef.current && next.type !== "forge_test") {
+      if (now < forgeHeroUntilRef.current && next.type !== "forge_test") {
         return;
       }
+
       if (next.type === "approval_needed") {
-        if (forgeActive || Date.now() < forgeHeroUntilRef.current) {
+        if (forgeActive || now < forgeHeroUntilRef.current) {
           return;
         }
         queueRef.current.shift();
         setQueued(queueRef.current.length);
         deferredApprovalRef.current = null;
+        lastEventPopAtRef.current = now;
         applyRef.current(next);
         return;
       }
+
       if (next.type === "call_start" || next.type === "call_turn") {
         queueRef.current.shift();
         setQueued(queueRef.current.length);
+        lastEventPopAtRef.current = now;
         applyRef.current(next);
         return;
       }
-      const spawns =
-        next.type === "forge_test" ||
-        next.type === "forge_spec" ||
-        next.type === "tool_call";
+
+      const spawns = isWindowSpawn;
       const unpinnedCount = windowsRef.current.filter((w) => !w.pinned).length;
       if (spawns && unpinnedCount >= MAX_LIVE_WINDOWS && next.type !== "forge_test") return;
+
       queueRef.current.shift();
       setQueued(queueRef.current.length);
+      lastEventPopAtRef.current = now;
+      if (spawns) {
+        lastWindowPopAtRef.current = now;
+      }
       applyRef.current(next);
-    }, pacerInterval);
+    }, PACER_TICK_MS);
+
     return () => window.clearInterval(timer);
   }, [speed]);
 
@@ -1288,6 +1348,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     commitCelebratedRef.current = false;
     forgeTestReceivedRef.current = false;
     forgeHeroUntilRef.current = 0;
+    lastWindowPopAtRef.current = 0;
+    lastEventPopAtRef.current = 0;
     if (replayCommitTimerRef.current !== null) {
       clearTimeout(replayCommitTimerRef.current);
       replayCommitTimerRef.current = null;
@@ -1351,7 +1413,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       const res = await fetch("/api/demo/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pace_ms: 900, anticipate_after: true }),
+        body: JSON.stringify({ pace_ms: 2100, anticipate_after: true }),
       });
       if (!res.ok) throw new Error(`Demo run failed with status ${res.status}`);
       setMode("live");

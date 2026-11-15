@@ -269,6 +269,7 @@ let generation = 0;
 let cancelCurrent: (() => void) | null = null;
 let lastTurnKey = "";
 let lastTurnAt = 0;
+let lastTtsAudioStartedAt = 0;
 
 function pickVoice(): SpeechSynthesisVoice | undefined {
   const voices = window.speechSynthesis?.getVoices() ?? [];
@@ -574,25 +575,39 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
     let localSource: AudioBufferSourceNode | null = null;
     let analyser: AnalyserNode | null = null;
     let rafId: number | null = null;
+    let progressTimer: number | null = null;
     let blobUrlToRevoke: string | null = null;
     let safetyTimer: number | null = null;
+    let startedFired = false;
 
-    const clearSafetyTimer = () => {
+    const clearTimers = () => {
       if (safetyTimer !== null) {
         window.clearTimeout(safetyTimer);
         safetyTimer = null;
       }
+      if (progressTimer !== null) {
+        window.clearInterval(progressTimer);
+        progressTimer = null;
+      }
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+    };
+
+    const fireStart = () => {
+      if (startedFired || finished || token !== generation) return;
+      startedFired = true;
+      lastTtsAudioStartedAt = performance.now();
+      pulseVoice();
+      hooks?.onStart?.();
     };
 
     const done = () => {
       if (finished) return;
       finished = true;
-      clearSafetyTimer();
+      clearTimers();
       if (cancelCurrent === done) cancelCurrent = null;
-      if (rafId !== null) {
-        cancelAnimationFrame(rafId);
-        rafId = null;
-      }
       if (localSource) {
         try {
           localSource.stop();
@@ -607,7 +622,7 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
           sharedMediaElement.pause();
           sharedMediaElement.currentTime = 0;
         } catch {}
-        sharedMediaElement.onplay = sharedMediaElement.ontimeupdate = sharedMediaElement.onended = sharedMediaElement.onerror = sharedMediaElement.onloadedmetadata = null;
+        sharedMediaElement.onplay = sharedMediaElement.onplaying = sharedMediaElement.ontimeupdate = sharedMediaElement.onended = sharedMediaElement.onerror = sharedMediaElement.onloadedmetadata = null;
         currentAudio = null;
       }
       if (blobUrlToRevoke) {
@@ -643,6 +658,9 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
     fetchRemoteTurnAudio(text).then(async (remote) => {
       if (finished || token !== generation) return done();
 
+      const words = text.trim().split(/\s+/).filter(Boolean);
+      const estDurationSec = Math.max(1.2, words.length / 2.8);
+
       if (remote && remote.buffer.byteLength > 0) {
         const { buffer: buf, contentType } = remote;
 
@@ -662,12 +680,44 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
           currentAudio = el;
           el.src = blobUrl;
 
+          let playStartTime = 0;
+
+          const startMediaProgress = () => {
+            if (finished || token !== generation) return;
+            fireStart();
+            setSignal({ mode: "speaking", provider: "fal", analyser: null });
+            if (playStartTime === 0) playStartTime = performance.now();
+
+            if (progressTimer !== null) {
+              window.clearInterval(progressTimer);
+            }
+            progressTimer = window.setInterval(() => {
+              if (finished || token !== generation) {
+                if (progressTimer !== null) {
+                  window.clearInterval(progressTimer);
+                  progressTimer = null;
+                }
+                return;
+              }
+              let p = 0;
+              if (Number.isFinite(el.duration) && el.duration > 0) {
+                p = Math.min(1, Math.max(0, el.currentTime / el.duration));
+              } else {
+                const elapsedSec = (performance.now() - playStartTime) / 1000;
+                p = Math.min(1, Math.max(0, elapsedSec / estDurationSec));
+              }
+              hooks?.onProgress?.(p);
+            }, 60);
+          };
+
           const tightenSafetyTimer = () => {
             if (Number.isFinite(el.duration) && el.duration > 0) {
-              clearSafetyTimer();
+              if (safetyTimer !== null) {
+                window.clearTimeout(safetyTimer);
+                safetyTimer = null;
+              }
               const remainingMs = Math.max(350, (el.duration - el.currentTime) * 1000 + 280);
               safetyTimer = window.setTimeout(() => {
-                clearSafetyTimer();
                 done();
               }, remainingMs);
             }
@@ -678,39 +728,37 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
           };
 
           el.onplay = () => {
-            setSignal({ mode: "speaking", provider: "fal", analyser: null });
-            pulseVoice();
-            hooks?.onStart?.();
+            startMediaProgress();
+          };
+          el.onplaying = () => {
+            startMediaProgress();
           };
           el.ontimeupdate = () => {
             pulseVoice();
             if (Number.isFinite(el.duration) && el.duration > 0) {
-              hooks?.onProgress?.(el.currentTime / el.duration);
+              hooks?.onProgress?.(Math.min(1, Math.max(0, el.currentTime / el.duration)));
               tightenSafetyTimer();
             }
             if (
               (el.currentTime > 0.25 && el.paused && !el.seeking) ||
               (el.duration > 0 && el.currentTime >= el.duration - 0.04)
             ) {
-              clearSafetyTimer();
               done();
             }
           };
           el.onended = () => {
-            clearSafetyTimer();
             done();
           };
           el.onerror = () => {
-            clearSafetyTimer();
             done();
           };
 
           safetyTimer = window.setTimeout(() => {
-            clearSafetyTimer();
             done();
           }, Math.max(4000, text.length * 95));
 
           await el.play();
+          startMediaProgress();
           mediaElementPlayed = true;
           return;
         } catch (elErr) {
@@ -719,7 +767,7 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
             return;
           }
           console.warn("sharedMediaElement playback failed, falling back to WebAudio decode", elErr);
-          clearSafetyTimer();
+          clearTimers();
           if (blobUrlToRevoke) {
             URL.revokeObjectURL(blobUrlToRevoke);
             blobUrlToRevoke = null;
@@ -762,23 +810,21 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
                 const startCtxTime = ctx.currentTime;
 
                 src.onended = () => {
-                  clearSafetyTimer();
                   done();
                 };
 
                 safetyTimer = window.setTimeout(() => {
-                  clearSafetyTimer();
                   done();
                 }, Math.max(4000, Math.round(duration * 1000) + 1200));
 
                 setSignal({ mode: "speaking", provider: "fal", analyser: nodeAnalyser });
-                hooks?.onStart?.();
+                fireStart();
 
                 const updateProgress = () => {
                   if (finished || token !== generation) return;
                   const elapsed = ctx.currentTime - startCtxTime;
                   if (duration > 0) {
-                    hooks?.onProgress?.(Math.min(1, elapsed / duration));
+                    hooks?.onProgress?.(Math.min(1, Math.max(0, elapsed / duration)));
                   }
                   if (elapsed < duration) {
                     rafId = requestAnimationFrame(updateProgress);
@@ -794,7 +840,7 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
                   return;
                 }
                 console.warn("AudioBufferSourceNode play failed", playErr);
-                clearSafetyTimer();
+                clearTimers();
               }
             }
           }
@@ -810,19 +856,48 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
       if (calmVoice) u.voice = calmVoice;
       u.rate = 1.04;
       u.pitch = 1.0;
+
+      const estimatedDurationMs = Math.max(1200, words.length * 340);
+      let synthStartTime = 0;
+
       u.onstart = () => {
+        synthStartTime = performance.now();
         setSignal({ mode: "speaking", provider: "browser", analyser: null });
-        pulseVoice();
-        hooks?.onStart?.();
+        fireStart();
+
+        if (progressTimer !== null) {
+          window.clearInterval(progressTimer);
+        }
+        progressTimer = window.setInterval(() => {
+          if (finished || token !== generation) {
+            if (progressTimer !== null) {
+              window.clearInterval(progressTimer);
+              progressTimer = null;
+            }
+            return;
+          }
+          const elapsed = performance.now() - synthStartTime;
+          const p = Math.min(1, elapsed / estimatedDurationMs);
+          hooks?.onProgress?.(p);
+          if (p >= 1 && progressTimer !== null) {
+            window.clearInterval(progressTimer);
+            progressTimer = null;
+          }
+        }, 60);
       };
       u.onboundary = (e) => {
         pulseVoice();
-        hooks?.onProgress?.(Math.min(1, (e.charIndex + (e.charLength ?? 0)) / text.length));
+        const boundaryProgress = Math.min(1, (e.charIndex + (e.charLength ?? 0)) / text.length);
+        hooks?.onProgress?.(boundaryProgress);
       };
-      u.onend = done;
-      u.onerror = done;
+      u.onend = () => {
+        done();
+      };
+      u.onerror = () => {
+        done();
+      };
       synth.speak(u);
-      window.setTimeout(done, Math.max(3800, text.length * 85));
+      safetyTimer = window.setTimeout(done, Math.max(3800, text.length * 85));
     });
   });
 }
@@ -831,8 +906,36 @@ export function speakCallTurn(
   speaker: "agent" | "counterparty" | "user",
   text: string,
   hooks?: Partial<SpeechHooks>,
-  interrupt = false
+  interrupt?: boolean
+): void;
+export function speakCallTurn(
+  text: string,
+  hooks?: Partial<SpeechHooks>,
+  interrupt?: boolean
+): void;
+export function speakCallTurn(
+  arg1: "agent" | "counterparty" | "user" | string,
+  arg2?: string | Partial<SpeechHooks>,
+  arg3?: Partial<SpeechHooks> | boolean,
+  arg4?: boolean
 ) {
+  let speaker: "agent" | "counterparty" | "user" = "agent";
+  let text = "";
+  let hooks: Partial<SpeechHooks> | undefined;
+  let interrupt = false;
+
+  if (arg1 === "agent" || arg1 === "counterparty" || arg1 === "user") {
+    speaker = arg1;
+    text = typeof arg2 === "string" ? arg2 : "";
+    hooks = typeof arg3 === "object" && arg3 !== null ? (arg3 as Partial<SpeechHooks>) : undefined;
+    interrupt = typeof arg3 === "boolean" ? arg3 : Boolean(arg4);
+  } else {
+    speaker = "agent";
+    text = arg1;
+    hooks = typeof arg2 === "object" && arg2 !== null ? (arg2 as Partial<SpeechHooks>) : undefined;
+    interrupt = typeof arg3 === "boolean" ? arg3 : Boolean(arg4);
+  }
+
   const cleanText = text.trim();
   if (!cleanText) {
     hooks?.onEnd?.();
@@ -1079,6 +1182,7 @@ export function useAutoVad({
   const lastActiveSpeechAtRef = useRef<number>(0);
   const agentStoppedAtRef = useRef<number>(0);
   const agentSpeechStartedAtRef = useRef<number>(0);
+  const ttsStartGraceUntilRef = useRef<number>(0);
   const consecutiveSpeechFramesRef = useRef<number>(0);
   const consecutiveBargeInFramesRef = useRef<number>(0);
   const lastContextResumeAttemptAtRef = useRef<number>(0);
@@ -1100,6 +1204,7 @@ export function useAutoVad({
       consecutiveBargeInFramesRef.current = 0;
     } else {
       agentSpeechStartedAtRef.current = performance.now();
+      ttsStartGraceUntilRef.current = performance.now() + 700;
       consecutiveBargeInFramesRef.current = 0;
       // Recoup began speaking: if we were hearing or manually recording, abort recording to avoid echo
       manualRecordingRef.current = false;
@@ -1345,12 +1450,13 @@ export function useAutoVad({
       setRmsLevel(rms);
       onRmsRef.current?.(rms);
 
-      // Compute Frequency-Domain Human Vocal Band Ratio
+      // Compute Frequency-Domain Human Vocal Band Ratio and peak vocal energy
       analyser.getByteFrequencyData(freqBins);
       const sampleRate = ctx.sampleRate || 48000;
       const binHz = sampleRate / analyser.fftSize;
       let vocalEnergy = 0;
       let totalEnergy = 0;
+      let peakBinEnergy = 0;
       for (let i = 0; i < freqBins.length; i++) {
         const freq = i * binHz;
         const val = freqBins[i];
@@ -1358,6 +1464,9 @@ export function useAutoVad({
           totalEnergy += val;
           if (freq >= 300 && freq <= 3400) {
             vocalEnergy += val;
+            if (val > peakBinEnergy) {
+              peakBinEnergy = val;
+            }
           }
         }
       }
@@ -1373,23 +1482,27 @@ export function useAutoVad({
       // When Recoup is speaking: Live Barge-In Gate
       if (isAgentSpeaking) {
         consecutiveSpeechFramesRef.current = 0;
-        const timeSinceSpeechStart = now - agentSpeechStartedAtRef.current;
-        // Ignore the first 350ms after speech starts to avoid initial speaker pop
-        if (timeSinceSpeechStart > 350) {
-          const bargeInRmsThresh = Math.max(0.032, noiseFloor * 2.8);
-          if (rms > bargeInRmsThresh && voiceBandRatio > 0.50) {
-            consecutiveBargeInFramesRef.current++;
-            if (consecutiveBargeInFramesRef.current >= 10) {
-              consecutiveBargeInFramesRef.current = 0;
-              stopSpeaking();
-              onBargeInRef.current?.();
-              startRecordingUtterance(now);
-            }
-          } else {
-            consecutiveBargeInFramesRef.current = Math.max(0, consecutiveBargeInFramesRef.current - 1);
+        const graceUntil = Math.max(ttsStartGraceUntilRef.current, lastTtsAudioStartedAt + 700);
+        if (now < graceUntil) {
+          consecutiveBargeInFramesRef.current = 0;
+          rafId = requestAnimationFrame(vadLoop);
+          return;
+        }
+
+        const isLoudRms = rms > Math.max(0.115, noiseFloorRef.current * 5.8);
+        const isVocalRatio = voiceBandRatio > 0.66;
+        const isPeakHarmonic = peakBinEnergy > 45;
+
+        if (isLoudRms && isVocalRatio && isPeakHarmonic) {
+          consecutiveBargeInFramesRef.current++;
+          if (consecutiveBargeInFramesRef.current >= 22) {
+            consecutiveBargeInFramesRef.current = 0;
+            stopSpeaking();
+            onBargeInRef.current?.();
+            startRecordingUtterance(now);
           }
         } else {
-          consecutiveBargeInFramesRef.current = 0;
+          consecutiveBargeInFramesRef.current = Math.max(0, consecutiveBargeInFramesRef.current - 2);
         }
 
         rafId = requestAnimationFrame(vadLoop);
@@ -1403,10 +1516,10 @@ export function useAutoVad({
       }
 
       if (currentPhase === "listening") {
-        const normalSpeechThreshold = Math.max(0.014, noiseFloor * 1.9);
-        if (rms > normalSpeechThreshold && voiceBandRatio > 0.45) {
+        const speechStartThreshold = Math.max(0.026, noiseFloorRef.current * 2.5);
+        if (rms > speechStartThreshold && voiceBandRatio > 0.50) {
           consecutiveSpeechFramesRef.current++;
-          if (consecutiveSpeechFramesRef.current >= 7) {
+          if (consecutiveSpeechFramesRef.current >= 8) {
             consecutiveSpeechFramesRef.current = 0;
             startRecordingUtterance(now);
           }

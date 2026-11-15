@@ -8,6 +8,7 @@ import gc
 import importlib
 import inspect
 import json
+import logging
 import os
 import re
 import shutil
@@ -20,6 +21,8 @@ from typing import Any, Literal
 
 import httpx
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
@@ -3408,13 +3411,73 @@ _STAGED_INFO_RE = re.compile(
     re.IGNORECASE,
 )
 _COMMIT_REFUND_RE = re.compile(
-    r"\b(refund|cash\s+back|first\s+option|approve|demand|go\s+ahead\s+and\s+refund|full\s+refund|take\s+(?:the\s+)?refund|demand\s+(?:the\s+)?refund|enforce|option\s+b)\b",
+    r"\b(refund|cash\s+back|first\s+option|option\s+(?:1|one|a|b)|approve|approved|demand|enforce|force|claim\s+it|lock\s+(?:it\s+)?in|go\s+ahead|go\s+for\s+it|go\s*,?\s*please|let'?s\s+go|do\s+it|send\s+(?:it|the\s+email|the\s+claim)|email\s+(?:them|the\s+supplier)|file\s+(?:it|the\s+claim)|proceed|confirm|confirmed|accept|execute|run\s+it|yes\s+please|yeah\s+do\s+it)\b",
     re.IGNORECASE,
 )
 _COMMIT_REDELIVERY_RE = re.compile(
     r"\b(replace|replacement|replacements|redeliver|redelivery|re-deliver|re-delivery|22\s+units|22\s+hubs|tomorrow|second\s+option|take\s+(?:the\s+)?replacement|take\s+(?:the\s+)?replacements|202|option\s+a)\b",
     re.IGNORECASE,
 )
+_HOLD_OFF_RE = re.compile(
+    r"\b(hold\s+off|wait|don'?t\s+(?:send|enforce|do\s+it|email|proceed|confirm|execute|approve)|do\s+not\s+(?:send|enforce|do\s+it|email|proceed|confirm|execute|approve)|not\s+yet|pause|cancel|abort|stand\s+by|leave\s+it|skip)\b",
+    re.IGNORECASE,
+)
+_REJECT_RE = re.compile(
+    r"\b(reject|discard|rollback|undo|throw\s+away)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_negated_approval(text: str) -> bool:
+    low = (text or "").lower().strip()
+    if _HOLD_OFF_RE.search(low):
+        return True
+    return bool(
+        re.search(
+            r"\b(don'?t|do\s+not|never|not)\s+(?:to\s+)?\b(enforce|force|refund|send|email|file|approve|proceed|confirm|do\s+it|execute|lock)\b",
+            low,
+        )
+    )
+
+
+async def _generate_llm_consult_fallback(
+    transcript: str,
+    ctx: dict[str, Any],
+    last_agent_text: str,
+) -> str | None:
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return None
+    provider_name = os.getenv("LLM_PROVIDER", "").strip().lower()
+    if provider_name in ("fake", "none", "offline", ""):
+        return None
+    try:
+        from .agent.llm import get_provider
+
+        provider = get_provider()
+        if type(provider).__name__ == "FakeProvider":
+            return None
+        supp = ctx.get("supplier_name") or "the supplier"
+        inv = ctx.get("invoice_id") or "the invoice"
+        amt = f"{float(ctx.get('amount', 0.0)):g}"
+        sys_prompt = (
+            "You are Recoup's voice assistant on a live phone call with an operations executive. "
+            f"Context: Supplier {supp}, Invoice {inv}, Claim amount {amt} EUR. "
+            "Give a concise 1 to 2 sentence conversational spoken reply addressing the user's input, "
+            "ending with a brief prompt asking whether to enforce or hold off. "
+            f"Do NOT repeat this previous response: '{last_agent_text}'."
+        )
+        messages = [{"role": "user", "content": transcript}]
+        resp = await asyncio.wait_for(
+            _offload_blocking(provider.complete, sys_prompt, messages),
+            timeout=2.5,
+        )
+        if resp and resp.text and resp.text.strip():
+            cleaned = resp.text.strip().replace("\n", " ")
+            if cleaned.lower() != last_agent_text.strip().lower():
+                return cleaned
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, OSError, TimeoutError) as exc:
+        logger.debug("LLM consult fallback failed or timed out: %s", exc)
+    return None
 
 
 @app.post("/api/call/user-respond")
@@ -3586,17 +3649,44 @@ async def handle_user_consult_response(request: Request):
     iris_binding = float((iris_res.get("is_binding_authorization", 0.0) or 0.0) if iris_res else 0.0)
     iris_high_conf = (iris_conf >= 0.75 or iris_prob >= 0.75)
 
+    last_agent_text = ""
+    if ACTIVE_CALL and ACTIVE_CALL.get("turns"):
+        for t in reversed(ACTIVE_CALL["turns"]):
+            if t.get("speaker") == "agent" and t.get("text"):
+                last_agent_text = str(t["text"]).lower()
+                break
+
+    is_binary_enforce_question = bool(
+        re.search(
+            r"\b(enforce|hold\s+off|lock\s+in|say\s+go|or\s+hold\s+off|want\s+me\s+to)\b",
+            last_agent_text,
+        )
+    )
+
+    clean_utt = re.sub(r"[^\w\s]", "", lowered).strip()
+    is_bare_affirmative = bool(
+        re.match(
+            r"^(yes|yeah|yep|sure|okay|ok|please\s+do|go|yes\s+please|yes\s+do\s+it|yeah\s+do\s+it)(?:\s+(?:please|thanks|thank\s+you|now|right\s+now))?$",
+            clean_utt,
+        )
+        and "?" not in lowered
+        and not re.search(r"\b(why|what|how|who|when|where|which|is\s+it|can\s+you)\b", clean_utt)
+        and not _is_negated_approval(lowered)
+    )
+
     has_commit_words = bool(
         explicit_choice in ("refund", "redelivery")
-        or _COMMIT_REFUND_RE.search(lowered)
-        or (re.search(r"\b587\b", lowered) and not _WHY_INTENT_RE.search(lowered))
+        or (_COMMIT_REFUND_RE.search(lowered) and not _is_negated_approval(lowered))
+        or (re.search(r"\b587\b", lowered) and not _WHY_INTENT_RE.search(lowered) and not _is_negated_approval(lowered))
         or (
             not is_kappa
             and (
-                (claim_amount > 0 and bool(re.search(rf"\b{int(claim_amount)}\b", lowered)) and not _WHY_INTENT_RE.search(lowered))
-                or bool(re.search(r"\b(enforce\s+(?:the\s+)?claim|approve|yes\s+approve|yes\s+enforce)\b", lowered))
+                (claim_amount > 0 and bool(re.search(rf"\b{int(claim_amount)}\b", lowered)) and not _WHY_INTENT_RE.search(lowered) and not _is_negated_approval(lowered))
+                or (bool(re.search(r"\b(enforce\s+(?:the\s+)?claim|approve|yes\s+approve|yes\s+enforce)\b", lowered)) and not _is_negated_approval(lowered))
+                or is_bare_affirmative
             )
         )
+        or (is_binary_enforce_question and is_bare_affirmative)
         or _COMMIT_REDELIVERY_RE.search(lowered)
     )
     is_hangup_text = bool(_HANGUP_INTENT_RE.search(lowered)) if lowered else False
@@ -3618,7 +3708,13 @@ async def handle_user_consult_response(request: Request):
         else:
             outcome = "escalated"
             agreed_amount = None
-            hangup_reply = "No problem—I'll keep everything safely paused until you're back at your desk. Talk soon!"
+            if _HOLD_OFF_RE.search(lowered) and not is_kappa:
+                inv_text = invoice_id if invoice_id else "the invoice"
+                supp_text = supplier_name if supplier_name else "the supplier"
+                amt_spoken = f"{claim_amount:g}" if claim_amount > 0 else "500" if "3005" in claim_id else "staged"
+                hangup_reply = f"Got it—holding off on {inv_text} for {supp_text}. I've kept the {amt_spoken} euro calculation staged in preview without emailing them. Just say enforce whenever you're ready."
+            else:
+                hangup_reply = "No problem—I'll keep everything safely paused until you're back at your desk. Talk soon!"
             summary_text = "Consult call ended without decision; escalated."
 
         if transcript:
@@ -3909,6 +4005,136 @@ async def handle_user_consult_response(request: Request):
                 "iris_intent": iris_res,
             }
 
+    # Intent 3.5: Reject / Discard vs Soft Hold Off (checked before commit)
+    if explicit_choice == "reject" or _REJECT_RE.search(lowered):
+        if is_kappa:
+            reply_text = "Understood. Pausing the proposed settlement and keeping everything safely unchanged."
+        else:
+            reply_text = f"Understood. Holding off on {supplier_name} invoice {invoice_id} and keeping claim {claim_id} safely paused."
+        end_ev = CallEndPayload(
+            call_id=call_id,
+            outcome="rejected",
+            agreed_amount=None,
+            summary="Settlement rejected by operator; kept safely paused.",
+        )
+        BUS.emit(run_id, EventType.CALL_END, end_ev.model_dump(), thought=end_ev.summary)
+        ACTIVE_CALL["active"] = False
+        ACTIVE_CALL["ringing"] = False
+        ACTIVE_CALL["call_status"] = "ended"
+        ACTIVE_CALL["end"] = end_ev.model_dump()
+        call_turns = ACTIVE_CALL.setdefault("turns", [])
+        _append_user_turn(call_turns, transcript, iris_res)
+        call_turns.append(
+            {
+                "speaker": "agent",
+                "text": reply_text,
+                "audio_url": "/api/voice/turn-audio",
+                "ts": time.time(),
+            }
+        )
+        return {
+            "ok": True,
+            "call_id": call_id,
+            "keep_call_open": False,
+            "call_status": "ended",
+            "choice": "reject",
+            "outcome": "rejected",
+            "transcript": transcript,
+            "reply_text": reply_text,
+            "confirmation_text": reply_text,
+            "agreed_amount": None,
+            "ui_action": None,
+            "iris_intent": iris_res,
+        }
+
+    if _HOLD_OFF_RE.search(lowered):
+        amt_spoken = f"{claim_amount:g}" if claim_amount > 0 else "500" if "3005" in claim_id else "staged"
+        inv_text = invoice_id if invoice_id else "the invoice"
+        supp_text = supplier_name if supplier_name else "the supplier"
+        if is_kappa:
+            reply_text = "Got it—holding off on invoice 7781 for Kappa. I've kept the 587 euro calculation staged in preview without emailing them. Just say enforce whenever you're ready."
+        else:
+            reply_text = f"Got it—holding off on {inv_text} for {supp_text}. I've kept the {amt_spoken} euro calculation staged in preview without emailing them. Just say enforce whenever you're ready."
+
+        keep_call_open = not hangup
+        call_status = "connected" if keep_call_open else "ended"
+        outcome = "escalated" if hangup else None
+
+        user_turn = CallTurnPayload(
+            call_id=call_id,
+            speaker="user",
+            text=transcript,
+            keep_call_open=keep_call_open,
+            call_status=call_status,
+        )
+        BUS.emit(
+            run_id,
+            EventType.CALL_TURN,
+            user_turn.model_dump(),
+            step=2,
+            thought=f"Operator: {transcript}",
+            cost_eur=_voice_micro_cost(transcript) if stt_ran else 0.0,
+        )
+
+        agent_turn = CallTurnPayload(
+            call_id=call_id,
+            speaker="agent",
+            text=reply_text,
+            audio_url="/api/voice/turn-audio",
+            keep_call_open=keep_call_open,
+            call_status=call_status,
+        )
+        BUS.emit(
+            run_id,
+            EventType.CALL_TURN,
+            agent_turn.model_dump(),
+            step=3,
+            thought=f"Recoup Agent: {reply_text}",
+            cost_eur=_voice_micro_cost(reply_text),
+        )
+
+        if hangup:
+            end_ev = CallEndPayload(
+                call_id=call_id,
+                outcome="escalated",
+                agreed_amount=None,
+                summary="Consult call held off by operator; escalated.",
+            )
+            BUS.emit(run_id, EventType.CALL_END, end_ev.model_dump(), thought=end_ev.summary)
+            ACTIVE_CALL["end"] = end_ev.model_dump()
+        else:
+            ACTIVE_CALL["end"] = None
+
+        ACTIVE_CALL["active"] = keep_call_open
+        ACTIVE_CALL["ringing"] = False
+        ACTIVE_CALL["call_status"] = call_status
+
+        call_turns = ACTIVE_CALL.setdefault("turns", [])
+        _append_user_turn(call_turns, transcript, iris_res)
+        call_turns.append(
+            {
+                "speaker": "agent",
+                "text": reply_text,
+                "audio_url": "/api/voice/turn-audio",
+                "ts": time.time(),
+            }
+        )
+
+        return {
+            "ok": True,
+            "call_id": call_id,
+            "keep_call_open": keep_call_open,
+            "call_status": call_status,
+            "choice": None,
+            "outcome": outcome,
+            "transcript": transcript,
+            "reply_text": reply_text,
+            "confirmation_text": reply_text,
+            "agreed_amount": None,
+            "ui_action": None,
+            "iris_intent": iris_res,
+        }
+
     # Intent 4: Commit Refund or Replacement (check BEFORE show email/show aade when commit words are present)
     custom_hook = _get_call_audio_member("parse_user_resolution_intent")
     hook_result = custom_hook(transcript) if callable(custom_hook) else None
@@ -3926,18 +4152,29 @@ async def handle_user_consult_response(request: Request):
             _COMMIT_REDELIVERY_RE.search(lowered) or bool(re.search(r"\b202\b", lowered))
         ):
             choice = "redelivery"
-        elif _COMMIT_REFUND_RE.search(lowered) or (
-            bool(re.search(r"\b587\b", lowered)) and not _WHY_INTENT_RE.search(lowered)
-        ) or (
-            not is_kappa
-            and (
-                bool(re.search(r"\b(enforce\s+(?:the\s+)?claim|approve|yes\s+approve|yes\s+enforce|go\s+ahead)\b", lowered))
-                or (claim_amount > 0 and bool(re.search(rf"\b{int(claim_amount)}\b", lowered)) and not _WHY_INTENT_RE.search(lowered))
+        elif not _is_negated_approval(lowered) and (
+            _COMMIT_REFUND_RE.search(lowered)
+            or (bool(re.search(r"\b587\b", lowered)) and not _WHY_INTENT_RE.search(lowered))
+            or (
+                not is_kappa
+                and (
+                    bool(re.search(r"\b(enforce\s+(?:the\s+)?claim|approve|yes\s+approve|yes\s+enforce|go\s+ahead)\b", lowered))
+                    or (claim_amount > 0 and bool(re.search(rf"\b{int(claim_amount)}\b", lowered)) and not _WHY_INTENT_RE.search(lowered))
+                    or is_bare_affirmative
+                )
             )
+            or (is_binary_enforce_question and is_bare_affirmative)
         ):
             choice = "refund"
-        elif iris_high_conf and iris_binding >= 0.65:
-            if iris_intent == "commit_refund":
+        elif not _is_negated_approval(lowered) and (
+            (iris_high_conf and iris_binding >= 0.65)
+            or (
+                (iris_conf >= 0.52 or iris_prob >= 0.52)
+                and iris_intent in ("commit_refund", "commit_discount")
+                and iris_binding >= 0.52
+            )
+        ):
+            if iris_intent in ("commit_refund", "commit_discount"):
                 choice = "refund"
             elif iris_intent == "commit_replacement":
                 choice = "redelivery"
@@ -4623,15 +4860,131 @@ async def handle_user_consult_response(request: Request):
                 "iris_intent": iris_res,
             }
 
-    # Intent 6: Fallback / unclear turn
-    if is_kappa:
-        fallback_reply = (
-            "I can break down the 587 euro calculation, compare your options, or lock in the refund right now. What would you prefer?"
+    # Open questions / topic cues: what happened / supplier / invoice / delivery / math / email / next steps
+    open_q_reply: str | None = None
+    amt_spoken = f"{claim_amount:g}" if claim_amount > 0 else "500" if "3005" in claim_id else "staged"
+    inv_text = invoice_id if invoice_id else "the invoice"
+    supp_text = supplier_name if supplier_name else "the supplier"
+    del_text = delivery_id if delivery_id else "the delivery"
+
+    if re.search(r"\b(what('?s|\s+is)\s+(going\s+on|happening|this)|what\s+happened|problem|issue|flagged|discrepancy)\b", lowered):
+        if is_kappa:
+            open_q_reply = "On shipment D-1042 from Kappa, we found sixteen missing hubs, six broken hubs, and pricing overbilling on invoice 7781 totaling 587 euros and 30 cents. Should we enforce the refund or accept replacements?"
+        else:
+            reason_text = reason or "billing discrepancies"
+            open_q_reply = f"On delivery {del_text} from {supp_text}, our audit flagged {reason_text} on invoice {inv_text}, totaling {amt_spoken} euros. Should I enforce the claim or hold off?"
+    elif re.search(r"\b(who(\s+is|\s+are|'s)?(\s+the)?\s+(supplier|vendor|company)|who\s+billed|supplier\s+details)\b", lowered):
+        open_q_reply = f"The supplier is {supp_text}{f', delivery reference {del_text}' if delivery_id else ''}. Should I enforce the {amt_spoken} euro claim with them or hold off?"
+    elif re.search(r"\b(which\s+invoice|invoice\s+(number|id|details)|what\s+invoice)\b", lowered):
+        open_q_reply = f"This is for invoice {inv_text} from {supp_text} for {amt_spoken} euros. Would you like me to enforce the hold or hold off?"
+    elif re.search(r"\b(which\s+(delivery|shipment|order)|delivery\s+(id|number|details)|shipment\s+(id|number|details))\b", lowered):
+        open_q_reply = f"It's delivery {del_text} from {supp_text} tied to invoice {inv_text}. Want me to lock in the {amt_spoken} euro claim or wait?"
+    elif re.search(r"\b(who(\s+are\s+you|\s+will\s+you)?\s+email(ing)?|recipient\s+email|email\s+address|who\s+gets\s+the\s+email)\b", lowered):
+        email_target = recipient_email or "the supplier accounts team"
+        open_q_reply = f"I'll email {email_target} representing {supp_text} regarding invoice {inv_text}. Should I send it or hold off?"
+    elif re.search(r"\b(what\s+happens\s+next|next\s+step|what\s+will\s+happen|what\s+do\s+we\s+do\s+next)\b", lowered):
+        if is_kappa:
+            open_q_reply = "Once you confirm, I will freeze invoice 7781, file the AADE tax credit XML, and notify Kappa immediately. Would you prefer the refund or replacement?"
+        else:
+            open_q_reply = f"Once you confirm, I will freeze invoice {inv_text}, file the Greek AADE tax credit, and send the formal claim email to {supp_text}. Ready to enforce, or should we hold off?"
+
+    if open_q_reply is not None:
+        user_turn_q = CallTurnPayload(
+            call_id=call_id,
+            speaker="user",
+            text=transcript,
+            keep_call_open=True,
+            call_status="connected",
         )
+        BUS.emit(
+            run_id,
+            EventType.CALL_TURN,
+            user_turn_q.model_dump(),
+            step=2,
+            thought=f"Operator: {transcript}",
+            cost_eur=_voice_micro_cost(transcript) if stt_ran else 0.0,
+        )
+        agent_turn_q = CallTurnPayload(
+            call_id=call_id,
+            speaker="agent",
+            text=open_q_reply,
+            audio_url="/api/voice/turn-audio",
+            keep_call_open=True,
+            call_status="connected",
+        )
+        BUS.emit(
+            run_id,
+            EventType.CALL_TURN,
+            agent_turn_q.model_dump(),
+            step=3,
+            thought=f"Recoup Agent: {open_q_reply}",
+            cost_eur=_voice_micro_cost(open_q_reply),
+        )
+        ACTIVE_CALL["active"] = True
+        ACTIVE_CALL["ringing"] = False
+        ACTIVE_CALL["call_status"] = "connected"
+        call_turns = ACTIVE_CALL.setdefault("turns", [])
+        _append_user_turn(call_turns, transcript, iris_res)
+        call_turns.append(
+            {
+                "speaker": "agent",
+                "text": open_q_reply,
+                "audio_url": "/api/voice/turn-audio",
+                "ts": time.time(),
+            }
+        )
+        return {
+            "ok": True,
+            "call_id": call_id,
+            "keep_call_open": True,
+            "call_status": "connected",
+            "choice": None,
+            "outcome": None,
+            "transcript": transcript,
+            "reply_text": open_q_reply,
+            "confirmation_text": open_q_reply,
+            "agreed_amount": None,
+            "ui_action": None,
+            "iris_intent": iris_res,
+        }
+
+    # Intent 6: Fallback / unclear turn (with LLM and multi-turn anti-repeat rotation)
+    prior_agent_texts = [
+        str(t.get("text", "")).strip().lower()
+        for t in (ACTIVE_CALL.get("turns", []) if ACTIVE_CALL else [])
+        if t.get("speaker") == "agent" and t.get("text")
+    ]
+    last_agent_lower = prior_agent_texts[-1] if prior_agent_texts else ""
+
+    llm_reply: str | None = None
+    if transcript:
+        llm_reply = await _generate_llm_consult_fallback(transcript, ctx, last_agent_lower)
+
+    if llm_reply:
+        fallback_reply = llm_reply
     else:
-        fallback_reply = (
-            f"I can break down the {claim_amount:g} euro calculation, compare your options, or enforce the claim right now. What would you prefer?"
-        )
+        if is_kappa:
+            candidates = [
+                "I can break down the 587 euro calculation, compare your options, or lock in the refund right now. What would you prefer?",
+                "We have the 587 euro refund or 22 replacement hubs ready for invoice 7781. Which option would you like to take?",
+                "Standing by on Kappa shipment D-1042. Should I lock in the full cash refund today, or go with tomorrow's replacement hubs?",
+                "I'm ready to freeze invoice 7781 and file the AADE tax credit for 587 euros. Shall I proceed with refund, or choose replacements?",
+            ]
+        else:
+            candidates = [
+                f"I can break down the {amt_spoken} euro calculation, compare your options, or enforce the claim right now. What would you prefer?",
+                f"We have {supp_text} invoice {inv_text} staged for {amt_spoken} euros. Want me to go ahead and enforce it, or hold off?",
+                f"Standing by on the {amt_spoken} euro claim for {supp_text}. Should I lock it in and email them, or hold off for now?",
+                f"I'm ready to freeze invoice {inv_text} and recover {amt_spoken} euros from {supp_text}. Shall I proceed or wait?",
+            ]
+        agent_turn_count = len(prior_agent_texts)
+        chosen: str | None = None
+        for idx_offset in range(len(candidates)):
+            cand = candidates[(agent_turn_count + idx_offset) % len(candidates)]
+            if cand.strip().lower() != last_agent_lower:
+                chosen = cand
+                break
+        fallback_reply = chosen or candidates[0]
     user_turn_f = CallTurnPayload(
         call_id=call_id,
         speaker="user",

@@ -1174,6 +1174,270 @@ def test_user_respond_dynamic_non_kappa_hold_off(isolated_consult_server):
     assert "Kappa" not in body["reply_text"]
 
 
+def _stage_atlas_industrial_consult(real, req_id: str = "req_atlas_d3005"):
+    """Helper to stage Atlas Industrial Supply D-3005 500 EUR claim in DB and PENDING."""
+    fut = asyncio.new_event_loop().create_future()
+    PENDING[req_id] = fut
+
+    with contextlib.closing(sqlite3.connect(real.db_path)) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO suppliers (id, name, email, phone) VALUES ('SUP-ATLAS', 'Atlas Industrial Supply', 'accounts@atlasindustrial.example', '+30 210 5550199')"
+        )
+        conn.commit()
+
+    PENDING_PAYLOADS[req_id] = {
+        "req_id": req_id,
+        "tool_name": "send_email",
+        "args": {
+            "to": "accounts@atlasindustrial.example",
+            "subject": "Credit Claim CLM-3005 on Invoice INV-9901: EUR 500.00 (AADE myDATA 5.1)",
+            "body": "Discrepancy of EUR 500.00 on delivery D-3005",
+        },
+        "diff_preview": "EMAIL to=accounts@atlasindustrial.example subject='Credit Claim CLM-3005 on Invoice INV-9901'",
+        "risk_reason": "Claim CLM-3005 is EUR 500.00 on INV-9901",
+        "report": {
+            "external_outbox": [
+                {
+                    "to": "accounts@atlasindustrial.example",
+                    "subject": "Credit Claim CLM-3005 on Invoice INV-9901: EUR 500.00",
+                    "body": "Claim CLM-3005 for EUR 500.00 on delivery D-3005",
+                }
+            ]
+        },
+    }
+
+    BUS.emit(
+        "run_atlas_test",
+        EventType.TOOL_CALL,
+        {
+            "call": {
+                "id": "call_clm_3005",
+                "name": "upsert_row",
+                "args": {
+                    "table": "claims",
+                    "pk_col": "id",
+                    "row": {
+                        "id": "CLM-3005",
+                        "supplier_id": "SUP-ATLAS",
+                        "delivery_id": "D-3005",
+                        "invoice_id": "INV-9901",
+                        "amount": 500.0,
+                        "reason": "damaged steel valves and pricing discrepancy",
+                        "status": "drafted",
+                    },
+                },
+            }
+        },
+    )
+    return fut
+
+
+def test_user_respond_stt_phonetic_force_the_claim_commits(isolated_consult_server):
+    """Verify Wizper STT 'Force the claim.' natural spoken command commits 500 EUR Atlas claim."""
+    client, _, real, _ = isolated_consult_server
+    fut = _stage_atlas_industrial_consult(real, "req_atlas_force_1")
+
+    c_resp = client.post("/api/call/user-consult", json={"req_id": "req_atlas_force_1"})
+    assert c_resp.status_code == 200
+    assert "Atlas Industrial Supply" in c_resp.json()["opening_text"]
+
+    resp = client.post(
+        "/api/call/user-respond",
+        json={"transcript": "Force the claim.", "req_id": "req_atlas_force_1", "claim_id": "CLM-3005"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["choice"] == "refund"
+    assert body["agreed_amount"] == pytest.approx(500.0)
+    assert fut.done() and fut.result() is True
+    confirm_text = body.get("confirmation_text") or body.get("reply_text") or ""
+    assert "INV-9901" in confirm_text
+    assert "Atlas Industrial Supply" in confirm_text
+    assert "500" in confirm_text
+
+
+def test_user_respond_stt_phonetic_go_please_commits(isolated_consult_server):
+    """Verify Wizper STT 'Go, please.' natural spoken approval commits staged claim."""
+    client, _, real, _ = isolated_consult_server
+    fut = _stage_atlas_industrial_consult(real, "req_atlas_go")
+
+    client.post("/api/call/user-consult", json={"req_id": "req_atlas_go"})
+
+    resp = client.post(
+        "/api/call/user-respond",
+        json={"transcript": "Go, please.", "req_id": "req_atlas_go", "claim_id": "CLM-3005"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["choice"] == "refund"
+    assert body["agreed_amount"] == pytest.approx(500.0)
+    assert fut.done() and fut.result() is True
+
+
+def test_user_respond_stt_phonetic_force_the_claim_right_now_commits(isolated_consult_server):
+    """Verify 'Force the claim right now.' natural spoken command commits staged claim."""
+    client, _, real, _ = isolated_consult_server
+    fut = _stage_atlas_industrial_consult(real, "req_atlas_force_now")
+
+    client.post("/api/call/user-consult", json={"req_id": "req_atlas_force_now"})
+
+    resp = client.post(
+        "/api/call/user-respond",
+        json={"transcript": "Force the claim right now.", "req_id": "req_atlas_force_now", "claim_id": "CLM-3005"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["choice"] == "refund"
+    assert fut.done() and fut.result() is True
+
+
+def test_user_respond_bare_affirmatives_commit(isolated_consult_server):
+    """Verify 'Yes, do it' and bare 'Yes' commit non-Kappa staged claims."""
+    client, _, real, _ = isolated_consult_server
+
+    # Part A: "Yes, do it"
+    fut_a = _stage_atlas_industrial_consult(real, "req_atlas_yes_do_it")
+    client.post("/api/call/user-consult", json={"req_id": "req_atlas_yes_do_it"})
+    resp_a = client.post(
+        "/api/call/user-respond",
+        json={"transcript": "Yes, do it", "req_id": "req_atlas_yes_do_it", "claim_id": "CLM-3005"},
+    )
+    assert resp_a.status_code == 200
+    assert resp_a.json()["choice"] == "refund"
+    assert fut_a.done() and fut_a.result() is True
+
+    # Part B: bare "Yes."
+    fut_b = _stage_atlas_industrial_consult(real, "req_atlas_bare_yes")
+    client.post("/api/call/user-consult", json={"req_id": "req_atlas_bare_yes"})
+    resp_b = client.post(
+        "/api/call/user-respond",
+        json={"transcript": "Yes.", "req_id": "req_atlas_bare_yes", "claim_id": "CLM-3005"},
+    )
+    assert resp_b.status_code == 200
+    assert resp_b.json()["choice"] == "refund"
+    assert fut_b.done() and fut_b.result() is True
+
+
+def test_user_respond_hold_off_and_dont_send_it_yet(isolated_consult_server):
+    """Verify 'Hold off' and 'Don't send it yet' acknowledge Atlas details cleanly without committing or repeating fallback."""
+    client, _, real, _ = isolated_consult_server
+    fut = _stage_atlas_industrial_consult(real, "req_atlas_soft_hold")
+
+    c_resp = client.post("/api/call/user-consult", json={"req_id": "req_atlas_soft_hold"})
+    opening_text = c_resp.json()["opening_text"]
+
+    # Turn 1: "Hold off"
+    resp1 = client.post(
+        "/api/call/user-respond",
+        json={"transcript": "Hold off", "req_id": "req_atlas_soft_hold", "claim_id": "CLM-3005"},
+    )
+    assert resp1.status_code == 200
+    body1 = resp1.json()
+    assert body1["ok"] is True
+    assert body1["choice"] is None
+    assert body1["keep_call_open"] is True
+    assert fut.done() is False
+    reply1 = body1["reply_text"]
+    assert "INV-9901" in reply1
+    assert "Atlas Industrial Supply" in reply1
+    assert "500" in reply1
+    assert reply1 != opening_text
+
+    # Turn 2: "Don't send it yet"
+    resp2 = client.post(
+        "/api/call/user-respond",
+        json={"transcript": "Don't send it yet", "req_id": "req_atlas_soft_hold", "claim_id": "CLM-3005"},
+    )
+    assert resp2.status_code == 200
+    body2 = resp2.json()
+    assert body2["ok"] is True
+    assert body2["choice"] is None
+    assert fut.done() is False
+    reply2 = body2["reply_text"]
+    assert "INV-9901" in reply2
+    assert "Atlas Industrial Supply" in reply2
+    assert "500" in reply2
+
+
+def test_user_respond_multi_turn_unrecognized_anti_repeat(isolated_consult_server):
+    """Verify multi-turn unrecognized inputs rotate phrasing and never repeat the exact same sentence twice in a row."""
+    client, _, real, _ = isolated_consult_server
+    _stage_atlas_industrial_consult(real, "req_atlas_anti_repeat")
+
+    c_resp = client.post("/api/call/user-consult", json={"req_id": "req_atlas_anti_repeat"})
+    replies = [c_resp.json()["opening_text"]]
+
+    unrecognized_inputs = [
+        "Huh?",
+        "What?",
+        "Can you repeat that?",
+        "I didn't catch that",
+        "Pardon?",
+    ]
+
+    for user_inp in unrecognized_inputs:
+        resp = client.post(
+            "/api/call/user-respond",
+            json={"transcript": user_inp, "req_id": "req_atlas_anti_repeat", "claim_id": "CLM-3005"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        curr_reply = body["reply_text"]
+        assert curr_reply != replies[-1], f"Repeated exact reply twice in a row: '{curr_reply}'"
+        replies.append(curr_reply)
+
+    # Ensure at least 3 distinct phrasing variations were produced across the turns
+    distinct_phrasings = set(replies[1:])
+    assert len(distinct_phrasings) >= 3, f"Expected at least 3 distinct variations, got {len(distinct_phrasings)}"
+
+
+def test_user_respond_open_questions_grounded_in_ctx(isolated_consult_server):
+    """Verify topic cues (what happened, supplier, invoice, delivery, email, next steps) answer directly using ctx."""
+    client, _, real, _ = isolated_consult_server
+    _stage_atlas_industrial_consult(real, "req_atlas_topic_cues")
+
+    client.post("/api/call/user-consult", json={"req_id": "req_atlas_topic_cues"})
+
+    # 1. Who is the supplier?
+    r_supp = client.post(
+        "/api/call/user-respond",
+        json={"transcript": "Who is the supplier?", "req_id": "req_atlas_topic_cues", "claim_id": "CLM-3005"},
+    )
+    assert r_supp.status_code == 200
+    assert "Atlas Industrial Supply" in r_supp.json()["reply_text"]
+
+    # 2. Which invoice?
+    r_inv = client.post(
+        "/api/call/user-respond",
+        json={"transcript": "Which invoice is this for?", "req_id": "req_atlas_topic_cues", "claim_id": "CLM-3005"},
+    )
+    assert r_inv.status_code == 200
+    assert "INV-9901" in r_inv.json()["reply_text"]
+
+    # 3. What happened?
+    r_what = client.post(
+        "/api/call/user-respond",
+        json={"transcript": "What happened with this delivery?", "req_id": "req_atlas_topic_cues", "claim_id": "CLM-3005"},
+    )
+    assert r_what.status_code == 200
+    assert "500" in r_what.json()["reply_text"]
+    assert "INV-9901" in r_what.json()["reply_text"]
+
+    # 4. What happens next?
+    r_next = client.post(
+        "/api/call/user-respond",
+        json={"transcript": "What happens next if I confirm?", "req_id": "req_atlas_topic_cues", "claim_id": "CLM-3005"},
+    )
+    assert r_next.status_code == 200
+    assert "INV-9901" in r_next.json()["reply_text"]
+    assert "Atlas Industrial Supply" in r_next.json()["reply_text"]
+
+
+
 
 
 

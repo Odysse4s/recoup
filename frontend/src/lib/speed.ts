@@ -15,6 +15,7 @@ export interface PaceProfile {
   holdMs?: number;
   forgeTypeMs?: number;
   forgeHoldMs?: number;
+  minWindowGapMs?: number;
 }
 
 export const PACE: Record<Speed, PaceProfile> = {
@@ -30,19 +31,21 @@ export const PACE: Record<Speed, PaceProfile> = {
     holdMs: 4200,
     forgeTypeMs: 2900,
     forgeHoldMs: 3800,
+    minWindowGapMs: 3200,
   },
   "1x": {
     label: "1x",
     eventMs: 950,
     pop: 320,
-    type: 1500,
-    hold: 2400,
+    type: 1850,
+    hold: 3200,
     dock: 460,
     rewind: 1600,
-    typeMs: 1500,
-    holdMs: 2400,
-    forgeTypeMs: 1700,
-    forgeHoldMs: 2200,
+    typeMs: 1850,
+    holdMs: 3200,
+    forgeTypeMs: 2200,
+    forgeHoldMs: 3000,
+    minWindowGapMs: 2300,
   },
   "2x": {
     label: "2x",
@@ -56,6 +59,7 @@ export const PACE: Record<Speed, PaceProfile> = {
     holdMs: 1200,
     forgeTypeMs: 850,
     forgeHoldMs: 1100,
+    minWindowGapMs: 1250,
   },
   turbo: {
     label: "Turbo",
@@ -69,5 +73,6 @@ export const PACE: Record<Speed, PaceProfile> = {
     holdMs: 450,
     forgeTypeMs: 350,
     forgeHoldMs: 400,
+    minWindowGapMs: 550,
   },
 };

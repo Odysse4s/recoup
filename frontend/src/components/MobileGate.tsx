@@ -288,6 +288,16 @@ interface LocalCompletion {
   claimId: string;
 }
 
+interface MobileConsultTurn extends OperatorConsultTurn {
+  id?: string;
+}
+
+interface ActiveStreamingTurn {
+  id: string;
+  fullText: string;
+  currentText: string;
+}
+
 interface UserRespondApiBody {
   ok?: boolean;
   call_id?: string;
@@ -347,10 +357,11 @@ function OperatorEscalationCall({
   const [submitting, setSubmitting] = useState(false);
   const [agentSpeaking, setAgentSpeaking] = useState(false);
   const [actionToast, setActionToast] = useState<string | null>(null);
-  const [localTurns, setLocalTurns] = useState<OperatorConsultTurn[]>([]);
+  const [localTurns, setLocalTurns] = useState<MobileConsultTurn[]>([]);
   const [warmStream, setWarmStream] = useState<MediaStream | null>(null);
   const [committedChoice, setCommittedChoice] = useState<OperatorChoice | null>(null);
 
+  const activeStreamingTurnRef = useRef<ActiveStreamingTurn | null>(null);
   const actionToastTimerRef = useRef<number | null>(null);
   const spokenOpeningKeyRef = useRef<string | null>(null);
   const spokenEndKeyRef = useRef<string | null>(null);
@@ -411,18 +422,46 @@ function OperatorEscalationCall({
     return DEFAULT_OPENING_QUESTION;
   }, [consult?.turns, approval?.spoken_summary]);
 
-  const mergedTurns = useMemo<OperatorConsultTurn[]>(() => {
+  const mergedTurns = useMemo<MobileConsultTurn[]>(() => {
     const sseTurns = consult?.turns ?? [];
+    const streaming = activeStreamingTurnRef.current;
+
     if (sseTurns.length > 0) {
-      const existingTexts = new Set(sseTurns.map((t) => `${t.speaker}:${t.text.trim().toLowerCase()}`));
-      const extras = localTurns.filter(
-        (lt) => !existingTexts.has(`${lt.speaker}:${lt.text.trim().toLowerCase()}`)
+      // Guard SSE turns from prematurely flashing full text over active streaming text
+      const guardedSseTurns: MobileConsultTurn[] = sseTurns.map((t) => {
+        if (
+          streaming &&
+          t.speaker === "agent" &&
+          t.text.trim().toLowerCase() === streaming.fullText.trim().toLowerCase()
+        ) {
+          return { ...t, text: streaming.currentText };
+        }
+        return t;
+      });
+
+      const existingTexts = new Set(
+        guardedSseTurns.map((t) => `${t.speaker}:${t.text.trim().toLowerCase()}`)
       );
-      return [...sseTurns, ...extras];
+      const extras = localTurns.filter((lt) => {
+        if (streaming && lt.id === streaming.id) {
+          const inSse = sseTurns.some(
+            (st) =>
+              st.speaker === "agent" &&
+              st.text.trim().toLowerCase() === streaming.fullText.trim().toLowerCase()
+          );
+          if (inSse) return false;
+        }
+        return !existingTexts.has(`${lt.speaker}:${lt.text.trim().toLowerCase()}`);
+      });
+      return [...guardedSseTurns, ...extras];
     }
-    const seed: OperatorConsultTurn[] = [
+
+    if (localTurns.length > 0) {
+      return localTurns;
+    }
+
+    const seed: MobileConsultTurn[] = [
       { speaker: "agent", text: openingText, ts: 0 },
-      ...localTurns,
     ];
     return seed;
   }, [consult?.turns, localTurns, openingText]);
@@ -465,24 +504,79 @@ function OperatorEscalationCall({
     }, 4500);
   }, []);
 
-  const speakAgentLine = useCallback(
-    (text: string, interrupt = false) => {
-      const clean = text.trim();
+  const streamAgentTurn = useCallback(
+    (fullText: string, turnId: string, interrupt = true) => {
+      const clean = fullText.trim();
       if (!clean) return;
-      if (lastSpokenTextRef.current === clean && !interrupt) return;
       lastSpokenTextRef.current = clean;
       setAgentSpeaking(true);
+
+      const words = clean.split(/\s+/).filter(Boolean);
+      activeStreamingTurnRef.current = {
+        id: turnId,
+        fullText: clean,
+        currentText: "…",
+      };
+
       speakCallTurn(
         "agent",
         clean,
         {
-          onStart: () => setAgentSpeaking(true),
-          onEnd: () => setAgentSpeaking(false),
+          onStart: () => {
+            setAgentSpeaking(true);
+            const initialText = words.slice(0, Math.min(2, words.length)).join(" ");
+            if (activeStreamingTurnRef.current?.id === turnId) {
+              activeStreamingTurnRef.current.currentText = initialText;
+            }
+            setLocalTurns((prev) =>
+              prev.map((t) => (t.id === turnId ? { ...t, text: initialText } : t))
+            );
+          },
+          onProgress: (p: number) => {
+            const count = Math.max(2, Math.ceil(words.length * Math.min(1, p * 1.05)));
+            const sliced = words.slice(0, count).join(" ");
+            if (activeStreamingTurnRef.current?.id === turnId) {
+              activeStreamingTurnRef.current.currentText = sliced;
+            }
+            setLocalTurns((prev) =>
+              prev.map((t) => (t.id === turnId ? { ...t, text: sliced } : t))
+            );
+          },
+          onEnd: () => {
+            setAgentSpeaking(false);
+            if (activeStreamingTurnRef.current?.id === turnId) {
+              activeStreamingTurnRef.current = null;
+            }
+            setLocalTurns((prev) =>
+              prev.map((t) => (t.id === turnId ? { ...t, text: clean } : t))
+            );
+          },
         },
         interrupt
       );
     },
     []
+  );
+
+  const speakAgentLine = useCallback(
+    (text: string, interrupt = false) => {
+      const clean = text.trim();
+      if (!clean) return;
+      const existing = [...localTurns].reverse().find(
+        (t) => t.speaker === "agent" && (t.text === clean || t.text === "…")
+      );
+      if (existing?.id) {
+        streamAgentTurn(clean, existing.id, interrupt);
+      } else {
+        const tid = `agent-${Date.now()}`;
+        setLocalTurns((prev) => [
+          ...prev,
+          { id: tid, speaker: "agent", text: "…", ts: Date.now() },
+        ]);
+        streamAgentTurn(clean, tid, interrupt);
+      }
+    },
+    [localTurns, streamAgentTurn]
   );
 
   // Keep mobileCallOwnsAudio active throughout answered call
@@ -619,12 +713,13 @@ function OperatorEscalationCall({
           data.spoken_summary?.trim() ||
           "Kappa owes 587 euros cash back, or 22 free replacements tomorrow. Which should I take?";
 
+        const turnId = `agent-reply-${Date.now()}`;
         setLocalTurns((prev) => [
           ...prev,
-          { speaker: "agent", text: replyText, ts: Date.now() + 1 },
+          { id: turnId, speaker: "agent", text: "…", ts: Date.now() + 1 },
         ]);
         buzz([30, 40]);
-        speakAgentLine(replyText, true);
+        streamAgentTurn(replyText, turnId, true);
         return;
       }
 
@@ -676,9 +771,10 @@ function OperatorEscalationCall({
         data.summary?.trim() ||
         defaultConfirmationFor(resolvedChoice, claimId);
 
+      const turnId = `agent-confirm-${Date.now()}`;
       setLocalTurns((prev) => [
         ...prev,
-        { speaker: "agent", text: confirmation, ts: Date.now() + 1 },
+        { id: turnId, speaker: "agent", text: "…", ts: Date.now() + 1 },
       ]);
 
       onSetLocalCompletion({
@@ -697,9 +793,9 @@ function OperatorEscalationCall({
         r.decide(reqId, data.approved ?? true);
       }
 
-      speakAgentLine(confirmation, true);
+      streamAgentTurn(confirmation, turnId, true);
     },
-    [callKey, claimId, committedChoiceInCall, onEndWithoutDecision, onSetLocalCompletion, r, reqId, showActionToast, speakAgentLine]
+    [callKey, claimId, committedChoiceInCall, onEndWithoutDecision, onSetLocalCompletion, r, reqId, showActionToast, streamAgentTurn]
   );
 
   // Dispatch audio recorded by Auto-VAD to /api/call/user-respond
@@ -804,7 +900,9 @@ function OperatorEscalationCall({
     //    below: delaying it behind a mic-permission prompt or a slow network round trip can
     //    lose the browser's user-activation window (iOS Safari especially), which is why
     //    pickup sometimes played no audio at all.
-    speakAgentLine(openingText, true);
+    const turnId = `agent-open-${Date.now()}`;
+    setLocalTurns([{ id: turnId, speaker: "agent", text: "…", ts: Date.now() }]);
+    streamAgentTurn(openingText, turnId, true);
     setAnswered(true);
 
     // 4. Open warm mic MediaStream once (can proceed while the opening line is speaking).
@@ -835,7 +933,7 @@ function OperatorEscalationCall({
     } catch {
       // offline / demo
     }
-  }, [claimId, consult?.active, consult?.callId, onUnlockAudio, openingText, reqId, speakAgentLine]);
+  }, [claimId, consult?.active, consult?.callId, onUnlockAudio, openingText, reqId, streamAgentTurn]);
 
   // Red End Call Button Handler: tells server to hang up, transitions cleanly
   const handleEndCall = useCallback(async () => {
