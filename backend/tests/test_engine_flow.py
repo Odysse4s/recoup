@@ -452,9 +452,7 @@ async def test_replay_rejection_preserves_prior_committed_run(tmp_path):
 
 
 def test_server_endpoints_and_dropped_pack_routes(monkeypatch, tmp_path):
-    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
     monkeypatch.delenv("FAL_KEY", raising=False)
-    monkeypatch.delenv("WONDERFUL_API_KEY", raising=False)
     monkeypatch.setenv("VOICE_CACHE_DIR", str(tmp_path / "voice_cache"))
     with TestClient(app) as client:
         h = client.get("/api/health")
@@ -493,7 +491,7 @@ def isolated_goal_server(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "REAL", real)
     monkeypatch.setattr(server, "LOG", log)
     monkeypatch.setenv("VOICE_PROVIDER", "offline")
-    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    monkeypatch.delenv("FAL_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
     BUS.history.clear()

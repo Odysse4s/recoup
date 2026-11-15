@@ -1120,7 +1120,7 @@ class TestGovernanceAndSecretHygieneInvariants:
         gitignore_txt = (repo_root / ".gitignore").read_text(encoding="utf-8")
         assert ".env" in gitignore_txt
 
-        forbidden = ("FAL_KEY", "GEMINI_API_KEY", "ELEVENLABS_API_KEY", "Authorization: Key")
+        forbidden = ("FAL_KEY", "GEMINI_API_KEY", "OUMI_API_KEY", "Authorization: Key")
         scan_dirs = [repo_root / "frontend" / "src"]
         dist_dir = repo_root / "frontend" / "dist"
         if dist_dir.is_dir():

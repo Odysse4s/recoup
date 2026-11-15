@@ -218,7 +218,7 @@ async def ask_human(run_id: str, payload: dict[str, Any], timeout: float | None 
 
 def _spoken_summary_for(payload: dict[str, Any]) -> str:
     with contextlib.suppress(Exception):
-        from ..voice.elevenlabs_agent import build_briefing_script
+        from ..voice.briefing import build_briefing_script
 
         script = build_briefing_script(payload)
         if script:

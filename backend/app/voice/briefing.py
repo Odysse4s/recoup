@@ -14,10 +14,8 @@ import httpx
 from ..contracts import ApprovalNeededPayload, CallEndPayload, CallTurnPayload, ChangeReport
 from ..domain_config import brand
 
-DEFAULT_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"
-DEFAULT_ELEVENLABS_MODEL = "eleven_turbo_v2_5"
-DEFAULT_FAL_TTS_MODEL = "fal-ai/elevenlabs/tts/eleven-v3"
-DEFAULT_WONDERFUL_TTS_URL = "https://api.wonderful.ai/v1/tts"
+DEFAULT_VOICE_ID = "ara"
+DEFAULT_FAL_TTS_MODEL = "xai/grok-tts"
 
 VOICE_CACHE_DIR = Path(__file__).resolve().parents[2] / ".voice_cache"
 
@@ -304,12 +302,7 @@ def _resolve_fal_endpoint(raw_model: str) -> str:
         return DEFAULT_FAL_TTS_MODEL
     if "/" in cleaned:
         return cleaned
-    lowered = cleaned.lower()
-    if lowered in ("eleven_turbo_v2_5", "eleven_turbo_v2", "turbo-v2.5", "turbo_v2_5"):
-        return "fal-ai/elevenlabs/tts/turbo-v2.5"
-    if lowered in ("eleven-v3", "eleven_v3"):
-        return "fal-ai/elevenlabs/tts/eleven-v3"
-    return f"fal-ai/elevenlabs/tts/{cleaned}"
+    return f"xai/{cleaned}" if cleaned.startswith("grok") else f"fal-ai/{cleaned}"
 
 
 def _extract_audio_bytes_from_response(resp: httpx.Response, client: httpx.Client) -> bytes | None:
@@ -374,45 +367,8 @@ def _synthesize_via_fal(text: str, voice_id: str | None, api_key: str) -> bytes 
         return _extract_audio_bytes_from_response(resp, client)
 
 
-def _synthesize_via_elevenlabs(text: str, resolved_voice: str, api_key: str) -> bytes | None:
-    model_id = os.getenv("ELEVENLABS_MODEL_ID", DEFAULT_ELEVENLABS_MODEL).strip() or DEFAULT_ELEVENLABS_MODEL
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{resolved_voice}"
-    with httpx.Client(timeout=_briefing_tts_timeout(), follow_redirects=True) as client:
-        resp = client.post(
-            url,
-            headers={
-                "xi-api-key": api_key,
-                "Accept": "audio/mpeg",
-                "Content-Type": "application/json",
-            },
-            json={
-                "text": text,
-                "model_id": model_id,
-                "voice_settings": {"stability": 0.45, "similarity_boost": 0.8},
-            },
-        )
-        resp.raise_for_status()
-        return resp.content if resp.content else None
-
-
-def _synthesize_via_wonderful(text: str, resolved_voice: str, api_key: str) -> bytes | None:
-    url = os.getenv("WONDERFUL_TTS_URL", DEFAULT_WONDERFUL_TTS_URL).strip() or DEFAULT_WONDERFUL_TTS_URL
-    with httpx.Client(timeout=_briefing_tts_timeout(), follow_redirects=True) as client:
-        resp = client.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Accept": "audio/mpeg",
-                "Content-Type": "application/json",
-            },
-            json={"text": text, "voice_id": resolved_voice},
-        )
-        resp.raise_for_status()
-        return _extract_audio_bytes_from_response(resp, client)
-
-
 def synthesize_briefing(text: str, voice_id: str | None = None) -> bytes | None:
-    """Synthesize a spoken MP3 briefing with SHA-256 disk caching and multi-provider fallback."""
+    """Synthesize a spoken MP3 briefing via fal.ai with SHA-256 disk caching."""
     cleaned = (text or "").strip()
     if not cleaned:
         return None
@@ -422,7 +378,7 @@ def synthesize_briefing(text: str, voice_id: str | None = None) -> bytes | None:
         return None
 
     explicit_voice = (voice_id or "").strip() or None
-    resolved_voice = explicit_voice or os.getenv("ELEVENLABS_VOICE_ID", "").strip() or DEFAULT_VOICE_ID
+    resolved_voice = explicit_voice or os.getenv("FAL_VOICE_ID", "").strip() or os.getenv("GROK_VOICE", "").strip() or DEFAULT_VOICE_ID
     cache_key = hashlib.sha256(f"{resolved_voice}:{cleaned}".encode()).hexdigest()
 
     cache_dir = _get_cache_dir()
@@ -435,32 +391,17 @@ def synthesize_briefing(text: str, voice_id: str | None = None) -> bytes | None:
     if "PYTEST_CURRENT_TEST" in os.environ and getattr(httpx.Client, "__module__", "").startswith("httpx"):
         return None
     fal_key = os.getenv("FAL_KEY", "").strip()
-    eleven_key = os.getenv("ELEVENLABS_API_KEY", "").strip()
-    wonderful_key = os.getenv("WONDERFUL_API_KEY", "").strip()
-
-    if not (fal_key or eleven_key or wonderful_key):
+    if not fal_key:
         return None
 
-    order = ["fal", "elevenlabs", "wonderful"]
-    if provider_pref in order:
-        order = [provider_pref, *[p for p in order if p != provider_pref]]
-
-    for provider in order:
-        try:
-            audio_bytes: bytes | None = None
-            if provider == "fal" and fal_key:
-                audio_bytes = _synthesize_via_fal(cleaned, explicit_voice, fal_key)
-            elif provider == "elevenlabs" and eleven_key:
-                audio_bytes = _synthesize_via_elevenlabs(cleaned, resolved_voice, eleven_key)
-            elif provider == "wonderful" and wonderful_key:
-                audio_bytes = _synthesize_via_wonderful(cleaned, resolved_voice, wonderful_key)
-
-            if audio_bytes:
-                cache_dir.mkdir(parents=True, exist_ok=True)
-                cache_path.write_bytes(audio_bytes)
-                return audio_bytes
-        except httpx.HTTPError:
-            continue
+    try:
+        audio_bytes = _synthesize_via_fal(cleaned, explicit_voice or resolved_voice, fal_key)
+        if audio_bytes:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_path.write_bytes(audio_bytes)
+            return audio_bytes
+    except httpx.HTTPError:
+        return None
 
     return None
 

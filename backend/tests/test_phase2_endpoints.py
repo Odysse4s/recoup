@@ -33,7 +33,6 @@ def isolated_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(server, "REAL", real)
     monkeypatch.setattr(server, "LOG", log)
     monkeypatch.setenv("VOICE_PROVIDER", "offline")
-    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
     monkeypatch.delenv("FAL_KEY", raising=False)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
 

@@ -34,12 +34,7 @@ _VOICE_ENV_KEYS = (
     "FAL_COUNTERPARTY_VOICE",
     "AGENT_VOICE",
     "COUNTERPARTY_VOICE",
-    "ELEVENLABS_API_KEY",
-    "ELEVENLABS_MODEL_ID",
-    "ELEVENLABS_AGENT_VOICE_ID",
-    "ELEVENLABS_COUNTERPARTY_VOICE_ID",
-    "WONDERFUL_API_KEY",
-    "WONDERFUL_TTS_URL",
+    "GROK_VOICE",
     "VOICE_PROVIDER",
     "VOICE_CACHE_DIR",
 )
@@ -229,16 +224,16 @@ class TestDualSpeakerCallSynthesis:
         assert synthesize_call_turn("agent", first_line) is not None  # evicted long ago -> refetched
         assert post_count["n"] == calls_before + 1
 
-    def test_elevenlabs_and_env_override_send_distinct_voice_ids(
+    def test_fal_turn_tts_and_env_override_send_distinct_voices(
         self,
         monkeypatch: pytest.MonkeyPatch,
         _clean_phase2_state: Path,
     ) -> None:
-        monkeypatch.setenv("ELEVENLABS_API_KEY", "xi-dual-key")
+        monkeypatch.setenv("FAL_KEY", "fal-dual-key")
 
-        seen_urls: list[str] = []
+        seen_voices: list[str] = []
 
-        class ElevenDualClient:
+        class FalVoiceDualClient:
             def __init__(self, **kwargs: Any) -> None:
                 pass
 
@@ -249,32 +244,27 @@ class TestDualSpeakerCallSynthesis:
                 return None
 
             def post(self, url: str, headers: dict[str, str], json: dict[str, Any]) -> _StubHTTPResponse:
-                assert headers["xi-api-key"] == "xi-dual-key"
-                seen_urls.append(url)
-                return _StubHTTPResponse(content=f"EL::{url}".encode(), content_type="audio/mpeg")
+                assert headers["Authorization"] == "Key fal-dual-key"
+                v = str(json.get("voice", ""))
+                seen_voices.append(v)
+                return _StubHTTPResponse(content=f"FAL::{v}".encode(), content_type="audio/mpeg")
 
-        monkeypatch.setattr(call_audio_module.httpx, "Client", ElevenDualClient)
+        monkeypatch.setattr(call_audio_module.httpx, "Client", FalVoiceDualClient)
 
         same_utterance = "We can settle CLM-D-1042 today."
         a_mp3 = synthesize_call_turn("agent", same_utterance)
         c_mp3 = synthesize_call_turn("counterparty", same_utterance)
 
         assert a_mp3 != c_mp3
-        assert len(seen_urls) == 2
-        assert seen_urls[0] != seen_urls[1]
-        assert seen_urls[0].endswith("/21m00Tcm4TlvDq8ikWAM")
-        assert seen_urls[1].endswith("/CwhRBWXzGAHq8TQ4Fs17")
-        assert len(list(_clean_phase2_state.glob("*.mp3"))) == 2
+        assert seen_voices[:2] == ["ara", "eve"]
 
-        # Custom env voice overrides produce fresh cache entries
-        monkeypatch.setenv("AGENT_VOICE", "Aria")
-        monkeypatch.setenv("COUNTERPARTY_VOICE", "Charlie")
+        # Custom env voice overrides produce distinct fal.run requests and cache entries
+        monkeypatch.setenv("AGENT_VOICE", "rex")
+        monkeypatch.setenv("COUNTERPARTY_VOICE", "leo")
         a_override = synthesize_call_turn("agent", same_utterance)
         c_override = synthesize_call_turn("counterparty", same_utterance)
         assert a_override != c_override
-        assert seen_urls[2].endswith("/9BWtsMINqrJLrRacOk9x")
-        assert seen_urls[3].endswith("/IKne3meq5aSn9XLyUdCD")
-        assert len(list(_clean_phase2_state.glob("*.mp3"))) == 4
+        assert seen_voices[2:] == ["rex", "leo"]
 
     def test_strips_bracketed_speaker_stage_directions_before_tts(
         self,

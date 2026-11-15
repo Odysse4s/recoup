@@ -10,6 +10,7 @@ import pytest
 
 from app.contracts import ApprovalNeededPayload, CallEndPayload, CallTurnPayload, ChangeReport
 from app.domain_config import DOMAIN
+from app.voice import briefing as voice_module
 from app.voice import (
     build_briefing_script,
     parse_voice_decision,
@@ -17,17 +18,12 @@ from app.voice import (
     summarize_negotiation_outcome,
     synthesize_briefing,
 )
-from app.voice import elevenlabs_agent as voice_module
 
 _VOICE_ENV_VARS = (
     "FAL_KEY",
     "FAL_TTS_MODEL",
     "FAL_VOICE_ID",
-    "ELEVENLABS_API_KEY",
-    "ELEVENLABS_VOICE_ID",
-    "ELEVENLABS_MODEL_ID",
-    "WONDERFUL_API_KEY",
-    "WONDERFUL_TTS_URL",
+    "GROK_VOICE",
     "VOICE_PROVIDER",
     "VOICE_CACHE_DIR",
 )
@@ -185,7 +181,7 @@ class TestSynthesizeBriefing:
         self, monkeypatch: pytest.MonkeyPatch, _isolated_voice_env: Path
     ) -> None:
         monkeypatch.setenv("FAL_KEY", "fal-test-secret")
-        monkeypatch.setenv("FAL_TTS_MODEL", "eleven_turbo_v2_5")
+        monkeypatch.setenv("FAL_TTS_MODEL", "xai/grok-tts")
 
         calls: list[tuple[str, str, dict[str, Any]]] = []
         fake_mp3 = b"ID3-fal-synthesized-mp3"
@@ -214,26 +210,22 @@ class TestSynthesizeBriefing:
         monkeypatch.setattr(voice_module.httpx, "Client", FakeClient)
 
         text = "Recoup rehearsed claim CLM-D-1042."
-        out1 = synthesize_briefing(text, voice_id="Rachel")
+        out1 = synthesize_briefing(text, voice_id="ara")
         assert out1 == fake_mp3
         assert len(calls) == 2
-        assert calls[0][1] == "https://fal.run/fal-ai/elevenlabs/tts/turbo-v2.5"
+        assert calls[0][1] == "https://fal.run/xai/grok-tts"
         assert calls[0][2]["headers"]["Authorization"] == "Key fal-test-secret"
 
         # Second call must hit `.voice_cache/<hash>.mp3` with zero extra network calls
-        out2 = synthesize_briefing(text, voice_id="Rachel")
+        out2 = synthesize_briefing(text, voice_id="ara")
         assert out2 == fake_mp3
         assert len(calls) == 2
 
-    def test_elevenlabs_and_wonderful_providers_and_http_failover(
+    def test_fal_tts_graceful_http_failure_returns_none(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("FAL_KEY", "broken-fal-key")
-        monkeypatch.setenv("FAL_TTS_MODEL", "fal-ai/elevenlabs/tts/eleven-v3")
-        monkeypatch.setenv("ELEVENLABS_API_KEY", "xi-live-key")
-        monkeypatch.setenv("WONDERFUL_API_KEY", "wonderful-key")
-
-        eleven_mp3 = b"ID3-elevenlabs-mp3"
+        monkeypatch.setenv("FAL_TTS_MODEL", "xai/grok-tts")
 
         class FailoverClient:
             def __init__(self, **kwargs: Any) -> None:
@@ -246,37 +238,10 @@ class TestSynthesizeBriefing:
                 return None
 
             def post(self, url: str, headers: dict[str, str], json: dict[str, Any]) -> _FakeHTTPResponse:
-                if "fal.run" in url:
-                    return _FakeHTTPResponse(status_code=503)
-                if "elevenlabs.io" in url:
-                    assert headers["xi-api-key"] == "xi-live-key"
-                    return _FakeHTTPResponse(content=eleven_mp3, content_type="audio/mpeg")
-                raise AssertionError(f"Unexpected URL: {url}")
+                return _FakeHTTPResponse(status_code=503)
 
         monkeypatch.setattr(voice_module.httpx, "Client", FailoverClient)
-        assert synthesize_briefing("Approve claim CLM-D-1042.") == eleven_mp3
-
-        # Direct Wonderful provider check
-        monkeypatch.delenv("FAL_KEY")
-        monkeypatch.delenv("ELEVENLABS_API_KEY")
-        wonderful_mp3 = b"ID3-wonderful-mp3"
-
-        class WonderfulClient:
-            def __init__(self, **kwargs: Any) -> None:
-                pass
-
-            def __enter__(self) -> Self:
-                return self
-
-            def __exit__(self, *exc: object) -> None:
-                return None
-
-            def post(self, url: str, headers: dict[str, str], json: dict[str, Any]) -> _FakeHTTPResponse:
-                assert headers["Authorization"] == "Bearer wonderful-key"
-                return _FakeHTTPResponse(content=wonderful_mp3, content_type="audio/mpeg")
-
-        monkeypatch.setattr(voice_module.httpx, "Client", WonderfulClient)
-        assert synthesize_briefing("Stage vendor call for CLM-D-1042.") == wonderful_mp3
+        assert synthesize_briefing("Approve claim CLM-D-1042.") is None
 
 
 # ---------------------------------------------------------------------------

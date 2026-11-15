@@ -1,5 +1,5 @@
-"""Regression tests for overnight stage-hardening fixes across multimodal evidence, forge oracle,
-3-way claim reconciliation, disjunctive/example verification, single-gate coalescing, and follow-up loops.
+"""End-to-end scenario tests for multimodal evidence ingestion, sandboxed tool synthesis,
+three-way claim reconciliation, disjunctive verification, single-gate coalescing, and follow-up loops.
 """
 from __future__ import annotations
 

@@ -1878,7 +1878,6 @@ async def voice_briefing(req: VoiceBriefingRequest):
         pytest_turn_offline = (
             "PYTEST_CURRENT_TEST" in os.environ
             and is_unpatched_turn
-            and not os.getenv("ELEVENLABS_API_KEY", "").strip()
             and not os.getenv("FAL_KEY", "").strip()
             and not os.getenv("VOICE_PROVIDER", "").strip()
         )
@@ -1889,13 +1888,12 @@ async def voice_briefing(req: VoiceBriefingRequest):
 
     if not audio_bytes:
         with contextlib.suppress(Exception):
-            from .voice.elevenlabs_agent import synthesize_briefing  # type: ignore[import-not-found]
+            from .voice.briefing import synthesize_briefing  # type: ignore[import-not-found]
 
-            is_unpatched = getattr(synthesize_briefing, "__module__", "").endswith("elevenlabs_agent")
+            is_unpatched = getattr(synthesize_briefing, "__module__", "").endswith("briefing")
             pytest_offline = (
                 "PYTEST_CURRENT_TEST" in os.environ
                 and is_unpatched
-                and not os.getenv("ELEVENLABS_API_KEY", "").strip()
                 and not os.getenv("FAL_KEY", "").strip()
                 and not os.getenv("VOICE_PROVIDER", "").strip()
             )
@@ -2109,7 +2107,7 @@ def _normalize_negotiation_output(
     if end_raw is not None:
         end_dict = end_raw.model_dump() if hasattr(end_raw, "model_dump") else dict(end_raw)
     else:
-        from .voice.elevenlabs_agent import summarize_negotiation_outcome
+        from .voice.briefing import summarize_negotiation_outcome
 
         end_dict = summarize_negotiation_outcome(claim_id, claim_amount, turns_list, floor_pct=floor_pct)
     return turns_list, end_dict
@@ -2153,7 +2151,7 @@ async def negotiate_vendor_call(req: NegotiateCallRequest | None = None):
             negotiated = _normalize_negotiation_output(raw_neg, claim_id, claim_amount, floor_pct)
 
     if negotiated is None:
-        from .voice.elevenlabs_agent import (
+        from .voice.briefing import (
             simulate_vendor_negotiation_turns,
             summarize_negotiation_outcome,
         )
@@ -2266,7 +2264,6 @@ async def voice_turn_audio(req: TurnAudioRequest):
         pytest_turn_offline = (
             "PYTEST_CURRENT_TEST" in os.environ
             and is_unpatched_turn
-            and not os.getenv("ELEVENLABS_API_KEY", "").strip()
             and not os.getenv("FAL_KEY", "").strip()
             and not os.getenv("VOICE_PROVIDER", "").strip()
         )
@@ -2277,9 +2274,9 @@ async def voice_turn_audio(req: TurnAudioRequest):
 
     if not audio_bytes:
         with contextlib.suppress(Exception):
-            from .voice.elevenlabs_agent import synthesize_briefing
+            from .voice.briefing import synthesize_briefing
 
-            is_unpatched_brief = getattr(synthesize_briefing, "__module__", "").endswith("elevenlabs_agent")
+            is_unpatched_brief = getattr(synthesize_briefing, "__module__", "").endswith("briefing")
             skip_redundant_prod_retry = (
                 "PYTEST_CURRENT_TEST" not in os.environ
                 and is_unpatched_turn
@@ -2288,7 +2285,6 @@ async def voice_turn_audio(req: TurnAudioRequest):
             pytest_brief_offline = (
                 "PYTEST_CURRENT_TEST" in os.environ
                 and is_unpatched_brief
-                and not os.getenv("ELEVENLABS_API_KEY", "").strip()
                 and not os.getenv("FAL_KEY", "").strip()
                 and not os.getenv("VOICE_PROVIDER", "").strip()
             )
@@ -2399,7 +2395,7 @@ async def voice_decision(request: Request):
             _record_direct_voice_cost(transcript)
 
     if decision not in ("approve", "reject", "unknown"):
-        from .voice.elevenlabs_agent import parse_voice_decision
+        from .voice.briefing import parse_voice_decision
 
         decision = parse_voice_decision(transcript)
 
@@ -2657,13 +2653,13 @@ async def _transcribe_operator_consult_audio(
                     return txt
 
     with contextlib.suppress(Exception):
-        elevenlabs_agent = importlib.import_module(".voice.elevenlabs_agent", __package__)
+        briefing_mod = importlib.import_module(".voice.briefing", __package__)
 
-        fn_el = getattr(elevenlabs_agent, "transcribe_voice_decision", None)
-        if callable(fn_el):
-            sig = inspect.signature(fn_el)
+        fn_brief = getattr(briefing_mod, "transcribe_voice_decision", None)
+        if callable(fn_brief):
+            sig = inspect.signature(fn_brief)
             kwargs = {"mime_type": mime_type} if "mime_type" in sig.parameters else {}
-            out = await _offload_blocking(fn_el, audio_bytes, **kwargs)
+            out = await _offload_blocking(fn_brief, audio_bytes, **kwargs)
             if isinstance(out, str) and out.strip():
                 return out.strip()
             if isinstance(out, dict):
@@ -3026,10 +3022,10 @@ def _apply_consult_resolution_mutations(
         claims_ddl = schema_ddls.get("claims", "")
         c_col_map = {c["name"]: c for c in table_cols["claims"]}
         note = (
-            f"Enforced EUR {agreed_amount:.2f} refund hold (overcharge 168.00 + short 280.00 + damaged 105.00 + late 34.30) · AADE 5.1"
+            f"Enforced EUR {agreed_amount:.2f} refund hold (overcharge 168.00 + short 280.00 + damaged 105.00 + late 34.30) · AADE myDATA 5.1"
             if choice == "refund" and claim_id == "CLM-D-1042"
             else (
-                f"22 hubs next-day replacement + EUR {agreed_amount:.2f} credit (overcharge 168.00 + late 34.30) · AADE 9.3"
+                f"22 hubs next-day replacement + EUR {agreed_amount:.2f} credit (overcharge 168.00 + late 34.30) · AADE myDATA 9.3"
                 if choice == "redelivery" and claim_id == "CLM-D-1042"
                 else (
                     f"Operator consult: enforced EUR {agreed_amount:.2f} refund hold + AADE myDATA 5.1"
@@ -5150,12 +5146,12 @@ async def handle_user_consult_response(request: Request):
 
                         if invoice_id:
                             inv_row = conn.execute("SELECT * FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
-                            if inv_row is not None and str(inv_row["status"]).lower() != "payment_hold":
+                            if inv_row is not None and str(inv_row["status"]).lower() not in ("held", "disputed"):
                                 _record_reversible_mutation(
                                     run_id,
                                     "upsert_row",
-                                    {"table": "invoices", "pk_col": "id", "row": {"id": invoice_id, "status": "payment_hold"}},
-                                    f"Updated invoice #{invoice_id} to payment_hold",
+                                    {"table": "invoices", "pk_col": "id", "row": {"id": invoice_id, "status": "held"}},
+                                    f"Updated invoice #{invoice_id} to held",
                                 )
 
             # 3. Send email to supplier if recipient_email is known and not already in outbox

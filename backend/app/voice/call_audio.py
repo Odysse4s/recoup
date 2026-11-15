@@ -19,18 +19,16 @@ import httpx
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
-from . import elevenlabs_agent
-from .elevenlabs_agent import (
-    DEFAULT_ELEVENLABS_MODEL,
+from . import briefing
+from .briefing import (
     DEFAULT_FAL_TTS_MODEL,
-    DEFAULT_WONDERFUL_TTS_URL,
     _extract_audio_bytes_from_response,
     _resolve_fal_endpoint,
     parse_voice_decision,
 )
 
-AGENT_VOICE = "Rachel"
-COUNTERPARTY_VOICE = "Roger"
+AGENT_VOICE = "ara"
+COUNTERPARTY_VOICE = "eve"
 DEFAULT_FAL_STT_MODEL = "fal-ai/wizper"
 
 DEFAULT_GROK_TTS_URL = "https://fal.run/xai/grok-tts"
@@ -38,17 +36,8 @@ DEFAULT_GROK_VOICE_URL = "https://fal.run/xai/grok-voice"
 DEFAULT_GROK_REALTIME_WS_URL = "wss://fal.run/xai/grok-voice/realtime"
 DEFAULT_GROK_VOICE_ID = "ara"
 
-_DEFAULT_CACHE_DIR = elevenlabs_agent.VOICE_CACHE_DIR
+_DEFAULT_CACHE_DIR = briefing.VOICE_CACHE_DIR
 VOICE_CACHE_DIR = _DEFAULT_CACHE_DIR
-
-_ELEVENLABS_PRESET_VOICE_IDS: dict[str, str] = {
-    "rachel": "21m00Tcm4TlvDq8ikWAM",
-    "roger": "CwhRBWXzGAHq8TQ4Fs17",
-    "charlie": "IKne3meq5aSn9XLyUdCD",
-    "george": "JBFqnCBsd6RMkjVDRZzb",
-    "aria": "9BWtsMINqrJLrRacOk9x",
-    "sarah": "EXAVITQu4vr4xnSDxMaL",
-}
 
 # fal.run's data-URI validator checks Python's stdlib mimetypes before Wizper's ffmpeg
 # container-sniffs the audio stream; map browser MediaRecorder labels to accepted aliases.
@@ -84,8 +73,8 @@ def _resolve_cache_dir() -> Path:
         return Path(env_override)
     if VOICE_CACHE_DIR != _DEFAULT_CACHE_DIR:
         return VOICE_CACHE_DIR
-    if elevenlabs_agent.VOICE_CACHE_DIR != _DEFAULT_CACHE_DIR:
-        return elevenlabs_agent.VOICE_CACHE_DIR
+    if briefing.VOICE_CACHE_DIR != _DEFAULT_CACHE_DIR:
+        return briefing.VOICE_CACHE_DIR
     return VOICE_CACHE_DIR
 
 
@@ -101,18 +90,6 @@ def _resolve_speaker_voice(speaker: Literal["agent", "counterparty"]) -> str:
         or os.getenv("FAL_AGENT_VOICE", "").strip()
         or AGENT_VOICE
     )
-
-
-def _resolve_elevenlabs_voice_id(speaker: Literal["agent", "counterparty"], voice: str) -> str:
-    if speaker == "counterparty":
-        override = os.getenv("ELEVENLABS_COUNTERPARTY_VOICE_ID", "").strip()
-        if override:
-            return override
-    else:
-        override = os.getenv("ELEVENLABS_AGENT_VOICE_ID", "").strip()
-        if override:
-            return override
-    return _ELEVENLABS_PRESET_VOICE_IDS.get(voice.lower(), voice)
 
 
 def _resolve_stt_endpoint(raw_model: str) -> str:
@@ -148,48 +125,6 @@ def _fal_turn_tts(text: str, voice: str, api_key: str) -> bytes | None:
         )
         resp.raise_for_status()
         return _extract_audio_bytes_from_response(resp, client)
-
-
-def _wonderful_turn_tts(
-    text: str,
-    speaker: Literal["agent", "counterparty"],
-    voice: str,
-    api_key: str,
-) -> bytes | None:
-    url = os.getenv("WONDERFUL_TTS_URL", DEFAULT_WONDERFUL_TTS_URL).strip() or DEFAULT_WONDERFUL_TTS_URL
-    with httpx.Client(timeout=_tts_timeout(), follow_redirects=True) as client:
-        resp = client.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Accept": "audio/mpeg",
-                "Content-Type": "application/json",
-            },
-            json={"text": text, "voice_id": voice, "speaker": speaker},
-        )
-        resp.raise_for_status()
-        return _extract_audio_bytes_from_response(resp, client)
-
-
-def _elevenlabs_turn_tts(text: str, voice_id: str, api_key: str) -> bytes | None:
-    model_id = os.getenv("ELEVENLABS_MODEL_ID", DEFAULT_ELEVENLABS_MODEL).strip() or DEFAULT_ELEVENLABS_MODEL
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-    with httpx.Client(timeout=_tts_timeout(), follow_redirects=True) as client:
-        resp = client.post(
-            url,
-            headers={
-                "xi-api-key": api_key,
-                "Accept": "audio/mpeg",
-                "Content-Type": "application/json",
-            },
-            json={
-                "text": text,
-                "model_id": model_id,
-                "voice_settings": {"stability": 0.45, "similarity_boost": 0.8},
-            },
-        )
-        resp.raise_for_status()
-        return resp.content if resp.content else None
 
 
 _SPEAKER_TAG_PREFIX_RE = re.compile(
@@ -297,11 +232,7 @@ def prewarm_stage_call_tts() -> int:
     provider = os.getenv("VOICE_PROVIDER", "").strip().lower()
     if provider in ("none", "offline", "disabled"):
         return 0
-    has_keys = bool(
-        os.getenv("FAL_KEY", "").strip()
-        or os.getenv("ELEVENLABS_API_KEY", "").strip()
-        or os.getenv("WONDERFUL_API_KEY", "").strip()
-    )
+    has_keys = bool(os.getenv("FAL_KEY", "").strip())
     if not has_keys:
         return 0
 
@@ -363,48 +294,29 @@ def synthesize_call_turn(
     if "PYTEST_CURRENT_TEST" in os.environ and getattr(httpx.Client, "__module__", "").startswith("httpx"):
         return None
     fal_key = os.getenv("FAL_KEY", "").strip()
-    wonderful_key = os.getenv("WONDERFUL_API_KEY", "").strip()
-    eleven_key = os.getenv("ELEVENLABS_API_KEY", "").strip()
-
-    if not (fal_key or wonderful_key or eleven_key):
+    if not fal_key:
         return None
 
-    if fal_key and provider_pref not in ("elevenlabs", "offline", "none", "fake", "disabled"):
-        grok_voice = "eve" if role == "counterparty" else "ara"
+    grok_voice = voice
+    grok_bytes = synthesize_grok_tts(cleaned, voice=grok_voice)
+    if not grok_bytes and "PYTEST_CURRENT_TEST" not in os.environ:
+        # Retry Grok TTS once before ever changing voice engine so live runs keep 100% consistent voice timbre
         grok_bytes = synthesize_grok_tts(cleaned, voice=grok_voice)
-        if not grok_bytes and "PYTEST_CURRENT_TEST" not in os.environ:
-            # Retry Grok TTS once before ever changing voice engine so live runs keep 100% consistent voice timbre
-            grok_bytes = synthesize_grok_tts(cleaned, voice=grok_voice)
-        if grok_bytes:
-            _lru_put(cache_key, grok_bytes)
-            return grok_bytes
-        if "PYTEST_CURRENT_TEST" not in os.environ and not provider_pref:
-            # Keep single-voice consistency in production rather than falling back to a jarring male/alternate TTS model
-            return None
+    if grok_bytes:
+        _lru_put(cache_key, grok_bytes)
+        return grok_bytes
+    if "PYTEST_CURRENT_TEST" not in os.environ and not provider_pref:
+        return None
 
-    order = ["fal", "wonderful", "elevenlabs"]
-    if provider_pref in order:
-        order = [provider_pref, *[p for p in order if p != provider_pref]]
-
-    eleven_voice_id = _resolve_elevenlabs_voice_id(role, voice)
-
-    for provider in order:
-        try:
-            audio_bytes: bytes | None = None
-            if provider == "fal" and fal_key:
-                audio_bytes = _fal_turn_tts(cleaned, voice, fal_key)
-            elif provider == "wonderful" and wonderful_key:
-                audio_bytes = _wonderful_turn_tts(cleaned, role, voice, wonderful_key)
-            elif provider == "elevenlabs" and eleven_key:
-                audio_bytes = _elevenlabs_turn_tts(cleaned, eleven_voice_id, eleven_key)
-
-            if audio_bytes:
-                cache_dir.mkdir(parents=True, exist_ok=True)
-                cache_path.write_bytes(audio_bytes)
-                _lru_put(cache_key, audio_bytes)
-                return audio_bytes
-        except httpx.HTTPError:
-            continue
+    try:
+        audio_bytes = _fal_turn_tts(cleaned, voice, fal_key)
+        if audio_bytes:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_path.write_bytes(audio_bytes)
+            _lru_put(cache_key, audio_bytes)
+            return audio_bytes
+    except httpx.HTTPError:
+        return None
 
     return None
 

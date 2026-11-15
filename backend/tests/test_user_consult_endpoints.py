@@ -35,7 +35,6 @@ def isolated_consult_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(server, "LOG", log)
     monkeypatch.setattr(server, "_EXTRA_VOICE_COST_EUR", 0.0)
     monkeypatch.setenv("VOICE_PROVIDER", "offline")
-    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
     monkeypatch.delenv("FAL_KEY", raising=False)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
