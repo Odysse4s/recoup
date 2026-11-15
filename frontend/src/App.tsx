@@ -102,7 +102,7 @@ export default function App() {
           value={goal}
           onChange={setGoal}
           onSubmit={run}
-          busy={r.runStatus !== "idle"}
+          busy={r.runStatus === "running" || r.runStatus === "committing"}
           brandName={brand_name}
           pendingApproval={r.pendingApproval}
           onApprove={r.decide}

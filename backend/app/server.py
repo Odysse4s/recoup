@@ -744,11 +744,11 @@ async def _run_stage_demo(
         claim_calc_args = {"overcharge": 168.0, "shortfall": 280.0, "damaged": 105.0, "late_penalty": 34.3}
         call_calc = ToolCall(id="call_calc_4", name="compute_supplier_claim", args=claim_calc_args)
         BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_calc.model_dump()}, step=4, thought="Executing forged tool compute_supplier_claim.")
-        calc_out = (
-            REGISTRY["compute_supplier_claim"].do(claim_calc_args, rehearsal_env)
-            if "compute_supplier_claim" in REGISTRY
-            else {"result": {"total": 587.30}}
-        )
+        if "compute_supplier_claim" in REGISTRY:
+            calc_out = REGISTRY["compute_supplier_claim"].do(claim_calc_args, rehearsal_env)
+            REGISTRY["compute_supplier_claim"].uses += 1
+        else:
+            calc_out = {"result": {"total": 587.30}}
         previews[call_calc.id] = "total: 587.30 EUR"
         BUS.emit(run_id, EventType.TOOL_DONE, {"call": call_calc.model_dump(), "output": calc_out}, step=4)
         await _pace()
@@ -1254,11 +1254,11 @@ async def _run_followup_offer_loop(run_id: str, offer: PreparedOffer, pace_ms: i
         calc_args = {"d1017_days_late": 4, "d1031_days_late": 3, "daily_rate_eur": 25.0}
         c3 = ToolCall(id="call_fu_3", name="compute_sla_late_credit", args=calc_args)
         BUS.emit(run_id, EventType.TOOL_CALL, {"call": c3.model_dump()}, step=3, thought="Running forged `compute_sla_late_credit` calculator.")
-        calc_out = (
-            REGISTRY["compute_sla_late_credit"].do(calc_args, rehearsal_env)
-            if "compute_sla_late_credit" in REGISTRY
-            else {"result": {"total_credit_eur": 175.0}}
-        )
+        if "compute_sla_late_credit" in REGISTRY:
+            calc_out = REGISTRY["compute_sla_late_credit"].do(calc_args, rehearsal_env)
+            REGISTRY["compute_sla_late_credit"].uses += 1
+        else:
+            calc_out = {"result": {"total_credit_eur": 175.0}}
         BUS.emit(run_id, EventType.TOOL_DONE, {"call": c3.model_dump(), "output": calc_out}, step=3)
         await _pace()
 

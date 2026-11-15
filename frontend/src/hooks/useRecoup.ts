@@ -541,8 +541,10 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   );
 
   // ---------------------------------------------------------------- windows
+  const suppressWindowSpawnRef = useRef(false);
+
   const spawnWindow = useCallback((w: LiveWin | null | undefined) => {
-    if (!w || !windowsEnabledRef.current || (w.skipAutoPop && !w.manual)) return;
+    if (!w || !windowsEnabledRef.current || (w.skipAutoPop && !w.manual) || (suppressWindowSpawnRef.current && !w.manual)) return;
     if (w.toolName && !w.manual) setLanding((l) => [...l, w.toolName!]);
     setWindows((ws) => {
       const withoutDup = ws.filter((x) => x.id !== w.id);
@@ -1228,6 +1230,14 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         setStage(ok ? "commit" : "gate");
         setRunStatus(ok ? "committing" : "aborted");
         if (ok) {
+          setPlan((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  steps: prev.steps.map((s) => (s.status === "failed" ? s : { ...s, status: "done" })),
+                }
+              : prev
+          );
           triggerCommitCelebration();
         } else {
           soundFx.playRewindSweep(1);
@@ -1270,6 +1280,14 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         const status = String(payload?.status ?? payload?.outcome ?? "");
         setRehearsalActive(false);
         if (status === "committed" || payload?.outcome === "committed" || status === "done" || payload?.outcome === "done") {
+          setPlan((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  steps: prev.steps.map((s) => (s.status === "failed" ? s : { ...s, status: "done" })),
+                }
+              : prev
+          );
           setStage("commit");
           setStageDone(true);
           setRunStatus("committed");
@@ -1283,6 +1301,14 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           setRunStatus("error");
           setPendingApproval(null);
         } else {
+          setPlan((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  steps: prev.steps.map((s) => (s.status === "failed" ? s : { ...s, status: "done" })),
+                }
+              : prev
+          );
           setStage("commit");
           setStageDone(true);
           setRunStatus("committed");
@@ -1427,8 +1453,23 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             return;
           }
           // On desktop:
+          const drainRehearsalQueueSilently = () => {
+            if (queueRef.current.length === 0) return;
+            const pending = queueRef.current.splice(0, queueRef.current.length);
+            setQueued(0);
+            suppressWindowSpawnRef.current = true;
+            try {
+              for (const q of pending) {
+                if (q.type === "approval_needed") continue;
+                applyRef.current(q);
+              }
+            } finally {
+              suppressWindowSpawnRef.current = false;
+            }
+          };
+
           if (parsed.type === "approval_result") {
-            queueRef.current = queueRef.current.filter((q) => q.type !== "approval_needed");
+            drainRehearsalQueueSilently();
             deferredApprovalRef.current = null;
             applyRef.current(parsed);
           } else if (parsed.type === "approval_needed") {
@@ -1464,10 +1505,12 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             } else {
               applyRef.current(parsed);
             }
+          } else if (parsed.type === "run_done") {
+            drainRehearsalQueueSilently();
+            applyRef.current(parsed);
           } else if (
             parsed.type === "undo_step" ||
             parsed.type === "call_end" ||
-            parsed.type === "run_done" ||
             parsed.type === "offer"
           ) {
             applyRef.current(parsed);
@@ -1989,8 +2032,9 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     const agreedAmount = choice === "refund" ? 587.3 : 202.3;
     const aadePath = `aade/mydata_${claimId}.xml`;
 
+    const activeChannel = phoneTransferredRef.current ? "iphone_transferred" : "desktop_voice";
     stopSpeaking();
-    setOperatorConsult((prev) => (prev ? { ...prev, selectedChoice: choice } : prev));
+    setOperatorConsult((prev) => (prev ? { ...prev, selectedChoice: choice, channel: activeChannel } : prev));
 
     const runDemoFallback = () => {
       if (reqId && (modeRef.current === "demo" || reqId.startsWith("req_demo"))) {
@@ -2052,7 +2096,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       const res = await fetch("/api/call/user-respond", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ choice, req_id: reqId, claim_id: claimId }),
+        body: JSON.stringify({ choice, req_id: reqId, claim_id: claimId, channel: activeChannel }),
       });
       if (!res.ok) throw new Error(`respond failed (${res.status})`);
       const data = (await res.json().catch(() => null)) as { ok?: boolean; turn?: CallTurnPayload; keep_call_open?: boolean } | null;
