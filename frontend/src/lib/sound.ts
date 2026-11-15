@@ -61,6 +61,8 @@ function readEnabled(): boolean {
   }
 }
 
+const isMobileRoute = () => typeof window !== "undefined" && window.location.pathname.startsWith("/mobile");
+
 type AudioCtor = typeof AudioContext;
 
 class SoundEngine {
@@ -272,6 +274,7 @@ class SoundEngine {
   }
 
   playStageTick = (stageIndex: number) => {
+    if (isMobileRoute()) return;
     const i = clamp(Math.round(stageIndex), 0, PENTATONIC.length - 1);
     const f = PENTATONIC[i];
     const pan = -0.7 + (1.4 * i) / (PENTATONIC.length - 1);
@@ -284,6 +287,7 @@ class SoundEngine {
   };
 
   playKeyTick = (lineIndex = 0) => {
+    if (isMobileRoute()) return;
     this.play(
       "key",
       45,
@@ -302,6 +306,7 @@ class SoundEngine {
   };
 
   playWindowPop = () => {
+    if (isMobileRoute()) return;
     this.play("pop", 90, (ctx, t) => {
       const lp: FilterSpec = { type: "lowpass", q: 0.9, sweep: [[700, 0], [2200, 0.11]] };
       this.tone(ctx, t, { freq: 180, glide: [[520, 0.11]], peak: 0.42, attack: 0.012, decay: 0.15, filter: lp });
@@ -316,6 +321,7 @@ class SoundEngine {
   };
 
   playWindowDock = () => {
+    if (isMobileRoute()) return;
     this.play("dock", 90, (ctx, t) => {
       this.tone(ctx, t, { freq: 140, glide: [[68, 0.095]], peak: 0.75, attack: 0.004, decay: 0.16 });
       this.tone(ctx, t, { freq: 880, peak: 0.16, attack: 0.004, decay: 0.04 });
@@ -325,6 +331,7 @@ class SoundEngine {
   };
 
   playForgeStart = () => {
+    if (isMobileRoute()) return;
     this.play("forge_start", 250, (ctx, t) => {
       // Two rhythmic blacksmith hammer-on-anvil strikes (t=0 and t=0.22s)
       const strikes = [
@@ -376,6 +383,7 @@ class SoundEngine {
   };
 
   playForgePass = () => {
+    if (isMobileRoute()) return;
     this.play("forge_pass", 350, (ctx, t) => {
       // Decisive final metallic anvil ring
       const partials = [
@@ -423,6 +431,7 @@ class SoundEngine {
   };
 
   playRiskGateAlert = () => {
+    if (isMobileRoute()) return;
     this.play("gate", 600, (ctx, t) => {
       for (const at of [0, 0.28]) {
         const filter: FilterSpec = { type: "lowpass", q: 7, sweep: [[400, 0], [1600, 0.09], [500, 0.24]] };
@@ -464,6 +473,7 @@ class SoundEngine {
   };
 
   playRewindSweep = (stepsCount = 1) => {
+    if (isMobileRoute()) return;
     this.play("rewind", 300, (ctx, t) => {
       const span = 0.42 * Math.min(1.5, 1 + (Math.max(1, stepsCount) - 1) * 0.1);
       const notes = [1046.5, 783.99, 659.25, 523.25, 392.0];

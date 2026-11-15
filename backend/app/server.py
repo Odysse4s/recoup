@@ -2275,31 +2275,72 @@ async def _transcribe_operator_consult_audio(
     return await _transcribe_audio_fallback(audio_bytes, filename, mime_type)
 
 
-def _build_aade_mydata_xml(claim_id: str, choice: Literal["refund", "redelivery"]) -> str:
+def _build_aade_mydata_xml(
+    claim_id: str,
+    choice: Literal["refund", "redelivery"],
+    amount: float | None = None,
+    supplier_id: str | None = None,
+    supplier_name: str | None = None,
+    delivery_id: str | None = None,
+    invoice_id: str | None = None,
+) -> str:
     escaped_claim_id = xml.sax.saxutils.escape(claim_id)
-    if choice == "refund":
-        invoice_type = "5.1"
-        series = "CR-AADE"
-        net_val = "587.30"
-        vat_val = "140.95"
-        gross_val = "728.25"
+    is_kappa = (
+        (not supplier_id or supplier_id == "SUP-KAPPA")
+        and (not delivery_id or delivery_id == "D-1042")
+        and (not claim_id or claim_id == "CLM-D-1042")
+        and (amount is None or abs(amount - 587.30) < 0.01)
+    )
+    if is_kappa:
+        if choice == "refund":
+            invoice_type = "5.1"
+            series = "CR-AADE"
+            net_val = "587.30"
+            vat_val = "140.95"
+            gross_val = "728.25"
+            qty_block = ""
+            move_block = ""
+            comments = (
+                f"Πιστωτικό Τιμολόγιο Συσχετιζόμενο (Credit Note) for claim {escaped_claim_id} "
+                "on delivery D-1042 / correlated invoice INV-7781"
+            )
+        else:
+            invoice_type = "9.3"
+            series = "DN-AADE"
+            net_val = "202.30"
+            vat_val = "48.55"
+            gross_val = "250.85"
+            qty_block = "\n        <quantity>22</quantity>"
+            move_block = "\n      <movePurpose>1</movePurpose>"
+            comments = (
+                "Δελτίο Αποστολής - Συμφωνία Επαναποστολής 22 τεμ. USB-C hubs next-day "
+                f"plus SLA and unit overbill adjustment on D-1042 / INV-7781 ({escaped_claim_id})"
+            )
+        issuer_vat = "EL094281773"
+        issuer_name = "Kappa Office Systems S.A."
+        aa_val = "1042"
+        corr_inv = "INV-7781"
+        deliv_ref = "D-1042"
+    else:
+        invoice_type = "5.1" if choice == "refund" else "9.3"
+        series = "CR-AADE" if choice == "refund" else "DN-AADE"
+        net_num = round(amount if amount is not None else 0.0, 2)
+        vat_num = round(net_num * 0.24, 2)
+        gross_num = round(net_num + vat_num, 2)
+        net_val = f"{net_num:.2f}"
+        vat_val = f"{vat_num:.2f}"
+        gross_val = f"{gross_num:.2f}"
         qty_block = ""
         move_block = ""
+        issuer_vat = "EL094281773"
+        issuer_name = supplier_name or (supplier_id if supplier_id else "Supplier")
+        digits = "".join(ch for ch in (delivery_id or claim_id) if ch.isdigit())
+        aa_val = digits if digits else "1001"
+        corr_inv = invoice_id or "INV-GENERIC"
+        deliv_ref = delivery_id or "D-GENERIC"
         comments = (
             f"Πιστωτικό Τιμολόγιο Συσχετιζόμενο (Credit Note) for claim {escaped_claim_id} "
-            "on delivery D-1042 / correlated invoice INV-7781"
-        )
-    else:
-        invoice_type = "9.3"
-        series = "DN-AADE"
-        net_val = "202.30"
-        vat_val = "48.55"
-        gross_val = "250.85"
-        qty_block = "\n        <quantity>22</quantity>"
-        move_block = "\n      <movePurpose>1</movePurpose>"
-        comments = (
-            "Δελτίο Αποστολής - Συμφωνία Επαναποστολής 22 τεμ. USB-C hubs next-day "
-            f"plus SLA and unit overbill adjustment on D-1042 / INV-7781 ({escaped_claim_id})"
+            f"on delivery {deliv_ref} / correlated invoice {corr_inv}"
         )
 
     escaped_series = xml.sax.saxutils.escape(series)
@@ -2308,16 +2349,21 @@ def _build_aade_mydata_xml(claim_id: str, choice: Literal["refund", "redelivery"
     escaped_net = xml.sax.saxutils.escape(net_val)
     escaped_vat = xml.sax.saxutils.escape(vat_val)
     escaped_gross = xml.sax.saxutils.escape(gross_val)
+    escaped_issuer_vat = xml.sax.saxutils.escape(issuer_vat)
+    escaped_issuer_name = xml.sax.saxutils.escape(issuer_name)
+    escaped_aa = xml.sax.saxutils.escape(aa_val)
+    escaped_corr_inv = xml.sax.saxutils.escape(corr_inv)
+    escaped_deliv_ref = xml.sax.saxutils.escape(deliv_ref)
 
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<InvoicesDoc xmlns="http://www.aade.gr/myDATA/invoice/v1.0">\n'
         "  <invoice>\n"
         "    <issuer>\n"
-        "      <vatNumber>EL094281773</vatNumber>\n"
+        f"      <vatNumber>{escaped_issuer_vat}</vatNumber>\n"
         "      <country>GR</country>\n"
         "      <branch>0</branch>\n"
-        "      <name>Kappa Office Systems S.A.</name>\n"
+        f"      <name>{escaped_issuer_name}</name>\n"
         "    </issuer>\n"
         "    <counterpart>\n"
         "      <vatNumber>EL998451220</vatNumber>\n"
@@ -2327,12 +2373,12 @@ def _build_aade_mydata_xml(claim_id: str, choice: Literal["refund", "redelivery"
         "    </counterpart>\n"
         "    <invoiceHeader>\n"
         f"      <series>{escaped_series}</series>\n"
-        "      <aa>1042</aa>\n"
+        f"      <aa>{escaped_aa}</aa>\n"
         "      <issueDate>2026-11-14</issueDate>\n"
         f"      <invoiceType>{escaped_invoice_type}</invoiceType>\n"
         "      <currency>EUR</currency>\n"
-        "      <correlatedInvoices>INV-7781</correlatedInvoices>\n"
-        f"      <deliveryRef>D-1042</deliveryRef>{move_block}\n"
+        f"      <correlatedInvoices>{escaped_corr_inv}</correlatedInvoices>\n"
+        f"      <deliveryRef>{escaped_deliv_ref}</deliveryRef>{move_block}\n"
         "    </invoiceHeader>\n"
         "    <invoiceDetails>\n"
         f"      <lineNumber>1</lineNumber>{qty_block}\n"
@@ -2717,36 +2763,373 @@ def _apply_consult_resolution_mutations(
     return mutations
 
 
+def _friendly_supplier_name(raw_name: str | None, sup_id: str | None = None) -> str:
+    if not raw_name:
+        if sup_id == "SUP-ATLAS":
+            return "Atlas Paper"
+        if sup_id == "SUP-KAPPA":
+            return "Kappa"
+        if sup_id == "SUP-ORION":
+            return "Orion"
+        if sup_id == "SUP-NOVA":
+            return "Nova"
+        return sup_id or "Supplier"
+    name = raw_name.strip()
+    for suffix in (
+        " & Stationery Co.",
+        " Office Systems S.A.",
+        " Breakroom Supplies Ltd.",
+        " S.A.",
+        " Ltd.",
+        " Co.",
+        " Inc.",
+    ):
+        if name.endswith(suffix):
+            name = name[:-len(suffix)].strip()
+            break
+    return name
+
+
+def _get_consult_claim_context(
+    claim_id: str | None = None,
+    req_id: str | None = None,
+) -> dict[str, Any]:
+    """Inspect staged payloads (PENDING_PAYLOADS, BUS history) and REAL database to build consult context."""
+    ext_claim_id: str | None = claim_id.strip() if claim_id and claim_id.strip() else None
+    ext_supplier_id: str | None = None
+    ext_supplier_name: str | None = None
+    ext_delivery_id: str | None = None
+    ext_invoice_id: str | None = None
+    ext_amount: float | None = None
+    ext_reason: str | None = None
+    ext_recipient_email: str | None = None
+
+    # 1. Inspect PENDING_PAYLOADS
+    payload: dict[str, Any] | None = None
+    if req_id and req_id in PENDING_PAYLOADS:
+        payload = PENDING_PAYLOADS[req_id]
+    elif PENDING_PAYLOADS:
+        payload = list(PENDING_PAYLOADS.values())[-1]
+
+    if payload:
+        t_name = str(payload.get("tool_name") or "")
+        t_args = payload.get("args") or {}
+        if isinstance(t_args, dict):
+            if t_name == "upsert_row":
+                tbl = t_args.get("table")
+                row = t_args.get("row") or {}
+                if isinstance(row, dict):
+                    if tbl == "claims":
+                        if not ext_claim_id or ext_claim_id == "CLM-D-1042":
+                            c_cand = row.get("id") or row.get("claim_id")
+                            if c_cand:
+                                ext_claim_id = str(c_cand)
+                        if not ext_supplier_id and row.get("supplier_id"):
+                            ext_supplier_id = str(row["supplier_id"])
+                        if not ext_delivery_id and row.get("delivery_id"):
+                            ext_delivery_id = str(row["delivery_id"])
+                        if not ext_invoice_id and row.get("invoice_id"):
+                            ext_invoice_id = str(row["invoice_id"])
+                        if ext_amount is None and row.get("amount") is not None:
+                            with contextlib.suppress(ValueError, TypeError):
+                                ext_amount = float(row["amount"])
+                        if not ext_reason and row.get("reason"):
+                            ext_reason = str(row["reason"])
+                    elif tbl == "invoices":
+                        if not ext_invoice_id and row.get("id"):
+                            ext_invoice_id = str(row["id"])
+                        if not ext_supplier_id and row.get("supplier_id"):
+                            ext_supplier_id = str(row["supplier_id"])
+                        if not ext_delivery_id and row.get("delivery_id"):
+                            ext_delivery_id = str(row["delivery_id"])
+            elif t_name == "send_email":
+                if not ext_recipient_email and t_args.get("to"):
+                    ext_recipient_email = str(t_args["to"])
+                sb = f"{t_args.get('subject', '')} {t_args.get('body', '')}"
+                if not ext_claim_id or ext_claim_id == "CLM-D-1042":
+                    m_clm = re.search(r"\b(CLM-[A-Za-z0-9_-]+)\b", sb)
+                    if m_clm and m_clm.group(1) != "CLM-D-1042":
+                        ext_claim_id = m_clm.group(1)
+                if not ext_invoice_id:
+                    m_inv = re.search(r"\b(INV-[A-Za-z0-9_-]+)\b", sb)
+                    if m_inv:
+                        ext_invoice_id = m_inv.group(1)
+                if not ext_delivery_id:
+                    m_del = re.search(r"\b(D-[0-9]+)\b", sb)
+                    if m_del:
+                        ext_delivery_id = m_del.group(1)
+                if ext_amount is None:
+                    m_amt = re.search(r"(?:EUR|€)\s*([0-9]+(?:\.[0-9]{1,2})?)", sb, re.IGNORECASE)
+                    if m_amt:
+                        with contextlib.suppress(ValueError, TypeError):
+                            ext_amount = float(m_amt.group(1))
+
+        # Check diff_preview, risk_reason, spoken_summary
+        for txt in (
+            str(payload.get("diff_preview") or ""),
+            str(payload.get("risk_reason") or ""),
+            str(payload.get("spoken_summary") or ""),
+        ):
+            if not txt:
+                continue
+            if not ext_claim_id or ext_claim_id == "CLM-D-1042":
+                m_clm = re.search(r"\b(CLM-[A-Za-z0-9_-]+)\b", txt)
+                if m_clm and m_clm.group(1) != "CLM-D-1042":
+                    ext_claim_id = m_clm.group(1)
+            if not ext_invoice_id:
+                m_inv = re.search(r"\b(INV-[A-Za-z0-9_-]+)\b", txt)
+                if m_inv:
+                    ext_invoice_id = m_inv.group(1)
+            if not ext_delivery_id:
+                m_del = re.search(r"\b(D-[0-9]+)\b", txt)
+                if m_del:
+                    ext_delivery_id = m_del.group(1)
+            if ext_amount is None:
+                m_amt = re.search(r"(?:EUR|€)\s*([0-9]+(?:\.[0-9]{1,2})?)", txt, re.IGNORECASE)
+                if m_amt:
+                    with contextlib.suppress(ValueError, TypeError):
+                        ext_amount = float(m_amt.group(1))
+
+        # Check report
+        rep = payload.get("report")
+        if isinstance(rep, BaseModel):
+            rep = rep.model_dump()
+        if isinstance(rep, dict):
+            for out_item in rep.get("external_outbox", []):
+                if isinstance(out_item, dict):
+                    if not ext_recipient_email and out_item.get("to"):
+                        ext_recipient_email = str(out_item["to"])
+                    txt_b = f"{out_item.get('subject', '')} {out_item.get('body', '')}"
+                    if not ext_claim_id or ext_claim_id == "CLM-D-1042":
+                        m_clm = re.search(r"\b(CLM-[A-Za-z0-9_-]+)\b", txt_b)
+                        if m_clm and m_clm.group(1) != "CLM-D-1042":
+                            ext_claim_id = m_clm.group(1)
+                    if not ext_invoice_id:
+                        m_inv = re.search(r"\b(INV-[A-Za-z0-9_-]+)\b", txt_b)
+                        if m_inv:
+                            ext_invoice_id = m_inv.group(1)
+                    if not ext_delivery_id:
+                        m_del = re.search(r"\b(D-[0-9]+)\b", txt_b)
+                        if m_del:
+                            ext_delivery_id = m_del.group(1)
+                    if ext_amount is None:
+                        m_amt = re.search(r"(?:EUR|€)\s*([0-9]+(?:\.[0-9]{1,2})?)", txt_b, re.IGNORECASE)
+                        if m_amt:
+                            with contextlib.suppress(ValueError, TypeError):
+                                ext_amount = float(m_amt.group(1))
+
+    # 2. Inspect BUS history
+    for ev in reversed(BUS.history):
+        ev_p = ev.payload if isinstance(ev.payload, dict) else {}
+        if ev.type == EventType.TOOL_CALL:
+            call = ev_p.get("call") or {}
+            c_name = call.get("name")
+            c_args = call.get("args") or {}
+            if isinstance(c_args, dict):
+                if c_name == "upsert_row":
+                    tbl = c_args.get("table")
+                    row = c_args.get("row") or {}
+                    if isinstance(row, dict):
+                        if tbl == "claims":
+                            if not ext_claim_id or ext_claim_id == "CLM-D-1042":
+                                c_cand = row.get("id") or row.get("claim_id")
+                                if c_cand:
+                                    ext_claim_id = str(c_cand)
+                            if not ext_supplier_id and row.get("supplier_id"):
+                                ext_supplier_id = str(row["supplier_id"])
+                            if not ext_delivery_id and row.get("delivery_id"):
+                                ext_delivery_id = str(row["delivery_id"])
+                            if not ext_invoice_id and row.get("invoice_id"):
+                                ext_invoice_id = str(row["invoice_id"])
+                            if ext_amount is None and row.get("amount") is not None:
+                                with contextlib.suppress(ValueError, TypeError):
+                                    ext_amount = float(row["amount"])
+                            if not ext_reason and row.get("reason"):
+                                ext_reason = str(row["reason"])
+                        elif tbl == "invoices":
+                            if not ext_invoice_id and row.get("id"):
+                                ext_invoice_id = str(row["id"])
+                            if not ext_supplier_id and row.get("supplier_id"):
+                                ext_supplier_id = str(row["supplier_id"])
+                            if not ext_delivery_id and row.get("delivery_id"):
+                                ext_delivery_id = str(row["delivery_id"])
+                elif c_name == "send_email":
+                    if not ext_recipient_email and c_args.get("to"):
+                        ext_recipient_email = str(c_args["to"])
+                    txt_em = f"{c_args.get('subject', '')} {c_args.get('body', '')}"
+                    if not ext_claim_id or ext_claim_id == "CLM-D-1042":
+                        m_clm = re.search(r"\b(CLM-[A-Za-z0-9_-]+)\b", txt_em)
+                        if m_clm and m_clm.group(1) != "CLM-D-1042":
+                            ext_claim_id = m_clm.group(1)
+                    if not ext_invoice_id:
+                        m_inv = re.search(r"\b(INV-[A-Za-z0-9_-]+)\b", txt_em)
+                        if m_inv:
+                            ext_invoice_id = m_inv.group(1)
+                    if not ext_delivery_id:
+                        m_del = re.search(r"\b(D-[0-9]+)\b", txt_em)
+                        if m_del:
+                            ext_delivery_id = m_del.group(1)
+                    if ext_amount is None:
+                        m_amt = re.search(r"(?:EUR|€)\s*([0-9]+(?:\.[0-9]{1,2})?)", txt_em, re.IGNORECASE)
+                        if m_amt:
+                            with contextlib.suppress(ValueError, TypeError):
+                                ext_amount = float(m_amt.group(1))
+        elif ev.type == EventType.REHEARSE_REPORT:
+            rep = ev_p.get("report") or {}
+            if isinstance(rep, dict):
+                for out_item in rep.get("external_outbox", []):
+                    if isinstance(out_item, dict) and not ext_recipient_email and out_item.get("to"):
+                        ext_recipient_email = str(out_item["to"])
+
+    # 3. Check ACTIVE_CALL if populated
+    if ACTIVE_CALL is not None:
+        if (not ext_claim_id or ext_claim_id == "CLM-D-1042") and ACTIVE_CALL.get("claim_id"):
+            ext_claim_id = str(ACTIVE_CALL["claim_id"])
+        if ext_amount is None and ACTIVE_CALL.get("claim_amount") is not None:
+            with contextlib.suppress(ValueError, TypeError):
+                ext_amount = float(ACTIVE_CALL["claim_amount"])
+        if not ext_delivery_id and ACTIVE_CALL.get("delivery_id"):
+            ext_delivery_id = str(ACTIVE_CALL["delivery_id"])
+        if not ext_supplier_id and ACTIVE_CALL.get("supplier_id"):
+            ext_supplier_id = str(ACTIVE_CALL["supplier_id"])
+        if not ext_supplier_name and ACTIVE_CALL.get("supplier_name"):
+            ext_supplier_name = str(ACTIVE_CALL["supplier_name"])
+        if not ext_invoice_id and ACTIVE_CALL.get("invoice_id"):
+            ext_invoice_id = str(ACTIVE_CALL["invoice_id"])
+        if not ext_recipient_email and ACTIVE_CALL.get("recipient_email"):
+            ext_recipient_email = str(ACTIVE_CALL["recipient_email"])
+
+    # 4. Enrich from REAL.db_path
+    if REAL.db_path.exists():
+        with contextlib.closing(sqlite3.connect(REAL.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            if ext_claim_id:
+                with contextlib.suppress(sqlite3.Error):
+                    c_row = conn.execute("SELECT * FROM claims WHERE id = ?", (ext_claim_id,)).fetchone()
+                    if c_row is not None:
+                        if ext_amount is None and c_row["amount"] is not None:
+                            ext_amount = float(c_row["amount"])
+                        if not ext_supplier_id and c_row["supplier_id"]:
+                            ext_supplier_id = str(c_row["supplier_id"])
+                        if not ext_delivery_id and c_row["delivery_id"]:
+                            ext_delivery_id = str(c_row["delivery_id"])
+                        if not ext_invoice_id and c_row["invoice_id"]:
+                            ext_invoice_id = str(c_row["invoice_id"])
+                        if not ext_reason and c_row["reason"]:
+                            ext_reason = str(c_row["reason"])
+
+            if not ext_delivery_id and ext_claim_id and "D-" in ext_claim_id.upper():
+                m_del = re.search(r"(D-[0-9]+)", ext_claim_id, re.IGNORECASE)
+                if m_del:
+                    ext_delivery_id = m_del.group(1).upper()
+
+            if ext_delivery_id:
+                with contextlib.suppress(sqlite3.Error):
+                    d_row = conn.execute("SELECT * FROM deliveries WHERE id = ?", (ext_delivery_id,)).fetchone()
+                    if d_row is not None and not ext_supplier_id and d_row["supplier_id"]:
+                        ext_supplier_id = str(d_row["supplier_id"])
+
+            if ext_invoice_id:
+                with contextlib.suppress(sqlite3.Error):
+                    i_row = conn.execute("SELECT * FROM invoices WHERE id = ?", (ext_invoice_id,)).fetchone()
+                    if i_row is not None:
+                        if not ext_supplier_id and i_row["supplier_id"]:
+                            ext_supplier_id = str(i_row["supplier_id"])
+                        if not ext_delivery_id and i_row["delivery_id"]:
+                            ext_delivery_id = str(i_row["delivery_id"])
+            elif ext_delivery_id:
+                with contextlib.suppress(sqlite3.Error):
+                    i_row = conn.execute("SELECT * FROM invoices WHERE delivery_id = ? LIMIT 1", (ext_delivery_id,)).fetchone()
+                    if i_row is not None:
+                        ext_invoice_id = str(i_row["id"])
+                        if not ext_supplier_id and i_row["supplier_id"]:
+                            ext_supplier_id = str(i_row["supplier_id"])
+
+            if ext_supplier_id:
+                with contextlib.suppress(sqlite3.Error):
+                    s_row = conn.execute("SELECT * FROM suppliers WHERE id = ?", (ext_supplier_id,)).fetchone()
+                    if s_row is not None:
+                        if not ext_supplier_name and s_row["name"]:
+                            ext_supplier_name = str(s_row["name"])
+                        if not ext_recipient_email and s_row["email"]:
+                            ext_recipient_email = str(s_row["email"])
+
+    # 5. Determine is_kappa
+    non_kappa = False
+    if ext_claim_id and ext_claim_id != "CLM-D-1042":
+        non_kappa = True
+    if ext_supplier_id and ext_supplier_id != "SUP-KAPPA":
+        non_kappa = True
+    if ext_delivery_id and ext_delivery_id != "D-1042":
+        non_kappa = True
+    if ext_invoice_id and ext_invoice_id != "INV-7781":
+        non_kappa = True
+    if ext_supplier_name and "kappa" not in ext_supplier_name.lower():
+        non_kappa = True
+
+    is_kappa = not non_kappa
+
+    if is_kappa:
+        final_claim_id = ext_claim_id or "CLM-D-1042"
+        final_supplier_id = ext_supplier_id or "SUP-KAPPA"
+        final_supplier_name = "Kappa Office Systems S.A."
+        final_delivery_id = ext_delivery_id or "D-1042"
+        final_invoice_id = ext_invoice_id or "INV-7781"
+        final_amount = ext_amount if ext_amount is not None else 587.30
+        final_reason = ext_reason or "overcharge 168.00, short 280.00, damaged 105.00, late 34.30"
+        final_recipient_email = ext_recipient_email or "accounts@kappaoffice.example"
+    else:
+        final_claim_id = ext_claim_id or "CLM-CUSTOM"
+        final_supplier_id = ext_supplier_id or "SUP-UNKNOWN"
+        final_supplier_name = _friendly_supplier_name(ext_supplier_name, final_supplier_id)
+        final_delivery_id = ext_delivery_id or ""
+        final_invoice_id = ext_invoice_id or ""
+        final_amount = ext_amount if ext_amount is not None else 0.0
+        final_reason = ext_reason or ""
+        final_recipient_email = ext_recipient_email or ""
+
+    return {
+        "claim_id": final_claim_id,
+        "supplier_id": final_supplier_id,
+        "supplier_name": final_supplier_name,
+        "delivery_id": final_delivery_id,
+        "invoice_id": final_invoice_id,
+        "amount": final_amount,
+        "reason": final_reason,
+        "recipient_email": final_recipient_email,
+        "is_kappa": is_kappa,
+    }
+
+
 @app.post("/api/call/pickup")
 async def call_pickup(request: Request):
     """Answer mobile operator consult call, transitioning status from ringing to connected."""
+    global ACTIVE_CALL
     body: dict[str, Any] = {}
     with contextlib.suppress(Exception):
         parsed = await request.json()
         if isinstance(parsed, dict):
             body = parsed
 
-    claim_id = str(body.get("claim_id") or "CLM-D-1042").strip() or "CLM-D-1042"
+    raw_req_id = body.get("req_id")
+    req_id = str(raw_req_id).strip() if isinstance(raw_req_id, str) and raw_req_id.strip() else None
+    if not req_id and PENDING:
+        req_id = _active_pending_req_id()
+
+    raw_claim = body.get("claim_id")
+    raw_claim_str = str(raw_claim).strip() if raw_claim else None
+    if not raw_claim_str and ACTIVE_CALL and ACTIVE_CALL.get("claim_id"):
+        raw_claim_str = ACTIVE_CALL.get("claim_id")
+
+    ctx = _get_consult_claim_context(claim_id=raw_claim_str, req_id=req_id)
+    claim_id = ctx["claim_id"]
+    claim_amount = float(ctx["amount"])
+
     if not re.match(r"^[A-Za-z0-9_-]{1,64}$", claim_id):
         raise HTTPException(400, "invalid claim_id format")
 
     call_id = str(body.get("call_id") or f"CONSULT-{claim_id}").strip() or f"CONSULT-{claim_id}"
-    req_id = body.get("req_id")
-    if req_id is not None:
-        req_id = str(req_id).strip() or None
-    if not req_id and PENDING:
-        req_id = _active_pending_req_id()
 
-    claim_amount = 587.30
-    if REAL.db_path.exists():
-        with contextlib.closing(sqlite3.connect(REAL.db_path)) as conn:
-            conn.row_factory = sqlite3.Row
-            with contextlib.suppress(sqlite3.Error):
-                row = conn.execute("SELECT * FROM claims WHERE id = ?", (claim_id,)).fetchone()
-                if row is not None and row["amount"] is not None:
-                    claim_amount = float(row["amount"])
-
-    global ACTIVE_CALL
     now_ts = time.time()
     if ACTIVE_CALL is None or ACTIVE_CALL.get("call_id") != call_id:
         ACTIVE_CALL = {
@@ -2759,6 +3142,12 @@ async def call_pickup(request: Request):
             "req_id": req_id,
             "claim_id": claim_id,
             "claim_amount": claim_amount,
+            "supplier_id": ctx["supplier_id"],
+            "supplier_name": ctx["supplier_name"],
+            "delivery_id": ctx["delivery_id"],
+            "invoice_id": ctx["invoice_id"],
+            "recipient_email": ctx["recipient_email"],
+            "is_kappa": ctx["is_kappa"],
             "counterparty": "Operator Mobile",
             "iris_gate": LATEST_IRIS_GATE,
             "turns": [],
@@ -2771,6 +3160,14 @@ async def call_pickup(request: Request):
         ACTIVE_CALL["ringing"] = False
         ACTIVE_CALL["call_status"] = "connected"
         ACTIVE_CALL["connected_at"] = now_ts
+        ACTIVE_CALL["claim_id"] = claim_id
+        ACTIVE_CALL["claim_amount"] = claim_amount
+        ACTIVE_CALL["supplier_id"] = ctx["supplier_id"]
+        ACTIVE_CALL["supplier_name"] = ctx["supplier_name"]
+        ACTIVE_CALL["delivery_id"] = ctx["delivery_id"]
+        ACTIVE_CALL["invoice_id"] = ctx["invoice_id"]
+        ACTIVE_CALL["recipient_email"] = ctx["recipient_email"]
+        ACTIVE_CALL["is_kappa"] = ctx["is_kappa"]
         if LATEST_IRIS_GATE is not None:
             ACTIVE_CALL["iris_gate"] = LATEST_IRIS_GATE
         if req_id and not ACTIVE_CALL.get("req_id"):
@@ -2833,21 +3230,51 @@ async def start_user_consult_call(request: Request):
     if req_id is None and PENDING:
         req_id = _active_pending_req_id()
 
-    claim_id = str(body.get("claim_id") or "CLM-D-1042").strip() or "CLM-D-1042"
+    raw_claim = body.get("claim_id")
+    raw_claim_str = str(raw_claim).strip() if raw_claim else None
+
+    ctx = _get_consult_claim_context(claim_id=raw_claim_str, req_id=req_id)
+    claim_id = ctx["claim_id"]
+    claim_amount = float(ctx["amount"])
+    is_kappa = bool(ctx["is_kappa"])
+    supplier_name = ctx["supplier_name"]
+    delivery_id = ctx["delivery_id"]
+    invoice_id = ctx["invoice_id"]
+    supplier_id = ctx["supplier_id"]
+    recipient_email = ctx["recipient_email"]
+
     if not re.match(r"^[A-Za-z0-9_-]{1,64}$", claim_id):
         raise HTTPException(400, "invalid claim_id format")
-    claim_amount = 587.30
-    if REAL.db_path.exists():
-        with contextlib.closing(sqlite3.connect(REAL.db_path)) as conn:
-            conn.row_factory = sqlite3.Row
-            with contextlib.suppress(sqlite3.Error):
-                row = conn.execute("SELECT * FROM claims WHERE id = ?", (claim_id,)).fetchone()
-                if row is not None and row["amount"] is not None:
-                    claim_amount = float(row["amount"])
 
     call_id = f"CONSULT-{claim_id}"
     run_id = f"consult_{uuid.uuid4().hex[:6]}"
-    opening_text = DEFAULT_CONSULT_OPENING_TEXT
+
+    if is_kappa:
+        opening_text = DEFAULT_CONSULT_OPENING_TEXT
+    else:
+        if supplier_name and delivery_id and invoice_id:
+            opening_text = (
+                f"Hey! We audited {supplier_name} delivery {delivery_id} and found a "
+                f"{claim_amount:g} euro discrepancy on invoice {invoice_id}. "
+                f"Should I enforce the {claim_amount:g} euro claim and email the supplier, or hold off?"
+            )
+        elif supplier_name and invoice_id:
+            opening_text = (
+                f"Hey! We audited {supplier_name} and found a "
+                f"{claim_amount:g} euro discrepancy on invoice {invoice_id}. "
+                f"Should I enforce the {claim_amount:g} euro claim and email the supplier, or hold off?"
+            )
+        elif supplier_name and delivery_id:
+            opening_text = (
+                f"Hey! We audited {supplier_name} delivery {delivery_id} and found a "
+                f"{claim_amount:g} euro discrepancy. "
+                f"Should I enforce the {claim_amount:g} euro claim and email the supplier, or hold off?"
+            )
+        else:
+            opening_text = (
+                f"Hey! We audited {supplier_name} and found a {claim_amount:g} euro discrepancy. "
+                f"Should I enforce the {claim_amount:g} euro claim and email the supplier, or hold off?"
+            )
 
     channel = str(body.get("channel") or "voice_call")
     if channel not in ("notification", "voice_call"):
@@ -2920,6 +3347,12 @@ async def start_user_consult_call(request: Request):
         "req_id": req_id,
         "claim_id": claim_id,
         "claim_amount": claim_amount,
+        "supplier_id": supplier_id,
+        "supplier_name": supplier_name,
+        "delivery_id": delivery_id,
+        "invoice_id": invoice_id,
+        "recipient_email": recipient_email,
+        "is_kappa": is_kappa,
         "counterparty": "Operator Mobile",
         "iris_gate": LATEST_IRIS_GATE,
         "turns": [
@@ -2987,6 +3420,7 @@ _COMMIT_REDELIVERY_RE = re.compile(
 @app.post("/api/call/user-respond")
 async def handle_user_consult_response(request: Request):
     """Process spoken or tapped operator consult reply, resolve Risk Gate, and stage reversible AADE XML."""
+    global ACTIVE_CALL
     content_type = (request.headers.get("content-type") or "").lower()
     req_id: str | None = None
     claim_id = "CLM-D-1042"
@@ -3056,10 +3490,27 @@ async def handle_user_consult_response(request: Request):
         transcript = await _transcribe_operator_consult_audio(audio_bytes, filename, mime_type)
         stt_ran = bool(transcript)
 
+    raw_claim_str = raw_claim if raw_claim else None
+    if not raw_claim_str and ACTIVE_CALL and ACTIVE_CALL.get("claim_id"):
+        raw_claim_str = str(ACTIVE_CALL["claim_id"])
+
+    ctx = _get_consult_claim_context(
+        claim_id=raw_claim_str,
+        req_id=req_id or (str(ACTIVE_CALL["req_id"]) if ACTIVE_CALL and ACTIVE_CALL.get("req_id") else None),
+    )
+    claim_id = ctx["claim_id"]
+    claim_amount = float(ctx["amount"])
+    is_kappa = bool(ctx["is_kappa"])
+    supplier_name = ctx["supplier_name"]
+    delivery_id = ctx["delivery_id"]
+    invoice_id = ctx["invoice_id"]
+    supplier_id = ctx["supplier_id"]
+    reason = ctx["reason"]
+    recipient_email = ctx["recipient_email"]
+
     call_id = f"CONSULT-{claim_id}"
     run_id = f"consult_{uuid.uuid4().hex[:6]}"
 
-    global ACTIVE_CALL
     if ACTIVE_CALL is None or ACTIVE_CALL.get("call_id") != call_id:
         ACTIVE_CALL = {
             "active": True,
@@ -3070,7 +3521,13 @@ async def handle_user_consult_response(request: Request):
             "call_id": call_id,
             "req_id": req_id,
             "claim_id": claim_id,
-            "claim_amount": 587.30,
+            "claim_amount": claim_amount,
+            "supplier_id": supplier_id,
+            "supplier_name": supplier_name,
+            "delivery_id": delivery_id,
+            "invoice_id": invoice_id,
+            "recipient_email": recipient_email,
+            "is_kappa": is_kappa,
             "counterparty": "Operator Mobile",
             "turns": [],
             "selected_choice": None,
@@ -3080,6 +3537,14 @@ async def handle_user_consult_response(request: Request):
         ACTIVE_CALL["active"] = True
         ACTIVE_CALL["ringing"] = False
         ACTIVE_CALL["call_status"] = "connected"
+        ACTIVE_CALL["claim_id"] = claim_id
+        ACTIVE_CALL["claim_amount"] = claim_amount
+        ACTIVE_CALL["supplier_id"] = supplier_id
+        ACTIVE_CALL["supplier_name"] = supplier_name
+        ACTIVE_CALL["delivery_id"] = delivery_id
+        ACTIVE_CALL["invoice_id"] = invoice_id
+        ACTIVE_CALL["recipient_email"] = recipient_email
+        ACTIVE_CALL["is_kappa"] = is_kappa
 
     if LATEST_IRIS_GATE is not None:
         ACTIVE_CALL["iris_gate"] = LATEST_IRIS_GATE
@@ -3125,6 +3590,13 @@ async def handle_user_consult_response(request: Request):
         explicit_choice in ("refund", "redelivery")
         or _COMMIT_REFUND_RE.search(lowered)
         or (re.search(r"\b587\b", lowered) and not _WHY_INTENT_RE.search(lowered))
+        or (
+            not is_kappa
+            and (
+                (claim_amount > 0 and bool(re.search(rf"\b{int(claim_amount)}\b", lowered)) and not _WHY_INTENT_RE.search(lowered))
+                or bool(re.search(r"\b(enforce\s+(?:the\s+)?claim|approve|yes\s+approve|yes\s+enforce)\b", lowered))
+            )
+        )
         or _COMMIT_REDELIVERY_RE.search(lowered)
     )
     is_hangup_text = bool(_HANGUP_INTENT_RE.search(lowered)) if lowered else False
@@ -3260,10 +3732,22 @@ async def handle_user_consult_response(request: Request):
                 cost_eur=_voice_micro_cost(transcript) if stt_ran else 0.0,
             )
 
-            reply_text = (
-                "Full refund gets us 587 euros cash back today and freezes their invoice. "
-                "Or they ship 22 free hubs tomorrow plus a 202 euro credit. Which one?"
-            )
+            if is_kappa:
+                reply_text = (
+                    "Full refund gets us 587 euros cash back today and freezes their invoice. "
+                    "Or they ship 22 free hubs tomorrow plus a 202 euro credit. Which one?"
+                )
+            else:
+                if invoice_id:
+                    reply_text = (
+                        f"Enforcing the claim recovers {claim_amount:g} euros and freezes invoice {invoice_id}. "
+                        f"Or we can hold off and negotiate directly with {supplier_name}. Which one?"
+                    )
+                else:
+                    reply_text = (
+                        f"Enforcing the claim recovers {claim_amount:g} euros. "
+                        f"Or we can hold off and negotiate directly with {supplier_name}. Which one?"
+                    )
             agent_turn = CallTurnPayload(
                 call_id=call_id,
                 speaker="agent",
@@ -3321,13 +3805,23 @@ async def handle_user_consult_response(request: Request):
             or (bool(re.search(r"\bwhy\b", lowered)) and "option" not in lowered)
         )
         if is_why_intent:
-            ui_action = UiActionPayload(
-                action="open_file",
-                path="deliveries/D-1042_receiving_note.md",
-                label="Opening delivery receiving note",
-            ).model_dump(exclude_none=True)
+            if is_kappa:
+                ui_action = UiActionPayload(
+                    action="open_file",
+                    path="deliveries/D-1042_receiving_note.md",
+                    label="Opening delivery receiving note",
+                ).model_dump(exclude_none=True)
+            else:
+                deliv_file = f"deliveries/{delivery_id}_receiving_note.md" if delivery_id else "invoices"
+                ui_action = UiActionPayload(
+                    action="open_file" if delivery_id else "switch_view",
+                    path=deliv_file if delivery_id else None,
+                    view="db" if not delivery_id else None,
+                    table="invoices" if not delivery_id else None,
+                    label=f"Opening delivery receiving note {delivery_id}" if delivery_id else "Opening invoices table",
+                ).model_dump(exclude_none=True)
             if not transcript:
-                transcript = "Why do they owe 587?"
+                transcript = "Why do they owe 587?" if is_kappa else f"Why do they owe {claim_amount:g}?"
 
             user_turn = CallTurnPayload(
                 call_id=call_id,
@@ -3345,10 +3839,26 @@ async def handle_user_consult_response(request: Request):
                 cost_eur=_voice_micro_cost(transcript) if stt_ran else 0.0,
             )
 
-            reply_text = (
-                "Sixteen missing hubs, six broken, unit overbilling on invoice 7781, "
-                "plus a two-day late penalty—totaling 587 euros and 30 cents. Refund or replacements?"
-            )
+            if is_kappa:
+                reply_text = (
+                    "Sixteen missing hubs, six broken, unit overbilling on invoice 7781, "
+                    "plus a two-day late penalty—totaling 587 euros and 30 cents. Refund or replacements?"
+                )
+            else:
+                if reason and invoice_id:
+                    reply_text = (
+                        f"Audit on delivery {delivery_id or 'shipment'} flagged {reason} on invoice {invoice_id}, "
+                        f"totaling {claim_amount:g} euros. Enforce the claim or hold off?"
+                    )
+                elif invoice_id:
+                    reply_text = (
+                        f"Audit on delivery {delivery_id or 'shipment'} found discrepancies on invoice {invoice_id} "
+                        f"totaling {claim_amount:g} euros. Enforce the claim or hold off?"
+                    )
+                else:
+                    reply_text = (
+                        f"Audit flagged discrepancies totaling {claim_amount:g} euros. Enforce the claim or hold off?"
+                    )
             agent_turn = CallTurnPayload(
                 call_id=call_id,
                 speaker="agent",
@@ -3418,6 +3928,12 @@ async def handle_user_consult_response(request: Request):
             choice = "redelivery"
         elif _COMMIT_REFUND_RE.search(lowered) or (
             bool(re.search(r"\b587\b", lowered)) and not _WHY_INTENT_RE.search(lowered)
+        ) or (
+            not is_kappa
+            and (
+                bool(re.search(r"\b(enforce\s+(?:the\s+)?claim|approve|yes\s+approve|yes\s+enforce|go\s+ahead)\b", lowered))
+                or (claim_amount > 0 and bool(re.search(rf"\b{int(claim_amount)}\b", lowered)) and not _WHY_INTENT_RE.search(lowered))
+            )
         ):
             choice = "refund"
         elif iris_high_conf and iris_binding >= 0.65:
@@ -3428,11 +3944,18 @@ async def handle_user_consult_response(request: Request):
 
     if choice is not None:
         if not transcript:
-            transcript = (
-                "Enforce the 587.30 euro refund hold and file the AADE myDATA 5.1 credit note."
-                if choice == "refund"
-                else "Accept next-day re-delivery of the 22 hubs and log the 202.30 euro SLA discrepancy."
-            )
+            if is_kappa:
+                transcript = (
+                    "Enforce the 587.30 euro refund hold and file the AADE myDATA 5.1 credit note."
+                    if choice == "refund"
+                    else "Accept next-day re-delivery of the 22 hubs and log the 202.30 euro SLA discrepancy."
+                )
+            else:
+                transcript = (
+                    f"Enforce the {claim_amount:g} euro claim and file the AADE myDATA 5.1 credit note."
+                    if choice == "refund"
+                    else f"Accept resolution and log the {claim_amount:g} euro discrepancy."
+                )
 
         keep_call_open = not hangup
         call_status = "connected" if keep_call_open else "ended"
@@ -3503,84 +4026,184 @@ async def handle_user_consult_response(request: Request):
                     if settled >= 3 or active_bg_task.done():
                         break
 
-        agreed_amount = 587.30 if choice == "refund" else 202.30
-        aade_xml_path = f"aade/mydata_{claim_id}.xml"
-        xml_content = _build_aade_mydata_xml(claim_id, choice)
-        _apply_consult_resolution_mutations(
-            run_id=run_id,
-            claim_id=claim_id,
-            choice=choice,
-            agreed_amount=agreed_amount,
-            aade_xml_path=aade_xml_path,
-            xml_content=xml_content,
-        )
+        if is_kappa:
+            agreed_amount = 587.30 if choice == "refund" else 202.30
+            aade_xml_path = f"aade/mydata_{claim_id}.xml"
+            xml_content = _build_aade_mydata_xml(claim_id, choice)
+            _apply_consult_resolution_mutations(
+                run_id=run_id,
+                claim_id=claim_id,
+                choice=choice,
+                agreed_amount=agreed_amount,
+                aade_xml_path=aade_xml_path,
+                xml_content=xml_content,
+            )
 
-        already_queued = any(
-            m.get("to") == "accounts@kappaoffice.example"
-            and ("CLM-D-1042" in str(m.get("subject", "")) or "INV-7781" in str(m.get("subject", "")))
-            for m in REAL.outbox
-        )
-        if not already_queued:
+            already_queued = any(
+                m.get("to") == "accounts@kappaoffice.example"
+                and ("CLM-D-1042" in str(m.get("subject", "")) or "INV-7781" in str(m.get("subject", "")))
+                for m in REAL.outbox
+            )
+            if not already_queued:
+                if choice == "refund":
+                    email_subject = "Credit Claim CLM-D-1042 on Invoice INV-7781: EUR 587.30 (AADE myDATA 5.1)"
+                    email_body = (
+                        "To: accounts@kappaoffice.example\n"
+                        "Ref: Shipment D-1042 / Invoice INV-7781 / Claim CLM-D-1042\n"
+                        "Filing: Greek AADE myDATA Type 5.1 Credit Note staged at aade/mydata_CLM-D-1042.xml\n"
+                        "Total Refund Claim: EUR 587.30 net (EUR 728.25 gross including 24% VAT).\n"
+                        "Please credit our account accordingly."
+                    )
+                else:
+                    email_subject = (
+                        "Settlement Notice CLM-D-1042: Next-Day Re-Delivery 22 Hubs + EUR 202.30 Credit (AADE myDATA 9.3)"
+                    )
+                    email_body = (
+                        "To: accounts@kappaoffice.example\n"
+                        "Ref: Shipment D-1042 / Invoice INV-7781 / Claim CLM-D-1042\n"
+                        "Filing: Greek AADE myDATA Type 9.3 Discrepancy Note staged at aade/mydata_CLM-D-1042.xml\n"
+                        "Resolution: Scheduled next-day replacement re-delivery for 22 hubs + EUR 202.30 unit price adjustment.\n"
+                        "Please confirm dispatch."
+                    )
+                if "send_email" in REGISTRY:
+                    REGISTRY["send_email"].do(
+                        {"to": "accounts@kappaoffice.example", "subject": email_subject, "body": email_body},
+                        REAL,
+                    )
+                else:
+                    REAL.outbox.append({
+                        "tool": "send_email",
+                        "to": "accounts@kappaoffice.example",
+                        "subject": email_subject,
+                        "body": email_body,
+                    })
+
+            ui_action = UiActionPayload(
+                action="commit_resolution",
+                choice=choice,
+                view="db",
+                table="claims",
+                label=(
+                    "Committed €587.30 Refund + AADE 5.1"
+                    if choice == "refund"
+                    else "Committed 22-Unit Replacement + €202.30 Credit"
+                ),
+            ).model_dump(exclude_none=True)
+
             if choice == "refund":
-                email_subject = "Credit Claim CLM-D-1042 on Invoice INV-7781: EUR 587.30 (AADE myDATA 5.1)"
-                email_body = (
-                    "To: accounts@kappaoffice.example\n"
-                    "Ref: Shipment D-1042 / Invoice INV-7781 / Claim CLM-D-1042\n"
-                    "Filing: Greek AADE myDATA Type 5.1 Credit Note staged at aade/mydata_CLM-D-1042.xml\n"
-                    "Total Refund Claim: EUR 587.30 net (EUR 728.25 gross including 24% VAT).\n"
-                    "Please credit our account accordingly."
+                confirmation_text = (
+                    "On it—freezing invoice 7781, filing the 587 euro AADE tax credit, "
+                    "and emailing Kappa right now! All done. Need anything else?"
+                )
+                summary_text = (
+                    f"Enforced EUR 587.30 refund hold on {claim_id} and staged AADE myDATA 5.1 credit note."
                 )
             else:
-                email_subject = (
-                    "Settlement Notice CLM-D-1042: Next-Day Re-Delivery 22 Hubs + EUR 202.30 Credit (AADE myDATA 9.3)"
+                confirmation_text = (
+                    "Got it—locking in 22 free replacement hubs for tomorrow morning "
+                    "plus the 202 euro credit, and emailing Kappa now! Anything else?"
                 )
-                email_body = (
-                    "To: accounts@kappaoffice.example\n"
-                    "Ref: Shipment D-1042 / Invoice INV-7781 / Claim CLM-D-1042\n"
-                    "Filing: Greek AADE myDATA Type 9.3 Discrepancy Note staged at aade/mydata_CLM-D-1042.xml\n"
-                    "Resolution: Scheduled next-day replacement re-delivery for 22 hubs + EUR 202.30 unit price adjustment.\n"
-                    "Please confirm dispatch."
+                summary_text = (
+                    f"Scheduled next-day replacement for 22 hubs on {claim_id} + EUR 202.30 credit (AADE myDATA 9.3)."
                 )
-            if "send_email" in REGISTRY:
-                REGISTRY["send_email"].do(
-                    {"to": "accounts@kappaoffice.example", "subject": email_subject, "body": email_body},
-                    REAL,
-                )
-            else:
-                REAL.outbox.append({
-                    "tool": "send_email",
-                    "to": "accounts@kappaoffice.example",
-                    "subject": email_subject,
-                    "body": email_body,
-                })
-
-        ui_action = UiActionPayload(
-            action="commit_resolution",
-            choice=choice,
-            view="db",
-            table="claims",
-            label=(
-                "Committed €587.30 Refund + AADE 5.1"
-                if choice == "refund"
-                else "Committed 22-Unit Replacement + €202.30 Credit"
-            ),
-        ).model_dump(exclude_none=True)
-
-        if choice == "refund":
-            confirmation_text = (
-                "On it—freezing invoice 7781, filing the 587 euro AADE tax credit, "
-                "and emailing Kappa right now! All done. Need anything else?"
-            )
-            summary_text = (
-                f"Enforced EUR 587.30 refund hold on {claim_id} and staged AADE myDATA 5.1 credit note."
-            )
         else:
+            agreed_amount = claim_amount
+            aade_xml_path = f"aade/mydata_{claim_id}.xml"
+            xml_content = _build_aade_mydata_xml(
+                claim_id=claim_id,
+                choice=choice,
+                amount=claim_amount,
+                supplier_id=supplier_id,
+                supplier_name=supplier_name,
+                delivery_id=delivery_id,
+                invoice_id=invoice_id,
+            )
+
+            # 1. Write AADE XML via reversible mutation
+            _record_reversible_mutation(
+                run_id,
+                "write_file",
+                {"path": aade_xml_path, "content": xml_content},
+                f"Staged Greek AADE myDATA 5.1 XML `{aade_xml_path}`",
+            )
+
+            # 2. Check if claim exists in REAL.db_path or needs to be inserted/updated
+            if REAL.db_path.exists():
+                with contextlib.closing(sqlite3.connect(REAL.db_path)) as conn:
+                    conn.row_factory = sqlite3.Row
+                    with contextlib.suppress(sqlite3.Error):
+                        c_row = conn.execute("SELECT * FROM claims WHERE id = ?", (claim_id,)).fetchone()
+                        if c_row is None:
+                            claim_row = {
+                                "id": claim_id,
+                                "supplier_id": supplier_id,
+                                "delivery_id": delivery_id,
+                                "invoice_id": invoice_id,
+                                "amount": claim_amount,
+                                "reason": reason or f"Discrepancy on invoice {invoice_id}",
+                                "status": "settled",
+                            }
+                            _record_reversible_mutation(
+                                run_id,
+                                "upsert_row",
+                                {"table": "claims", "pk_col": "id", "row": claim_row},
+                                f"Created claim #{claim_id} ({choice}, EUR {claim_amount:.2f})",
+                            )
+                        else:
+                            _record_reversible_mutation(
+                                run_id,
+                                "upsert_row",
+                                {"table": "claims", "pk_col": "id", "row": {"id": claim_id, "status": "settled", "amount": claim_amount}},
+                                f"Updated claims #{claim_id} ({choice}, EUR {claim_amount:.2f})",
+                            )
+
+                        if invoice_id:
+                            inv_row = conn.execute("SELECT * FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
+                            if inv_row is not None and str(inv_row["status"]).lower() not in ("held", "payment_hold", "disputed"):
+                                _record_reversible_mutation(
+                                    run_id,
+                                    "upsert_row",
+                                    {"table": "invoices", "pk_col": "id", "row": {"id": invoice_id, "status": "held"}},
+                                    f"Updated invoice #{invoice_id} to payment hold",
+                                )
+
+            # 3. Send email to supplier if recipient_email is known and not already in outbox
+            if recipient_email:
+                already_queued = any(
+                    m.get("to") == recipient_email
+                    and (claim_id in str(m.get("subject", "")) or invoice_id in str(m.get("subject", "")))
+                    for m in REAL.outbox
+                )
+                if not already_queued:
+                    email_subject = f"Credit Claim {claim_id} on Invoice {invoice_id}: EUR {claim_amount:.2f} (AADE myDATA 5.1)"
+                    email_body = (
+                        f"To: {recipient_email}\n"
+                        f"Ref: Shipment {delivery_id} / Invoice {invoice_id} / Claim {claim_id}\n"
+                        f"Filing: Greek AADE myDATA Type 5.1 Credit Note staged at {aade_xml_path}\n"
+                        f"Total Refund Claim: EUR {claim_amount:.2f} net (EUR {claim_amount * 1.24:.2f} gross including 24% VAT).\n"
+                        "Please credit our account accordingly."
+                    )
+                    _record_reversible_mutation(
+                        run_id,
+                        "send_email",
+                        {"to": recipient_email, "subject": email_subject, "body": email_body},
+                        f"Queued credit claim email to {recipient_email}",
+                    )
+
+            ui_action = UiActionPayload(
+                action="commit_resolution",
+                choice=choice,
+                view="db",
+                table="claims",
+                label=f"Committed €{claim_amount:g} Claim + AADE 5.1",
+            ).model_dump(exclude_none=True)
+
             confirmation_text = (
-                "Got it—locking in 22 free replacement hubs for tomorrow morning "
-                "plus the 202 euro credit, and emailing Kappa now! Anything else?"
+                f"On it—freezing invoice {invoice_id}, filing the {claim_amount:g} euro AADE tax credit, "
+                f"and emailing {supplier_name} right now! All done. Need anything else?"
             )
             summary_text = (
-                f"Scheduled next-day replacement for 22 hubs on {claim_id} + EUR 202.30 credit (AADE myDATA 9.3)."
+                f"Enforced EUR {claim_amount:.2f} refund hold on {claim_id} and staged AADE myDATA 5.1 credit note."
             )
 
         agent_turn = CallTurnPayload(
@@ -3679,7 +4302,7 @@ async def handle_user_consult_response(request: Request):
             claim_path = f"claims/{claim_id}.md"
             claim_file = WS / claim_path
             content = claim_file.read_text(encoding="utf-8") if claim_file.exists() else (
-                f"# Claim {claim_id}\n\nDraft email to accounts@kappaoffice.example regarding delivery D-1042."
+                f"# Claim {claim_id}\n\nDraft email to {recipient_email or 'accounts@kappaoffice.example'} regarding delivery {delivery_id}."
             )
             ui_action = UiActionPayload(
                 action="open_file",
@@ -3688,7 +4311,15 @@ async def handle_user_consult_response(request: Request):
                 label=f"Opened {claim_path} on Desktop",
             ).model_dump(exclude_none=True)
         else:
-            preview_xml = _build_aade_mydata_xml(claim_id, "refund")
+            preview_xml = _build_aade_mydata_xml(
+                claim_id=claim_id,
+                choice="refund",
+                amount=claim_amount if not is_kappa else None,
+                supplier_id=supplier_id if not is_kappa else None,
+                supplier_name=supplier_name if not is_kappa else None,
+                delivery_id=delivery_id if not is_kappa else None,
+                invoice_id=invoice_id if not is_kappa else None,
+            )
             aade_xml_path = f"aade/mydata_{claim_id}.xml"
             ui_action = UiActionPayload(
                 action="open_file",
@@ -3716,10 +4347,16 @@ async def handle_user_consult_response(request: Request):
             cost_eur=_voice_micro_cost(transcript) if stt_ran else 0.0,
         )
 
-        reply_text = (
-            "Everything's staged—I'll freeze invoice 7781, file the Greek AADE tax credit, "
-            "and email Kappa the moment you say go. Refund or replacements?"
-        )
+        if is_kappa:
+            reply_text = (
+                "Everything's staged—I'll freeze invoice 7781, file the Greek AADE tax credit, "
+                "and email Kappa the moment you say go. Refund or replacements?"
+            )
+        else:
+            reply_text = (
+                f"Everything's staged—I'll freeze invoice {invoice_id}, file the Greek AADE tax credit, "
+                f"and email {supplier_name} the moment you say go. Enforce the claim or hold off?"
+            )
         agent_turn = CallTurnPayload(
             call_id=call_id,
             speaker="agent",
@@ -3794,10 +4431,22 @@ async def handle_user_consult_response(request: Request):
                 thought=f"Operator: {transcript}",
                 cost_eur=_voice_micro_cost(transcript) if stt_ran else 0.0,
             )
-            reply_text = (
-                "Full refund gets us 587 euros cash back today and freezes their invoice. "
-                "Or they ship 22 free hubs tomorrow plus a 202 euro credit. Which one?"
-            )
+            if is_kappa:
+                reply_text = (
+                    "Full refund gets us 587 euros cash back today and freezes their invoice. "
+                    "Or they ship 22 free hubs tomorrow plus a 202 euro credit. Which one?"
+                )
+            else:
+                if invoice_id:
+                    reply_text = (
+                        f"Enforcing the claim recovers {claim_amount:g} euros and freezes invoice {invoice_id}. "
+                        f"Or we can hold off and negotiate directly with {supplier_name}. Which one?"
+                    )
+                else:
+                    reply_text = (
+                        f"Enforcing the claim recovers {claim_amount:g} euros. "
+                        f"Or we can hold off and negotiate directly with {supplier_name}. Which one?"
+                    )
             agent_turn = CallTurnPayload(
                 call_id=call_id,
                 speaker="agent",
@@ -3866,10 +4515,26 @@ async def handle_user_consult_response(request: Request):
                 thought=f"Operator: {transcript}",
                 cost_eur=_voice_micro_cost(transcript) if stt_ran else 0.0,
             )
-            reply_text = (
-                "Sixteen missing hubs, six broken, unit overbilling on invoice 7781, "
-                "plus a two-day late penalty—totaling 587 euros and 30 cents. Refund or replacements?"
-            )
+            if is_kappa:
+                reply_text = (
+                    "Sixteen missing hubs, six broken, unit overbilling on invoice 7781, "
+                    "plus a two-day late penalty—totaling 587 euros and 30 cents. Refund or replacements?"
+                )
+            else:
+                if reason and invoice_id:
+                    reply_text = (
+                        f"Audit on delivery {delivery_id or 'shipment'} flagged {reason} on invoice {invoice_id}, "
+                        f"totaling {claim_amount:g} euros. Enforce the claim or hold off?"
+                    )
+                elif invoice_id:
+                    reply_text = (
+                        f"Audit on delivery {delivery_id or 'shipment'} found discrepancies on invoice {invoice_id} "
+                        f"totaling {claim_amount:g} euros. Enforce the claim or hold off?"
+                    )
+                else:
+                    reply_text = (
+                        f"Audit flagged discrepancies totaling {claim_amount:g} euros. Enforce the claim or hold off?"
+                    )
             agent_turn = CallTurnPayload(
                 call_id=call_id,
                 speaker="agent",
@@ -3918,7 +4583,10 @@ async def handle_user_consult_response(request: Request):
                 "iris_intent": iris_res,
             }
         if iris_intent == "reject_rollback" and iris_binding >= 0.65:
-            reply_text = "Understood. Pausing the proposed settlement and keeping everything safely unchanged."
+            if is_kappa:
+                reply_text = "Understood. Pausing the proposed settlement and keeping everything safely unchanged."
+            else:
+                reply_text = f"Understood. Holding off on {supplier_name} invoice {invoice_id} and keeping claim {claim_id} safely paused."
             end_ev = CallEndPayload(
                 call_id=call_id,
                 outcome="rejected",
@@ -3956,9 +4624,14 @@ async def handle_user_consult_response(request: Request):
             }
 
     # Intent 6: Fallback / unclear turn
-    fallback_reply = (
-        "I can break down the 587 euro calculation, compare your options, or lock in the refund right now. What would you prefer?"
-    )
+    if is_kappa:
+        fallback_reply = (
+            "I can break down the 587 euro calculation, compare your options, or lock in the refund right now. What would you prefer?"
+        )
+    else:
+        fallback_reply = (
+            f"I can break down the {claim_amount:g} euro calculation, compare your options, or enforce the claim right now. What would you prefer?"
+        )
     user_turn_f = CallTurnPayload(
         call_id=call_id,
         speaker="user",

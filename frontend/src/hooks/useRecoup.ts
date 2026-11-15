@@ -104,6 +104,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   const [report, setReport] = useState<ChangeReport | null>(null);
   const [verify, setVerify] = useState<VerifyPayload | null>(null);
   const [pendingApproval, setPendingApproval] = useState<ApprovalNeededPayload | null>(null);
+  const pendingApprovalRef = useRef<ApprovalNeededPayload | null>(pendingApproval);
+  pendingApprovalRef.current = pendingApproval;
   const [offer, setOffer] = useState<AnticipateOfferPayload | null>(null);
   const [wsState, setWsState] = useState<WorkspaceState | null>(null);
   const [connected, setConnected] = useState(false);
@@ -111,6 +113,9 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   const [stage, setStage] = useState<StageId | null>(null);
   const [stageDone, setStageDone] = useState(false);
   const [runStatus, setRunStatus] = useState<RunStatus>("idle");
+  const runStatusRef = useRef<RunStatus>(runStatus);
+  runStatusRef.current = runStatus;
+  const replayCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [narration, setNarration] = useState(IDLE_NARRATION);
   const [windows, setWindows] = useState<LiveWin[]>([]);
@@ -302,9 +307,9 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         wsStateRef.current = data;
         setWsState(data);
 
-        // Hydrate pending approval
+        // Hydrate pending approval (never revive after commit)
         const nextPending = data.pending_approval ?? (data.pending_approvals?.length ? data.pending_approvals[0] : null);
-        if (nextPending) {
+        if (nextPending && runStatusRef.current !== "committed") {
           if (!windowsEnabledRef.current) {
             // On mobile: instant hydration so phone rings immediately
             if (queueRef.current.length > 0) {
@@ -331,7 +336,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
               setRunStatus((curr) => (curr === "running" || curr === "idle" ? "awaiting" : curr));
             }
           }
-        } else if (modeRef.current === "live") {
+        } else if (modeRef.current === "live" || runStatusRef.current === "committed") {
           deferredApprovalRef.current = null;
           setPendingApproval(null);
         }
@@ -348,16 +353,10 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           }));
           const isConnected = ac.call_status === "connected" || (!ac.ringing && ac.active);
           setOperatorConsult((prev) => {
-            const prevCount = prev?.turns.length ?? 0;
-            const isMobileAudio = checkIsMobileRoute() || !windowsEnabledRef.current || isMobileCallManagingAudio();
-            if (!isMobileAudio && voiceRef.current && !ac.ringing && ac.call_status === "connected" && mappedTurns.length > prevCount) {
-              const newTurn = mappedTurns[mappedTurns.length - 1];
-              if (newTurn && newTurn.speaker === "agent" && newTurn.text) {
-                speakCallTurn("agent", newTurn.text, {
-                  onStart: () => setSpeaking(true),
-                  onEnd: () => setSpeaking(false),
-                });
-              }
+            // Phone consult turns belong exclusively to the phone call (MobileGate.tsx); laptop speaker stays silent
+            const shouldAutoSpeakTurn = false;
+            if (shouldAutoSpeakTurn) {
+              // no auto-speak on desktop
             }
             return {
               active: Boolean(ac.active),
@@ -759,13 +758,10 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       }
       case "call_start": {
         const p = ev.payload as unknown as CallStartPayload;
-        const isUserConsult = p.mode === "user_consult" || p.channel === "voice_call" || !p.mode;
-        if (isUserConsult) {
-          markPhoneCallActive();
-          if (windowsEnabledRef.current) {
-            stopSpeaking();
-            setSpeaking(false);
-          }
+        markPhoneCallActive();
+        if (windowsEnabledRef.current) {
+          stopSpeaking();
+          setSpeaking(false);
         }
         const callId = String(p.call_id ?? "CONSULT-CLM-D-1042");
         const isConnected = p.call_status === "connected";
@@ -855,26 +851,10 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           executeUiAction(turn.ui_action);
         }
 
-        const isMobileAudio = checkIsMobileRoute() || !windowsEnabledRef.current || isMobileCallManagingAudio();
-        const shouldAutoSpeakTurn =
-          !isMobileAudio &&
-          voiceRef.current &&
-          turn.speaker === "agent" &&
-          Boolean(turn.text) &&
-          isConnected &&
-          turn.call_status === "connected"; // never auto-speak while the call is still ringing or on mobile route
-
+        // Phone consult turns belong exclusively to the phone call (MobileGate.tsx); laptop speaker stays silent
+        const shouldAutoSpeakTurn = false;
         if (shouldAutoSpeakTurn && turn.text) {
-          speakCallTurn("agent", turn.text, {
-            onStart: () => {
-              setSpeaking(true);
-              setOperatorConsult((c) => (c ? { ...c, activeSpeaker: "agent" } : c));
-            },
-            onEnd: () => {
-              setSpeaking(false);
-              setOperatorConsult((c) => (c && c.activeSpeaker === "agent" ? { ...c, activeSpeaker: null } : c));
-            },
-          });
+          // no auto-speak on desktop
         }
         break;
       }
@@ -901,6 +881,14 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             : prev
         );
         if (endPayload.outcome === "accepted") {
+          if (replayCommitTimerRef.current !== null) {
+            clearTimeout(replayCommitTimerRef.current);
+            replayCommitTimerRef.current = null;
+          }
+          setRunStatus("committed");
+          setStage("commit");
+          setStageDone(true);
+          setPendingApproval(null);
           const agreedChoice: OperatorChoice =
             (typeof endPayload.agreed_amount === "number" && endPayload.agreed_amount < 350)
               ? "redelivery"
@@ -915,6 +903,14 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
               }
             });
           }
+        } else if (endPayload.outcome === "rejected") {
+          if (replayCommitTimerRef.current !== null) {
+            clearTimeout(replayCommitTimerRef.current);
+            replayCommitTimerRef.current = null;
+          }
+          setRunStatus("aborted");
+          setPendingApproval(null);
+          soundFx.playRewindSweep(1);
         }
         break;
       }
@@ -1074,31 +1070,59 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         }
         break;
       }
-      case "replay_step_done":
-        setStage("commit");
-        setRunStatus("committing");
+      case "replay_step_done": {
+        setStage((curr) => (curr === "commit" ? "commit" : curr ?? "commit"));
+        setRunStatus((curr) => (curr === "committed" ? "committed" : "committing"));
         triggerCommitCelebration();
+        if (replayCommitTimerRef.current !== null) {
+          clearTimeout(replayCommitTimerRef.current);
+        }
+        replayCommitTimerRef.current = setTimeout(() => {
+          replayCommitTimerRef.current = null;
+          setRunStatus((curr) => {
+            if (curr === "committing") {
+              setStage("commit");
+              setStageDone(true);
+              setPendingApproval(null);
+              return "committed";
+            }
+            return curr;
+          });
+        }, 600);
         if (modeRef.current !== "demo") refreshState();
         break;
+      }
       case "undo_step": {
         const p = ev.payload as { step?: number; tool?: string };
         setRewind((r) => (r ? { ...r, steps: [...r.steps, { step: Number(p.step ?? 0), tool: String(p.tool ?? "") }] } : r));
         break;
       }
       case "run_done": {
+        if (replayCommitTimerRef.current !== null) {
+          clearTimeout(replayCommitTimerRef.current);
+          replayCommitTimerRef.current = null;
+        }
         const payload = ev.payload as { status?: string; outcome?: string; choice?: OperatorChoice };
         const status = String(payload?.status ?? payload?.outcome ?? "");
         setRehearsalActive(false);
-        if (status === "committed" || payload?.outcome === "committed") {
+        if (status === "committed" || payload?.outcome === "committed" || status === "done" || payload?.outcome === "done") {
           setStage("commit");
           setStageDone(true);
           setRunStatus("committed");
+          setPendingApproval(null);
           triggerCommitCelebration(payload?.choice);
           soundFx.playCommitSuccess();
-        } else if (status === "aborted_by_human" || status === "blocked" || status === "timed_out") {
+        } else if (status === "aborted_by_human" || status === "blocked" || status === "timed_out" || status === "aborted" || status === "rejected") {
           setRunStatus("aborted");
+          setPendingApproval(null);
         } else if (status === "error") {
           setRunStatus("error");
+          setPendingApproval(null);
+        } else {
+          setStage("commit");
+          setStageDone(true);
+          setRunStatus("committed");
+          setPendingApproval(null);
         }
         if (modeRef.current !== "demo") refreshState();
         break;
@@ -1130,6 +1154,10 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       const next = queueRef.current[0];
       if (!next) {
         if (deferredApprovalRef.current && windowsEnabledRef.current) {
+          if (runStatusRef.current === "committed") {
+            deferredApprovalRef.current = null;
+            return;
+          }
           const forgeActive = windowsRef.current.some((w) => w.kind === "forge" && !w.manual);
           if (forgeActive || Date.now() < forgeHeroUntilRef.current) return;
 
@@ -1245,7 +1273,13 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         }
       });
     }
-    return () => es.close();
+    return () => {
+      if (replayCommitTimerRef.current !== null) {
+        clearTimeout(replayCommitTimerRef.current);
+        replayCommitTimerRef.current = null;
+      }
+      es.close();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1254,6 +1288,10 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     commitCelebratedRef.current = false;
     forgeTestReceivedRef.current = false;
     forgeHeroUntilRef.current = 0;
+    if (replayCommitTimerRef.current !== null) {
+      clearTimeout(replayCommitTimerRef.current);
+      replayCommitTimerRef.current = null;
+    }
     if (forgeFallbackTimerRef.current !== null) {
       window.clearTimeout(forgeFallbackTimerRef.current);
       forgeFallbackTimerRef.current = null;
@@ -1609,11 +1647,75 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
 
   const escalateToPhone = async (reqIdArg?: string | null, claimIdArg?: string) => {
     markPhoneCallActive();
-    const reqId = reqIdArg ?? pendingApproval?.req_id ?? null;
-    const claimsRows = wsStateRef.current?.tables?.claims ?? [];
-    const latestClaim = claimsRows[claimsRows.length - 1];
-    const claimId = claimIdArg || String(latestClaim?.id ?? "CLM-D-1042");
-    const claimAmount = Number(latestClaim?.amount ?? 587.3);
+    const pending = pendingApprovalRef.current ?? pendingApproval;
+    const reqId = reqIdArg ?? pending?.req_id ?? null;
+
+    // 1. Explicit argument
+    let extractedClaimId: string | null = claimIdArg || null;
+    let extractedClaimAmount: number | null = null;
+
+    // 2. Extract from pendingApproval?.args (e.g. args.row?.id, args.claim_id, args.id, args.row?.amount, args.amount)
+    const args = (pending?.args ?? {}) as Record<string, unknown>;
+    const row = (args.row ?? {}) as Record<string, unknown>;
+
+    if (!extractedClaimId) {
+      if (typeof row.id === "string" && row.id.trim()) {
+        extractedClaimId = row.id.trim();
+      } else if (typeof args.claim_id === "string" && args.claim_id.trim()) {
+        extractedClaimId = args.claim_id.trim();
+      } else if (typeof args.id === "string" && args.id.trim()) {
+        extractedClaimId = args.id.trim();
+      }
+    }
+
+    if (extractedClaimAmount === null) {
+      const rawAmt = row.amount ?? row.amount_eur ?? args.amount ?? args.amount_eur ?? args.claim_amount;
+      if (typeof rawAmt === "number" && !Number.isNaN(rawAmt)) {
+        extractedClaimAmount = rawAmt;
+      } else if (typeof rawAmt === "string") {
+        const parsed = parseFloat(rawAmt.replace(/[^0-9.]/g, ""));
+        if (!Number.isNaN(parsed)) extractedClaimAmount = parsed;
+      }
+    }
+
+    // 3. Regex fallback on pendingApproval?.diff_preview / risk_reason / spoken_summary
+    const pendingText = [pending?.diff_preview, pending?.risk_reason, pending?.spoken_summary]
+      .filter(Boolean)
+      .join(" ");
+
+    if (!extractedClaimId && pendingText) {
+      const match = pendingText.match(/\b(CLM-[A-Z0-9-]+)\b/i);
+      if (match) {
+        extractedClaimId = match[1].toUpperCase();
+      }
+    }
+
+    if (extractedClaimAmount === null && pendingText) {
+      const match = pendingText.match(/(?:EUR|€)\s*([0-9]+(?:\.[0-9]+)?)/i);
+      if (match) {
+        const parsed = parseFloat(match[1]);
+        if (!Number.isNaN(parsed)) extractedClaimAmount = parsed;
+      }
+    }
+
+    // 4. wsStateRef.current?.tables?.claims (matching claimId ONLY — do NOT blindly pick Kappa CLM-D-1042 if pendingApproval is for CLM-3005!)
+    const claimsRows = (wsStateRef.current?.tables?.claims ?? []) as Record<string, unknown>[];
+    if (extractedClaimId) {
+      const matchingRow = claimsRows.find((r) => String(r.id ?? "").toUpperCase() === extractedClaimId?.toUpperCase());
+      if (matchingRow && extractedClaimAmount === null) {
+        const rowAmt = Number(matchingRow.amount ?? matchingRow.amount_eur ?? NaN);
+        if (!Number.isNaN(rowAmt)) extractedClaimAmount = rowAmt;
+      }
+    } else {
+      const latestClaim = claimsRows[claimsRows.length - 1];
+      if (latestClaim) {
+        extractedClaimId = String(latestClaim.id ?? "");
+        extractedClaimAmount = Number(latestClaim.amount ?? latestClaim.amount_eur ?? 587.3);
+      }
+    }
+
+    const claimId = extractedClaimId || "CLM-D-1042";
+    const claimAmount = extractedClaimAmount !== null && !Number.isNaN(extractedClaimAmount) ? extractedClaimAmount : 587.3;
 
     stopSpeaking();
     setSpeaking(false);
@@ -1629,7 +1731,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       const res = await fetch("/api/call/user-consult", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ req_id: reqId, claim_id: claimId }),
+        body: JSON.stringify({ req_id: reqId, claim_id: claimId, claim_amount: claimAmount }),
       });
       if (!res.ok) throw new Error(`consult failed (${res.status})`);
     } catch {
@@ -1644,7 +1746,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     reqIdArg?: string | null,
     claimIdArg?: string
   ) => {
-    const reqId = reqIdArg ?? pendingApproval?.req_id ?? operatorConsult?.reqId ?? null;
+    const reqId = reqIdArg ?? pendingApprovalRef.current?.req_id ?? pendingApproval?.req_id ?? operatorConsult?.reqId ?? null;
     const claimId = claimIdArg || operatorConsult?.claimId || "CLM-D-1042";
     const agreedAmount = choice === "refund" ? 587.3 : 202.3;
     const aadePath = `aade/mydata_${claimId}.xml`;

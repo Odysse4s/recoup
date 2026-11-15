@@ -93,12 +93,16 @@ export function getPrimedAudioElement(): HTMLAudioElement | null {
       const el = new Audio();
       el.src = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA";
       el.volume = 0.01;
+      el.loop = false;
       el.setAttribute("playsinline", "true");
       (el as unknown as { "webkit-playsinline"?: string })["webkit-playsinline"] = "true";
       sharedMediaElement = el;
     } catch {
       // ignore
     }
+  }
+  if (sharedMediaElement) {
+    sharedMediaElement.loop = false;
   }
   return sharedMediaElement;
 }
@@ -149,8 +153,10 @@ export function unlockAudioSession(mode: "playback" | "play-and-record" = "playb
   try {
     const el = getPrimedAudioElement();
     if (el) {
+      el.loop = false;
       el.play().then(() => {
         el.pause();
+        el.loop = false;
       }).catch(() => {});
     }
   } catch {
@@ -336,6 +342,7 @@ export interface SpeechHooks {
 function speakOnce(text: string, kind: string, hooks: SpeechHooks) {
   return new Promise<void>((resolve) => {
     let finished = false;
+    const token = generation;
     let localSource: AudioBufferSourceNode | null = null;
     let analyser: AnalyserNode | null = null;
     let rafId: number | null = null;
@@ -359,6 +366,7 @@ function speakOnce(text: string, kind: string, hooks: SpeechHooks) {
       }
       if (sharedMediaElement && currentAudio === sharedMediaElement) {
         try {
+          sharedMediaElement.loop = false;
           sharedMediaElement.pause();
           sharedMediaElement.currentTime = 0;
         } catch {}
@@ -383,7 +391,7 @@ function speakOnce(text: string, kind: string, hooks: SpeechHooks) {
     cancelCurrent = done;
 
     fetchRemoteBriefing(text, kind).then(async (remote) => {
-      if (finished) return;
+      if (finished || token !== generation) return done();
 
       if (remote && remote.buffer.byteLength > 0) {
         const { buffer: buf, contentType } = remote;
@@ -392,7 +400,7 @@ function speakOnce(text: string, kind: string, hooks: SpeechHooks) {
           if (ctx.state === "suspended") {
             await ctx.resume().catch(() => {});
           }
-          if (finished) return;
+          if (finished || token !== generation) return done();
 
           let audioBuf: AudioBuffer | null = null;
           try {
@@ -401,7 +409,7 @@ function speakOnce(text: string, kind: string, hooks: SpeechHooks) {
             console.warn("decodeAudioData failed", decodeErr);
           }
 
-          if (audioBuf && !finished) {
+          if (audioBuf && !finished && token === generation) {
             try {
               const src = ctx.createBufferSource();
               src.buffer = audioBuf;
@@ -427,7 +435,7 @@ function speakOnce(text: string, kind: string, hooks: SpeechHooks) {
               hooks.onStart();
 
               const updateProgress = () => {
-                if (finished) return;
+                if (finished || token !== generation) return;
                 const elapsed = ctx.currentTime - startCtxTime;
                 if (duration > 0) {
                   hooks.onProgress?.(Math.min(1, elapsed / duration));
@@ -441,18 +449,23 @@ function speakOnce(text: string, kind: string, hooks: SpeechHooks) {
               src.start(0);
               return;
             } catch (playErr) {
+              if (finished || token !== generation) {
+                done();
+                return;
+              }
               console.warn("AudioBufferSourceNode play failed", playErr);
             }
           }
         }
 
         // Fallback: reuse sharedMediaElement with correct MIME type
-        if (!finished) {
+        if (!finished && token === generation) {
           try {
             const blob = new Blob([buf], { type: contentType });
             const blobUrl = URL.createObjectURL(blob);
             blobUrlToRevoke = blobUrl;
             const el = getPrimedAudioElement() || new Audio();
+            el.loop = false;
             currentAudio = el;
             el.src = blobUrl;
             analyser = soundFx.attachVoiceAnalyser(el);
@@ -504,13 +517,17 @@ function speakOnce(text: string, kind: string, hooks: SpeechHooks) {
             await el.play();
             return;
           } catch (elErr) {
+            if (finished || token !== generation) {
+              done();
+              return;
+            }
             console.warn("sharedMediaElement fallback play failed", elErr);
           }
         }
       }
 
       // Fallback: Web Speech Synthesis
-      if (finished) return;
+      if (finished || token !== generation) return done();
       const synth = window.speechSynthesis;
       if (!synth) return done();
       const u = new SpeechSynthesisUtterance(text);
@@ -553,6 +570,7 @@ export function speakBriefing(text: string, kind: string, hooks: SpeechHooks, in
 function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
   return new Promise<void>((resolve) => {
     let finished = false;
+    const token = generation;
     let localSource: AudioBufferSourceNode | null = null;
     let analyser: AnalyserNode | null = null;
     let rafId: number | null = null;
@@ -585,6 +603,7 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
       }
       if (sharedMediaElement && currentAudio === sharedMediaElement) {
         try {
+          sharedMediaElement.loop = false;
           sharedMediaElement.pause();
           sharedMediaElement.currentTime = 0;
         } catch {}
@@ -622,7 +641,7 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
     }
 
     fetchRemoteTurnAudio(text).then(async (remote) => {
-      if (finished) return;
+      if (finished || token !== generation) return done();
 
       if (remote && remote.buffer.byteLength > 0) {
         const { buffer: buf, contentType } = remote;
@@ -639,6 +658,7 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
           el.setAttribute("playsinline", "true");
           (el as unknown as { "webkit-playsinline"?: string })["webkit-playsinline"] = "true";
           el.volume = 1.0;
+          el.loop = false;
           currentAudio = el;
           el.src = blobUrl;
 
@@ -694,6 +714,10 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
           mediaElementPlayed = true;
           return;
         } catch (elErr) {
+          if (finished || token !== generation) {
+            done();
+            return;
+          }
           console.warn("sharedMediaElement playback failed, falling back to WebAudio decode", elErr);
           clearSafetyTimer();
           if (blobUrlToRevoke) {
@@ -704,13 +728,13 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
         }
 
         // Secondary path: Web Audio Context decodeAudioData if media element rejected
-        if (!finished && !mediaElementPlayed) {
+        if (!finished && token === generation && !mediaElementPlayed) {
           const ctx = getSharedAudioContext();
           if (ctx) {
             if (ctx.state === "suspended") {
               await ctx.resume().catch(() => {});
             }
-            if (finished) return;
+            if (finished || token !== generation) return done();
 
             let audioBuf: AudioBuffer | null = null;
             try {
@@ -719,7 +743,7 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
               console.warn("decodeAudioData failed", decodeErr);
             }
 
-            if (audioBuf && !finished) {
+            if (audioBuf && !finished && token === generation) {
               try {
                 const src = ctx.createBufferSource();
                 src.buffer = audioBuf;
@@ -751,7 +775,7 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
                 hooks?.onStart?.();
 
                 const updateProgress = () => {
-                  if (finished) return;
+                  if (finished || token !== generation) return;
                   const elapsed = ctx.currentTime - startCtxTime;
                   if (duration > 0) {
                     hooks?.onProgress?.(Math.min(1, elapsed / duration));
@@ -765,6 +789,10 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
                 src.start(0);
                 return;
               } catch (playErr) {
+                if (finished || token !== generation) {
+                  done();
+                  return;
+                }
                 console.warn("AudioBufferSourceNode play failed", playErr);
                 clearSafetyTimer();
               }
@@ -774,7 +802,7 @@ function speakTurnOnce(text: string, hooks?: Partial<SpeechHooks>) {
       }
 
       // Tertiary fallback: Web Speech Synthesis
-      if (finished) return;
+      if (finished || token !== generation) return done();
       const synth = window.speechSynthesis;
       if (!synth) return done();
       const u = new SpeechSynthesisUtterance(text);
@@ -865,12 +893,14 @@ export function stopSpeaking() {
   }
   if (sharedMediaElement) {
     try {
+      sharedMediaElement.loop = false;
       sharedMediaElement.pause();
       sharedMediaElement.currentTime = 0;
     } catch {}
   }
   if (currentAudio) {
     try {
+      currentAudio.loop = false;
       currentAudio.pause();
     } catch {}
     currentAudio = null;
@@ -1346,10 +1376,10 @@ export function useAutoVad({
         const timeSinceSpeechStart = now - agentSpeechStartedAtRef.current;
         // Ignore the first 350ms after speech starts to avoid initial speaker pop
         if (timeSinceSpeechStart > 350) {
-          const bargeInRmsThresh = Math.max(0.042, noiseFloor * 3.5);
-          if (rms > bargeInRmsThresh && voiceBandRatio > 0.58) {
+          const bargeInRmsThresh = Math.max(0.032, noiseFloor * 2.8);
+          if (rms > bargeInRmsThresh && voiceBandRatio > 0.50) {
             consecutiveBargeInFramesRef.current++;
-            if (consecutiveBargeInFramesRef.current >= 18) {
+            if (consecutiveBargeInFramesRef.current >= 10) {
               consecutiveBargeInFramesRef.current = 0;
               stopSpeaking();
               onBargeInRef.current?.();

@@ -370,6 +370,17 @@ function OperatorEscalationCall({
     return typeof candidate === "string" && candidate.trim() ? candidate : DEFAULT_CLAIM_ID;
   }, [approval, consult?.claimId, localCompletion?.claimId]);
 
+  const claimAmount = useMemo(() => {
+    if (typeof consult?.claimAmount === "number" && consult.claimAmount > 0) return consult.claimAmount;
+    const argRow = approval?.args?.row as Record<string, unknown> | undefined;
+    const candidate =
+      (typeof approval?.args?.claim_amount === "number" ? approval.args.claim_amount : null) ??
+      (typeof approval?.args?.amount === "number" ? approval.args.amount : null) ??
+      (typeof argRow?.amount === "number" ? argRow.amount : null) ??
+      (typeof argRow?.total === "number" ? argRow.total : null);
+    return typeof candidate === "number" && candidate > 0 ? candidate : 587.3;
+  }, [approval, consult?.claimAmount]);
+
   const callKey = sessionKey;
 
   const irisGate =
@@ -380,10 +391,25 @@ function OperatorEscalationCall({
   const committedChoiceInCall = committedChoice || consult?.selectedChoice || null;
 
   const openingText = useMemo(() => {
-    const firstAgentTurn = consult?.turns.find((t) => t.speaker === "agent")?.text;
-    if (firstAgentTurn && !firstAgentTurn.toLowerCase().includes("screen")) return firstAgentTurn;
+    const consultTurn0 = consult?.turns?.[0]?.text?.trim();
+    if (consultTurn0) return consultTurn0;
+
+    const firstAgentTurn = consult?.turns?.find((t) => t.speaker === "agent")?.text?.trim();
+    if (firstAgentTurn) return firstAgentTurn;
+
+    const spokenSummary = approval?.spoken_summary?.trim();
+    if (spokenSummary) {
+      if (
+        spokenSummary.toLowerCase().includes("check your screen") ||
+        spokenSummary.toLowerCase().includes("on your screen")
+      ) {
+        return DEFAULT_OPENING_QUESTION;
+      }
+      return spokenSummary;
+    }
+
     return DEFAULT_OPENING_QUESTION;
-  }, [consult?.turns]);
+  }, [consult?.turns, approval?.spoken_summary]);
 
   const mergedTurns = useMemo<OperatorConsultTurn[]>(() => {
     const sseTurns = consult?.turns ?? [];
@@ -494,12 +520,11 @@ function OperatorEscalationCall({
     let ringAudio: HTMLAudioElement | null = null;
     try {
       const ringUrl = getDualToneRingtoneUrl();
-      const el = getPrimedAudioElement() || new Audio();
-      el.src = ringUrl;
-      el.loop = true;
-      el.volume = 0.85;
-      ringAudio = el;
-      el.play().catch(() => {});
+      const ring = new Audio(ringUrl);
+      ring.loop = true;
+      ring.volume = 0.85;
+      ringAudio = ring;
+      ring.play().catch(() => {});
     } catch {
       // ignore
     }
@@ -515,6 +540,7 @@ function OperatorEscalationCall({
       window.clearInterval(interval);
       if (ringAudio) {
         try {
+          ringAudio.loop = false;
           ringAudio.pause();
           ringAudio.currentTime = 0;
           ringAudio.src = "";
@@ -522,6 +548,10 @@ function OperatorEscalationCall({
           // ignore
         }
         ringAudio = null;
+      }
+      const primed = getPrimedAudioElement();
+      if (primed) {
+        primed.loop = false;
       }
     };
   }, [answered, consult?.end, consult?.ringing, consult?.turns.length, resolvedEnd]);
@@ -756,6 +786,12 @@ function OperatorEscalationCall({
     soundFx.playUiClick();
     buzz([50, 80]);
 
+    // Ensure shared primed element loop is reset to false
+    const primed = getPrimedAudioElement();
+    if (primed) {
+      primed.loop = false;
+    }
+
     // 1. Mobile call owns audio
     setMobileCallOwnsAudio(true);
 
@@ -806,6 +842,10 @@ function OperatorEscalationCall({
     soundFx.playUiClick();
     buzz(50);
     stopSpeaking();
+    const primed = getPrimedAudioElement();
+    if (primed) {
+      primed.loop = false;
+    }
     mutePersistentMicStream();
     setWarmStream(null);
     setMobileCallOwnsAudio(false);
@@ -1021,7 +1061,7 @@ function OperatorEscalationCall({
             {r.brand.brand_name} AI
           </h1>
           <p className="mt-1 text-[14.5px] font-medium text-emerald-200/90">
-            Shipment D-1042 · €587.30 Decision
+            {claimId.startsWith("CLM-") ? `Claim ${claimId}` : `Shipment ${claimId}`} · €{claimAmount.toFixed(2)} Decision
           </p>
         </div>
 
@@ -1055,7 +1095,9 @@ function OperatorEscalationCall({
               Audit Discrepancy Preview
             </div>
             <div className="mt-1 text-[13px] font-medium text-white/90">
-              22 missing/broken hubs + overcharged invoice INV-7781
+              {consult?.turns?.[0]?.text && !consult.turns[0].text.toLowerCase().includes("screen")
+                ? consult.turns[0].text
+                : approval?.risk_reason || approval?.spoken_summary || "22 missing/broken hubs + overcharged invoice INV-7781"}
             </div>
           </div>
 
@@ -1075,6 +1117,10 @@ function OperatorEscalationCall({
                 onClick={() => {
                   soundFx.playUiClick();
                   stopSpeaking();
+                  const primed = getPrimedAudioElement();
+                  if (primed) {
+                    primed.loop = false;
+                  }
                   mutePersistentMicStream();
                   setMobileCallOwnsAudio(false);
                   r.decide(reqId, false);
@@ -1148,10 +1194,10 @@ function OperatorEscalationCall({
           )}
 
           <h2 className="mt-1 text-[21px] font-bold tracking-tight text-ink">
-            {r.brand.brand_name} AI · D-1042
+            {r.brand.brand_name} AI · {claimId.startsWith("CLM-") ? claimId : `Shipment ${claimId}`}
           </h2>
           <div className="text-[12px] font-medium text-ink-3">
-            Executive Line · Grok Realtime Voice &amp; Auto-VAD
+            €{claimAmount.toFixed(2)} Decision · Grok Realtime Voice &amp; Auto-VAD
           </div>
         </div>
 
@@ -1339,7 +1385,9 @@ function OperatorEscalationCall({
                 <div className="mt-0.5 font-mono text-[11px] font-semibold text-ok">
                   {resolvedEnd.choice === "redelivery"
                     ? "22-Unit Replacement + AADE 9.3 (€202.30 Credit)"
-                    : "AP Hold INV-7781 + AADE 5.1 (€587.30 Net / €728.25 Gross)"}
+                    : claimId === DEFAULT_CLAIM_ID || claimId === "CLM-D-1042" || claimId === "D-1042"
+                    ? "AP Hold INV-7781 + AADE 5.1 (€587.30 Net / €728.25 Gross)"
+                    : `AP Hold & Credit Note · ${claimId} (€${claimAmount.toFixed(2)} Net)`}
                 </div>
                 <p className="mt-1.5 text-[12.5px] leading-relaxed text-ink-2">
                   {resolvedEnd.summary}
@@ -1560,13 +1608,13 @@ function OperatorEscalationCall({
                   <Chip tone="signal">options</Chip>
                 </button>
 
-                {/* 2. Why do they owe 587 euros? */}
+                {/* 2. Why do they owe euros? */}
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() =>
                     submitQuickTrigger({
-                      transcript: "Why do they owe 587 euros?",
+                      transcript: `Why do they owe ${claimAmount === Math.round(claimAmount) ? claimAmount : claimAmount.toFixed(2)} euros?`,
                     })
                   }
                   className="flex w-full items-center justify-between rounded-2xl border border-line bg-surface/90 px-4 py-3 text-left transition-colors hover:border-signal/50 hover:bg-surface active:scale-[0.99]"
@@ -1574,22 +1622,24 @@ function OperatorEscalationCall({
                   <span className="flex items-center gap-3">
                     <FileCode2 className="h-5 w-5 text-signal" />
                     <div>
-                      <div className="text-[13.5px] font-semibold text-ink">Why do they owe €587?</div>
+                      <div className="text-[13.5px] font-semibold text-ink">
+                        Why do they owe €{claimAmount === Math.round(claimAmount) ? claimAmount : claimAmount.toFixed(2)}?
+                      </div>
                       <div className="text-[11.5px] text-ink-3">
-                        🧮 “Why do they owe 587 euros?”
+                        🧮 “Why do they owe {claimAmount === Math.round(claimAmount) ? claimAmount : claimAmount.toFixed(2)} euros?”
                       </div>
                     </div>
                   </span>
                   <Chip tone="signal">audit proof</Chip>
                 </button>
 
-                {/* 3. Demand the €587 refund */}
+                {/* 3. Demand the refund */}
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() =>
                     submitQuickTrigger({
-                      transcript: "Demand the 587 euro refund",
+                      transcript: `Demand the ${claimAmount === Math.round(claimAmount) ? claimAmount : claimAmount.toFixed(2)} euro refund`,
                       choice: "refund",
                     })
                   }
@@ -1599,15 +1649,15 @@ function OperatorEscalationCall({
                     <FileCheck2 className="h-5 w-5 text-ok" />
                     <div>
                       <div className="text-[13.5px] font-semibold text-ink">
-                        Demand the €587 refund
+                        Demand the €{claimAmount === Math.round(claimAmount) ? claimAmount : claimAmount.toFixed(2)} refund
                       </div>
                       <div className="text-[11.5px] text-ink-3">
-                        ✅ “Demand the 587 euro refund”
+                        ✅ “Demand the {claimAmount === Math.round(claimAmount) ? claimAmount : claimAmount.toFixed(2)} euro refund”
                       </div>
                     </div>
                   </span>
                   <Chip tone="ok" solid>
-                    €587.30 Net
+                    €{claimAmount.toFixed(2)} Net
                   </Chip>
                 </button>
 
@@ -1703,68 +1753,90 @@ function GateHome({
 
       <div className="scroll-thin flex-1 space-y-3 overflow-y-auto px-5 pb-4">
         {/* Paused Decision Waiting Card (early hangup recovery) */}
-        {pausedCallDecision && (
-          <motion.div
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="rounded-3xl border border-amber-500/40 bg-amber-500/10 p-4 shadow-card"
-          >
-            <div className="flex items-center justify-between">
-              <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-amber-400">
-                Paused · Decision Pending
-              </span>
-              <Chip tone="warn">€587.30 at Stake</Chip>
-            </div>
-            <div className="mt-2 text-[15px] font-semibold leading-snug text-ink">
-              Call Ended — Decide on Desktop or Tap to Call Back
-            </div>
-            <p className="mt-1 text-[12.5px] leading-relaxed text-ink-2">
-              Shipment D-1042 decision remains pending. AP hold on INV-7781 is still active.
-            </p>
-            <div className="mt-3">
-              <button
-                type="button"
-                onClick={click(() => onCallRecoupBack?.())}
-                className={cx(btn("signal", "lg"), "h-12 w-full rounded-2xl text-[14px] font-semibold shadow-md")}
-              >
-                <PhoneCall className="h-4 w-4" />
-                📞 Call Recoup Back
-              </button>
-            </div>
-          </motion.div>
-        )}
+        {pausedCallDecision && (() => {
+          const argRow = r.pendingApproval?.args?.row as Record<string, unknown> | undefined;
+          const cardClaimId = (r.pendingApproval?.args?.claim_id ?? argRow?.id ?? DEFAULT_CLAIM_ID) as string;
+          const cardAmount = (
+            (typeof r.pendingApproval?.args?.claim_amount === "number" ? r.pendingApproval.args.claim_amount : null) ??
+            (typeof r.pendingApproval?.args?.amount === "number" ? r.pendingApproval.args.amount : null) ??
+            (typeof argRow?.amount === "number" ? argRow.amount : null) ??
+            (typeof argRow?.total === "number" ? argRow.total : null) ??
+            587.3
+          );
+          return (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="rounded-3xl border border-amber-500/40 bg-amber-500/10 p-4 shadow-card"
+            >
+              <div className="flex items-center justify-between">
+                <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-amber-400">
+                  Paused · Decision Pending
+                </span>
+                <Chip tone="warn">€{cardAmount.toFixed(2)} at Stake</Chip>
+              </div>
+              <div className="mt-2 text-[15px] font-semibold leading-snug text-ink">
+                Call Ended — Decide on Desktop or Tap to Call Back
+              </div>
+              <p className="mt-1 text-[12.5px] leading-relaxed text-ink-2">
+                {cardClaimId.startsWith("CLM-") ? `Claim ${cardClaimId}` : `Shipment ${cardClaimId}`} decision remains pending. AP hold on vendor invoice is still active.
+              </p>
+              <div className="mt-3">
+                <button
+                  type="button"
+                  onClick={click(() => onCallRecoupBack?.())}
+                  className={cx(btn("signal", "lg"), "h-12 w-full rounded-2xl text-[14px] font-semibold shadow-md")}
+                >
+                  <PhoneCall className="h-4 w-4" />
+                  📞 Call Recoup Back
+                </button>
+              </div>
+            </motion.div>
+          );
+        })()}
 
         {/* Tier-1 Push Notification Card: Voice Call Waiting */}
-        {!pausedCallDecision && r.pendingApproval && r.pendingApproval.channel === "voice_call" && (
-          <motion.div
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="rounded-3xl border border-signal/50 bg-signal/10 p-4 shadow-card"
-          >
-            <div className="flex items-center justify-between">
-              <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-signal">
-                Incoming Call Waiting · D-1042
-              </span>
-              <Chip tone="signal">€587.30 Discrepancy</Chip>
-            </div>
-            <div className="mt-2 text-[15px] font-semibold leading-snug text-ink">
-              Shipment D-1042 Decision — Live ERP &amp; Vendor Email Held
-            </div>
-            <p className="mt-1 text-[12.5px] leading-relaxed text-ink-2">
-              {r.pendingApproval.spoken_summary}
-            </p>
-            <div className="mt-3">
-              <button
-                type="button"
-                onClick={click(() => r.escalateToPhone(r.pendingApproval!.req_id))}
-                className={cx(btn("signal", "lg"), "h-12 w-full rounded-2xl text-[14px] font-semibold shadow-md")}
-              >
-                <PhoneCall className="h-4 w-4" />
-                Answer / Take Voice Call Now
-              </button>
-            </div>
-          </motion.div>
-        )}
+        {!pausedCallDecision && r.pendingApproval && r.pendingApproval.channel === "voice_call" && (() => {
+          const argRow = r.pendingApproval.args?.row as Record<string, unknown> | undefined;
+          const cardClaimId = (r.pendingApproval.args?.claim_id ?? argRow?.id ?? DEFAULT_CLAIM_ID) as string;
+          const cardAmount = (
+            (typeof r.pendingApproval.args?.claim_amount === "number" ? r.pendingApproval.args.claim_amount : null) ??
+            (typeof r.pendingApproval.args?.amount === "number" ? r.pendingApproval.args.amount : null) ??
+            (typeof argRow?.amount === "number" ? argRow.amount : null) ??
+            (typeof argRow?.total === "number" ? argRow.total : null) ??
+            587.3
+          );
+          return (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="rounded-3xl border border-signal/50 bg-signal/10 p-4 shadow-card"
+            >
+              <div className="flex items-center justify-between">
+                <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-signal">
+                  Incoming Call Waiting · {cardClaimId}
+                </span>
+                <Chip tone="signal">€{cardAmount.toFixed(2)} Discrepancy</Chip>
+              </div>
+              <div className="mt-2 text-[15px] font-semibold leading-snug text-ink">
+                {cardClaimId.startsWith("CLM-") ? `Claim ${cardClaimId}` : `Shipment ${cardClaimId}`} Decision — Live ERP &amp; Vendor Email Held
+              </div>
+              <p className="mt-1 text-[12.5px] leading-relaxed text-ink-2">
+                {r.pendingApproval.spoken_summary}
+              </p>
+              <div className="mt-3">
+                <button
+                  type="button"
+                  onClick={click(() => r.escalateToPhone(r.pendingApproval!.req_id))}
+                  className={cx(btn("signal", "lg"), "h-12 w-full rounded-2xl text-[14px] font-semibold shadow-md")}
+                >
+                  <PhoneCall className="h-4 w-4" />
+                  Answer / Take Voice Call Now
+                </button>
+              </div>
+            </motion.div>
+          );
+        })()}
 
         {/* Tier-1 Push Notification Card: Notification Approval */}
         {r.pendingApproval && r.pendingApproval.channel === "notification" && (

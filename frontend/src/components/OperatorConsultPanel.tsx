@@ -1,8 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
 import {
   CheckCircle2,
-  Hand,
-  MonitorCheck,
   PackageCheck,
   PhoneCall,
   PhoneIncoming,
@@ -25,8 +23,6 @@ interface ExtendedConsultState extends OperatorConsultState {
   connectedAt?: number | null;
   lastUiAction?: { action: string; label: string; ts: number } | null;
 }
-
-const COUNTDOWN_TOTAL_MS = 3000;
 
 export interface OperatorConsultPanelProps {
   brandName?: string;
@@ -107,18 +103,99 @@ export function OperatorConsultPanel({
   const transcriptRef = useRef<HTMLDivElement>(null);
   const escalatedReqIdRef = useRef<string | null>(null);
   const connectedMomentRef = useRef<number | null>(null);
-  const [hovered, setHovered] = useState(false);
-  const [stayAtDesk, setStayAtDesk] = useState(false);
-  const [remainingMs, setRemainingMs] = useState(COUNTDOWN_TOTAL_MS);
+  const [, setHovered] = useState(false);
+  const [isDialing, setIsDialing] = useState(false);
   const [timerTick, setTimerTick] = useState(0);
 
   const claimId = useMemo(() => {
     if (consult?.claimId) return consult.claimId;
     if (committedClaimId) return committedClaimId;
     const argRow = pendingApproval?.args?.row as Record<string, unknown> | undefined;
-    const rawId = pendingApproval?.args?.claim_id ?? argRow?.id;
-    return typeof rawId === "string" && rawId.trim() ? rawId : "CLM-D-1042";
+    const rawId =
+      pendingApproval?.args?.claim_id ??
+      pendingApproval?.args?.id ??
+      argRow?.id ??
+      argRow?.claim_id;
+    if (typeof rawId === "string" && rawId.trim()) return rawId.trim();
+
+    const searchCorpus = [
+      pendingApproval?.diff_preview,
+      pendingApproval?.risk_reason,
+      pendingApproval?.spoken_summary,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const match = searchCorpus.match(/CLM-[A-Z0-9-]+/i);
+    if (match) return match[0].toUpperCase();
+
+    return "CLM-D-1042";
   }, [committedClaimId, consult?.claimId, pendingApproval]);
+
+  const isKappa = useMemo(() => {
+    const searchCorpus = [
+      pendingApproval?.risk_reason,
+      pendingApproval?.diff_preview,
+      pendingApproval?.spoken_summary,
+      JSON.stringify(pendingApproval?.args || {}),
+      consult?.counterparty,
+      consult?.claimId,
+      claimId,
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    if (/atlas|orion|d-2010|inv-9901|3005/i.test(searchCorpus)) {
+      return false;
+    }
+    if (claimId && claimId !== "CLM-D-1042" && !/1042|kappa|7781/i.test(claimId)) {
+      return false;
+    }
+    if (claimId === "CLM-D-1042" || /kappa|sup-kappa|d-1042|inv-7781/i.test(searchCorpus)) {
+      return true;
+    }
+    return true;
+  }, [claimId, consult?.claimId, consult?.counterparty, pendingApproval]);
+
+  const claimAmount = useMemo(() => {
+    if (typeof consult?.claimAmount === "number" && consult.claimAmount > 0) {
+      return consult.claimAmount;
+    }
+    const argRow = pendingApproval?.args?.row as Record<string, unknown> | undefined;
+    const rawAmount =
+      pendingApproval?.args?.claim_amount ??
+      pendingApproval?.args?.amount ??
+      argRow?.amount ??
+      argRow?.claim_amount;
+    if (typeof rawAmount === "number" && !isNaN(rawAmount) && rawAmount > 0) {
+      return rawAmount;
+    }
+    if (typeof rawAmount === "string") {
+      const parsed = parseFloat(rawAmount.replace(/[^0-9.]/g, ""));
+      if (!isNaN(parsed) && parsed > 0) return parsed;
+    }
+
+    const searchCorpus = [
+      pendingApproval?.diff_preview,
+      pendingApproval?.risk_reason,
+      pendingApproval?.spoken_summary,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const match = searchCorpus.match(/(?:EUR|€)\s*([0-9]+(?:\.[0-9]+)?)/i);
+    if (match && match[1]) {
+      const parsed = parseFloat(match[1]);
+      if (!isNaN(parsed) && parsed > 0) return parsed;
+    }
+
+    return isKappa ? 587.3 : null;
+  }, [consult?.claimAmount, isKappa, pendingApproval]);
+
+  const formattedClaimAmount = useMemo(() => {
+    if (typeof claimAmount === "number" && !isNaN(claimAmount)) {
+      return `€${claimAmount.toFixed(2)}`;
+    }
+    return isKappa ? "€587.30" : "";
+  }, [claimAmount, isKappa]);
 
   const activeReqId = pendingApproval?.req_id ?? consult?.reqId ?? null;
 
@@ -169,6 +246,13 @@ export function OperatorConsultPanel({
 
   const callLive = isRinging || isConnected;
 
+  // Reset dialing state once call becomes live or pendingApproval changes
+  useEffect(() => {
+    if (callLive || !pendingApproval) {
+      setIsDialing(false);
+    }
+  }, [callLive, pendingApproval?.req_id]);
+
   const isExecutedLive = Boolean(
     (consult?.selectedChoice === "refund" || consult?.selectedChoice === "redelivery" || Boolean(committedClaimId)) &&
       (consult?.active || isConnected || isRinging)
@@ -186,23 +270,23 @@ export function OperatorConsultPanel({
   const isHighStakesApproval = Boolean(
     pendingApproval &&
       (pendingApproval.channel === "voice_call" ||
-        Number((pendingApproval.args?.row as Record<string, unknown> | undefined)?.amount ?? pendingApproval.args?.claim_amount ?? 587.3) >= 250 ||
-        /1042|d-1042|kappa/i.test(pendingApproval.risk_reason || pendingApproval.diff_preview || pendingApproval.spoken_summary || ""))
+        Number(
+          (pendingApproval.args?.row as Record<string, unknown> | undefined)?.amount ??
+            pendingApproval.args?.claim_amount ??
+            pendingApproval.args?.amount ??
+            claimAmount ??
+            587.3
+        ) >= 100 ||
+        Boolean(pendingApproval.risk_reason) ||
+        Boolean(pendingApproval.diff_preview) ||
+        /1042|d-1042|kappa|atlas|orion|clm/i.test(
+          pendingApproval.risk_reason || pendingApproval.diff_preview || pendingApproval.spoken_summary || ""
+        ))
   );
   const hasConsultActivity = Boolean(
     consult && (consult.active || consult.ringing || consult.turns.length > 0 || consult.end || consult.selectedChoice)
   );
-  const visible = Boolean(isHighStakesApproval || hasConsultActivity);
-
-  const countdownActive = Boolean(
-    pendingApproval &&
-      !callLive &&
-      !consult?.end &&
-      !consult?.selectedChoice &&
-      !callEndedWithoutDecision
-  );
-  const countdownPaused = hovered || stayAtDesk;
-  const secondsLeft = Math.max(0, Math.ceil(remainingMs / 1000));
+  const visible = Boolean(pendingApproval || isHighStakesApproval || hasConsultActivity);
 
   // Live timer for connected call duration (MM:SS)
   useEffect(() => {
@@ -230,35 +314,6 @@ export function OperatorConsultPanel({
     const s = String(elapsedSec % 60).padStart(2, "0");
     return `${m}:${s}`;
   }, [timerTick]);
-
-  // Reset 3-second countdown whenever a fresh approval request arrives
-  useEffect(() => {
-    if (!pendingApproval?.req_id) return;
-    setRemainingMs(COUNTDOWN_TOTAL_MS);
-    setStayAtDesk(false);
-  }, [pendingApproval?.req_id]);
-
-  // Tick countdown when operator hasn't hovered or locked desktop mode
-  useEffect(() => {
-    if (!countdownActive || countdownPaused || !pendingApproval) return;
-    const reqId = pendingApproval.req_id;
-    if (escalatedReqIdRef.current === reqId) return;
-
-    const timer = window.setInterval(() => {
-      setRemainingMs((prev) => Math.max(0, prev - 100));
-    }, 100);
-    return () => window.clearInterval(timer);
-  }, [countdownActive, countdownPaused, pendingApproval]);
-
-  // Fire phone escalation once when countdown hits 0s
-  useEffect(() => {
-    if (!countdownActive || countdownPaused || !pendingApproval) return;
-    if (remainingMs > 0) return;
-    const reqId = pendingApproval.req_id;
-    if (escalatedReqIdRef.current === reqId) return;
-    escalatedReqIdRef.current = reqId;
-    onEscalateToPhone(reqId, claimId);
-  }, [claimId, countdownActive, countdownPaused, onEscalateToPhone, pendingApproval, remainingMs]);
 
   const sanitizedTurns = useMemo(() => {
     if (!consult?.turns) return [];
@@ -413,7 +468,7 @@ export function OperatorConsultPanel({
             </div>
           )}
 
-          {/* 1. 1-Line Live Call Banner */}
+          {/* 1. Live Call Banner OR Prominent Transfer to iPhone Bar */}
           {isExecutedLive ? (
             <div className="flex h-7 items-center justify-between rounded-lg border border-ok/70 bg-ok/15 px-2.5 text-[11.5px] shadow-[0_0_12px_rgba(16,185,129,0.25)]">
               <div className="flex min-w-0 items-center gap-1.5 font-bold text-ok">
@@ -421,9 +476,13 @@ export function OperatorConsultPanel({
                 <span className="truncate">
                   ✓ EXECUTED LIVE VIA IPHONE VOICE · UNDO READY:{" "}
                   <span className="font-semibold text-ink">
-                    {resolvedChoice === "redelivery"
-                      ? "22 Replacement Hubs + €202.30 Credit + AADE 9.3"
-                      : "€587.30 Refund + AADE 5.1 + Kappa Emailed"}
+                    {isKappa
+                      ? resolvedChoice === "redelivery"
+                        ? "22 Replacement Hubs + €202.30 Credit + AADE 9.3"
+                        : "€587.30 Refund + AADE 5.1 + Kappa Emailed"
+                      : resolvedChoice === "redelivery"
+                      ? `Hold / Replacement · ${claimId}`
+                      : `Enforce ${formattedClaimAmount || "Claim"} · ${claimId}`}
                   </span>
                 </span>
               </div>
@@ -441,15 +500,17 @@ export function OperatorConsultPanel({
               <div className="flex shrink-0 items-center gap-1">
                 <button
                   type="button"
+                  disabled={isDialing}
                   onClick={() => {
                     soundFx.playUiClick();
+                    setIsDialing(true);
                     if (pendingApproval?.req_id) escalatedReqIdRef.current = pendingApproval.req_id;
                     onEscalateToPhone(activeReqId, claimId);
                   }}
                   className={cx(btn("signal", "sm"), "h-5 px-2 text-[10px] font-semibold")}
                 >
                   <PhoneCall className="h-2.5 w-2.5" />
-                  Call Again
+                  {isDialing ? "Calling…" : "Call Again"}
                 </button>
               </div>
             </div>
@@ -479,58 +540,77 @@ export function OperatorConsultPanel({
                 <span className="truncate">Resolution Committed · Claim {claimId}</span>
               </div>
               <span className="shrink-0 font-mono text-[10px] text-ok">
-                {resolvedChoice === "redelivery" ? "AADE 9.3" : "AADE 5.1"}
+                {isKappa ? (resolvedChoice === "redelivery" ? "AADE 9.3" : "AADE 5.1") : "ERP SYNCED"}
               </span>
             </div>
           ) : (
-            <div className="flex h-7 items-center justify-between rounded-lg border border-warn/35 bg-warn/[0.08] px-2.5 text-[11.5px]">
-              <div className="flex min-w-0 items-center gap-1.5 font-medium text-ink">
-                <Smartphone className="h-3.5 w-3.5 shrink-0 text-signal" />
-                <span className="truncate">
-                  {countdownActive && !countdownPaused
-                    ? `Calling Your iPhone in ${secondsLeft}s…`
-                    : "Ready to Call Your iPhone"}
-                </span>
-              </div>
-              <div className="flex shrink-0 items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => {
-                    soundFx.playUiClick();
-                    setStayAtDesk((v) => !v);
-                  }}
-                  className={cx(btn(stayAtDesk ? "ok" : "outline", "sm"), "h-5 px-1.5 text-[10px]")}
-                >
-                  {stayAtDesk ? <MonitorCheck className="h-2.5 w-2.5" /> : <Hand className="h-2.5 w-2.5" />}
-                  {stayAtDesk ? "At Desk" : "Stay"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    soundFx.playUiClick();
-                    if (pendingApproval?.req_id) escalatedReqIdRef.current = pendingApproval.req_id;
-                    onEscalateToPhone(activeReqId, claimId);
-                  }}
-                  className={cx(btn("signal", "sm"), "h-5 px-2 text-[10px] font-semibold")}
-                >
+            /* Prominent "📲 Call / Transfer to My iPhone" Action Bar on Desktop Decision Gate */
+            <div className="rounded-xl border border-cyan-500/40 bg-gradient-to-r from-cyan-950/40 via-emerald-950/25 to-cyan-950/40 p-1.5 shadow-[0_0_16px_rgba(6,182,212,0.12)] ring-1 ring-cyan-500/20">
+              <button
+                type="button"
+                disabled={isDialing}
+                onClick={() => {
+                  soundFx.playUiClick();
+                  setIsDialing(true);
+                  if (pendingApproval?.req_id) escalatedReqIdRef.current = pendingApproval.req_id;
+                  onEscalateToPhone(activeReqId, claimId);
+                }}
+                className="group flex w-full items-center justify-between rounded-lg border border-cyan-400/45 bg-cyan-500/15 px-2.5 py-1.5 text-left transition-all hover:border-cyan-300 hover:bg-cyan-500/25 hover:shadow-[0_0_12px_rgba(6,182,212,0.3)] disabled:opacity-60"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-cyan-500/25 text-cyan-300 ring-1 ring-cyan-400/40 transition-transform group-hover:scale-105">
+                    <Smartphone className="h-4 w-4 animate-pulse text-cyan-300" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 text-[11.5px] font-bold text-cyan-200">
+                      <span>📲 Call / Transfer to My iPhone</span>
+                      {isDialing && (
+                        <span className="font-mono text-[9px] font-semibold text-cyan-400 animate-pulse">
+                          (Dialing…)
+                        </span>
+                      )}
+                    </div>
+                    <p className="truncate text-[9.5px] text-cyan-300/80">
+                      Stepping away? Continue via live Grok Voice on /mobile
+                    </p>
+                  </div>
+                </div>
+                <div className="ml-1.5 flex shrink-0 items-center gap-1 rounded bg-cyan-400/20 px-1.5 py-0.5 font-mono text-[9.5px] font-semibold text-cyan-300 ring-1 ring-cyan-400/30">
                   <PhoneCall className="h-2.5 w-2.5" />
-                  Call Now
-                </button>
-              </div>
+                  <span>{isDialing ? "Connecting…" : "Transfer"}</span>
+                </div>
+              </button>
             </div>
           )}
 
-          {/* 2. Plain-English 2-Line Summary */}
-          <div className="rounded-lg border border-line bg-sunken/40 px-3 py-1.5 text-[11.5px] leading-snug text-ink">
-            <span className="font-semibold text-danger">22 hubs arrived missing/broken</span> &amp; Invoice #7781 is overbilled.{" "}
-            <span className="font-semibold text-ok">Kappa owes €587.30.</span>
-          </div>
+          {/* 2. Plain-English Scenario Summary (Dynamic: Kappa vs Custom/Atlas/Orion) */}
+          {isKappa ? (
+            <div className="rounded-lg border border-line bg-sunken/40 px-3 py-1.5 text-[11.5px] leading-snug text-ink">
+              <span className="font-semibold text-danger">22 hubs arrived missing/broken</span> &amp; Invoice #7781 is overbilled.{" "}
+              <span className="font-semibold text-ok">Kappa owes €587.30.</span>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-line bg-sunken/40 px-3 py-1.5 text-[11.5px] leading-snug text-ink">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-mono text-[10.5px] font-bold text-signal">{claimId}</span>
+                {formattedClaimAmount && (
+                  <span className="font-mono text-[11px] font-bold text-ok">{formattedClaimAmount}</span>
+                )}
+              </div>
+              <p className="mt-0.5 line-clamp-2 text-ink-2">
+                {pendingApproval?.risk_reason ||
+                  pendingApproval?.spoken_summary ||
+                  pendingApproval?.diff_preview ||
+                  `High-stakes audit discrepancy detected for claim ${claimId}. Operator verification required.`}
+              </p>
+            </div>
+          )}
 
           {/* 3. 2 Big Clear Choice Buttons Side-by-Side (whenever unresolved) */}
           {(!callCompleted && !isExecutedLive) && (
             <div className="space-y-1">
               <div className="grid grid-cols-2 gap-2">
-                {/* Button 1: ✅ Refund €587.30 */}
+                {/* Button 1: Refund / Enforce */}
                 <button
                   type="button"
                   disabled={callLive && Boolean(consult?.selectedChoice)}
@@ -547,14 +627,16 @@ export function OperatorConsultPanel({
                       : "border-ok/45 bg-ok/[0.08] text-ink hover:border-ok hover:bg-ok/15"
                   )}
                 >
-                  <div className="flex items-center gap-1.5 text-[12.5px] font-bold text-ok">
+                  <div className="flex items-center gap-1.5 text-[12px] font-bold text-ok">
                     <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                    <span>Refund €587.30</span>
+                    <span>{isKappa ? "Refund €587.30" : formattedClaimAmount ? `Enforce ${formattedClaimAmount}` : "Enforce Claim"}</span>
                   </div>
-                  <span className="font-mono text-[9.5px] text-ink-2">Freeze invoice + AADE tax credit</span>
+                  <span className="font-mono text-[9px] text-ink-2">
+                    {isKappa ? "Freeze invoice + AADE tax credit" : "Approve recovery & ERP mutation"}
+                  </span>
                 </button>
 
-                {/* Button 2: 📦 Replace 22 Units */}
+                {/* Button 2: Replace / Hold */}
                 <button
                   type="button"
                   disabled={callLive && Boolean(consult?.selectedChoice)}
@@ -571,11 +653,13 @@ export function OperatorConsultPanel({
                       : "border-line bg-sunken/60 text-ink hover:border-signal/50 hover:bg-surface"
                   )}
                 >
-                  <div className="flex items-center gap-1.5 text-[12.5px] font-bold text-ink">
+                  <div className="flex items-center gap-1.5 text-[12px] font-bold text-ink">
                     <PackageCheck className="h-3.5 w-3.5 shrink-0 text-signal" />
-                    <span>Replace 22 Units</span>
+                    <span>{isKappa ? "Replace 22 Units" : "Hold / Reject Claim"}</span>
                   </div>
-                  <span className="font-mono text-[9.5px] text-ink-2">Free delivery tomorrow + €202.30</span>
+                  <span className="font-mono text-[9px] text-ink-2">
+                    {isKappa ? "Free delivery tomorrow + €202.30" : "Pause execution for operator audit"}
+                  </span>
                 </button>
               </div>
 

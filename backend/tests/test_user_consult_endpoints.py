@@ -998,6 +998,183 @@ def test_away_from_desk_multiturn_options_commit_and_goodbye(isolated_consult_se
     assert ends[-1].payload["outcome"] == "accepted"
 
 
+def test_user_consult_dynamic_non_kappa_scenario(isolated_consult_server):
+    """Verify non-Kappa staged scenario (Atlas Paper) uses dynamic context without falling back to Kappa defaults."""
+    client, ws, real, _ = isolated_consult_server
+
+    req_id = "req_atlas_3005"
+    fut = asyncio.new_event_loop().create_future()
+    PENDING[req_id] = fut
+
+    # Stage Atlas claim payload in PENDING_PAYLOADS
+    gate_payload = {
+        "req_id": req_id,
+        "tool_name": "send_email",
+        "args": {
+            "to": "accounts@atlaspaper.example",
+            "subject": "Credit Claim CLM-3005 on Invoice INV-9901: EUR 500.00 (AADE myDATA 5.1)",
+            "body": "Discrepancy of EUR 500.00 on delivery D-3005",
+        },
+        "diff_preview": "EMAIL to=accounts@atlaspaper.example subject='Credit Claim CLM-3005 on Invoice INV-9901'",
+        "risk_reason": "Claim CLM-3005 is EUR 500.00 (>= EUR 250 threshold) on INV-9901",
+        "spoken_summary": "",
+        "report": {
+            "external_outbox": [
+                {
+                    "to": "accounts@atlaspaper.example",
+                    "subject": "Credit Claim CLM-3005 on Invoice INV-9901: EUR 500.00",
+                    "body": "Claim CLM-3005 for EUR 500.00 on delivery D-3005",
+                }
+            ]
+        },
+    }
+    PENDING_PAYLOADS[req_id] = gate_payload
+
+    # Emit staged claim tool call in BUS history
+    BUS.emit(
+        "run_atlas_1",
+        EventType.TOOL_CALL,
+        {
+            "call": {
+                "id": "call_upsert_clm_3005",
+                "name": "upsert_row",
+                "args": {
+                    "table": "claims",
+                    "pk_col": "id",
+                    "row": {
+                        "id": "CLM-3005",
+                        "supplier_id": "SUP-ATLAS",
+                        "delivery_id": "D-3005",
+                        "invoice_id": "INV-9901",
+                        "amount": 500.0,
+                        "reason": "damaged paper rolls and pricing discrepancy",
+                        "status": "drafted",
+                    },
+                },
+            }
+        },
+    )
+
+    # 1. POST /api/call/user-consult produces dynamic Atlas opening
+    c_resp = client.post("/api/call/user-consult", json={"req_id": req_id})
+    assert c_resp.status_code == 200
+    data = c_resp.json()
+    assert data["ok"] is True
+    assert data["claim_id"] == "CLM-3005"
+    assert data["claim_amount"] == pytest.approx(500.0)
+    assert "Atlas" in data["opening_text"]
+    assert "D-3005" in data["opening_text"]
+    assert "500 euro" in data["opening_text"]
+    assert "INV-9901" in data["opening_text"]
+    assert "Kappa" not in data["opening_text"]
+    assert "587.30" not in data["opening_text"]
+    assert "587" not in data["opening_text"]
+    assert "22" not in data["opening_text"]
+
+    # 2. Options and breakdown Q&A return Atlas details with zero Kappa
+    opt_resp = client.post(
+        "/api/call/user-respond",
+        json={"transcript": "What are my options?", "req_id": req_id, "claim_id": "CLM-3005"},
+    )
+    assert opt_resp.status_code == 200
+    opt_body = opt_resp.json()
+    assert "500" in opt_body["reply_text"]
+    assert "INV-9901" in opt_body["reply_text"]
+    assert "Atlas" in opt_body["reply_text"]
+    assert "Kappa" not in opt_body["reply_text"]
+    assert "587" not in opt_body["reply_text"]
+    assert "22" not in opt_body["reply_text"]
+
+    why_resp = client.post(
+        "/api/call/user-respond",
+        json={"transcript": "Why do they owe 500?", "req_id": req_id, "claim_id": "CLM-3005"},
+    )
+    assert why_resp.status_code == 200
+    why_body = why_resp.json()
+    assert "500" in why_body["reply_text"]
+    assert "INV-9901" in why_body["reply_text"]
+    assert "D-3005" in why_body["reply_text"]
+    assert "Kappa" not in why_body["reply_text"]
+    assert "587" not in why_body["reply_text"]
+    assert "22" not in why_body["reply_text"]
+
+    # 3. Approving commits via _resolve_gate, writes AADE XML, updates DB, does not overwrite with Kappa
+    commit_resp = client.post(
+        "/api/call/user-respond",
+        json={"transcript": "yes approve, enforce the claim right now", "req_id": req_id, "claim_id": "CLM-3005"},
+    )
+    assert commit_resp.status_code == 200
+    commit_body = commit_resp.json()
+    assert commit_body["ok"] is True
+    assert commit_body["choice"] == "refund"
+    assert commit_body["agreed_amount"] == pytest.approx(500.0)
+    assert commit_body["aade_xml_path"] == "aade/mydata_CLM-3005.xml"
+    assert fut.done() and fut.result() is True
+    assert req_id not in PENDING
+
+    confirm_text = commit_body.get("confirmation_text") or commit_body.get("reply_text") or ""
+    assert "On it—freezing invoice INV-9901, filing the 500 euro AADE tax credit, and emailing Atlas Paper right now! All done. Need anything else?" == confirm_text
+
+    # Verify AADE XML file
+    xml_file = ws / "aade" / "mydata_CLM-3005.xml"
+    assert xml_file.exists()
+    xml_text = xml_file.read_text(encoding="utf-8")
+    root = ET.fromstring(xml_text)
+    assert root.tag == "{http://www.aade.gr/myDATA/invoice/v1.0}InvoicesDoc"
+    assert "<invoiceType>5.1</invoiceType>" in xml_text
+    assert "<netValue>500.00</netValue>" in xml_text
+    assert "<totalGrossValue>620.00</totalGrossValue>" in xml_text
+    assert "<correlatedInvoices>INV-9901</correlatedInvoices>" in xml_text
+    assert "<deliveryRef>D-3005</deliveryRef>" in xml_text
+    assert "Kappa" not in xml_text
+
+    # Verify SQLite DB
+    with contextlib.closing(sqlite3.connect(real.db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        clm_row = conn.execute("SELECT * FROM claims WHERE id = 'CLM-3005'").fetchone()
+        assert clm_row is not None
+        assert clm_row["supplier_id"] == "SUP-ATLAS"
+        assert clm_row["amount"] == pytest.approx(500.0)
+        assert clm_row["status"] == "settled"
+
+        inv_row = conn.execute("SELECT * FROM invoices WHERE id = 'INV-9901'").fetchone()
+        assert inv_row is not None
+        assert inv_row["status"] == "held"
+
+
+def test_user_respond_dynamic_non_kappa_hold_off(isolated_consult_server):
+    """Verify non-Kappa rejection/hold off safely pauses without mentioning Kappa."""
+    client, _, _, _ = isolated_consult_server
+
+    req_id = "req_atlas_hold"
+    fut = asyncio.new_event_loop().create_future()
+    PENDING[req_id] = fut
+
+    PENDING_PAYLOADS[req_id] = {
+        "req_id": req_id,
+        "tool_name": "send_email",
+        "args": {
+            "to": "accounts@atlaspaper.example",
+            "subject": "Credit Claim CLM-3005 on Invoice INV-9901: EUR 500.00",
+            "body": "Discrepancy on D-3005",
+        },
+    }
+
+    c_resp = client.post("/api/call/user-consult", json={"req_id": req_id, "claim_id": "CLM-3005"})
+    assert c_resp.status_code == 200
+
+    resp = client.post(
+        "/api/call/user-respond",
+        json={"transcript": "hold off for now, do not proceed", "req_id": req_id, "claim_id": "CLM-3005", "choice": "escalated"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["keep_call_open"] is False
+    assert "Kappa" not in body["reply_text"]
+
+
+
 
 
 
