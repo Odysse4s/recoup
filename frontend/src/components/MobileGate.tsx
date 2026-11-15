@@ -180,7 +180,12 @@ function deriveConsultFromEvents(events: ServerEvent[], speaking: boolean): Oper
     const ev = events[i];
     if (ev.type === "call_start") {
       const p = ev.payload as unknown as CallStartPayload;
+      if (p.channel === "desktop_voice") {
+        continue;
+      }
       if (
+        p.channel === "voice_call" ||
+        p.channel === "iphone_transferred" ||
         p.mode === "user_consult" ||
         (typeof p.call_id === "string" && /consult|user|mobile/i.test(p.call_id))
       ) {
@@ -201,6 +206,9 @@ function deriveConsultFromEvents(events: ServerEvent[], speaking: boolean): Oper
     const ev = events[i];
     if (ev.type === "call_turn") {
       const t = ev.payload as unknown as CallTurnPayload;
+      if (t.channel === "desktop_voice") {
+        continue;
+      }
       if (!t.call_id || t.call_id === callId) {
         turns.push({
           speaker: t.speaker,
@@ -232,6 +240,7 @@ function deriveConsultFromEvents(events: ServerEvent[], speaking: boolean): Oper
     active: !endPayload,
     ringing: turns.length === 0 && !endPayload,
     mode: "user_consult",
+    channel: (startPayload.channel as "notification" | "voice_call" | "desktop_voice" | "iphone_transferred") ?? "voice_call",
     callId,
     reqId: startPayload.req_id ?? null,
     claimId: startPayload.claim_id || DEFAULT_CLAIM_ID,
@@ -1798,19 +1807,23 @@ function GateHome({
   theme,
   audioUnlocked,
   pausedCallDecision,
+  isPhoneCallActive,
   onUnlockAudio,
   onToggleTheme,
   onExit,
   onCallRecoupBack,
+  onPullCallToPhone,
 }: {
   r: RecoupRuntime;
   theme: Theme;
   audioUnlocked: boolean;
   pausedCallDecision?: boolean;
+  isPhoneCallActive?: boolean;
   onUnlockAudio: () => void;
   onToggleTheme: () => void;
   onExit: () => void;
   onCallRecoupBack?: () => void;
+  onPullCallToPhone?: () => void;
 }) {
   const recent = r.events.slice(-4).reverse();
   const click = (fn: () => void) => () => {
@@ -1893,8 +1906,8 @@ function GateHome({
           );
         })()}
 
-        {/* Tier-1 Push Notification Card: Voice Call Waiting */}
-        {!pausedCallDecision && r.pendingApproval && r.pendingApproval.channel === "voice_call" && (() => {
+        {/* Tier-1 Decision Gate Standby Card: Active on Desktop, Tap to Pull to iPhone */}
+        {!pausedCallDecision && r.pendingApproval && !isPhoneCallActive && r.pendingApproval.channel !== "notification" && (() => {
           const argRow = r.pendingApproval.args?.row as Record<string, unknown> | undefined;
           const cardClaimId = (r.pendingApproval.args?.claim_id ?? argRow?.id ?? DEFAULT_CLAIM_ID) as string;
           const cardAmount = (
@@ -1904,32 +1917,50 @@ function GateHome({
             (typeof argRow?.total === "number" ? argRow.total : null) ??
             587.3
           );
+          const isDesktopVoice = r.operatorConsult?.channel === "desktop_voice";
           return (
             <motion.div
               initial={{ opacity: 0, y: -8 }}
               animate={{ opacity: 1, y: 0 }}
-              className="rounded-3xl border border-signal/50 bg-signal/10 p-4 shadow-card"
+              className="rounded-3xl border border-line bg-surface p-4 shadow-card"
             >
               <div className="flex items-center justify-between">
-                <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-signal">
-                  Incoming Call Waiting · {cardClaimId}
+                <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-ink-2">
+                  Standby · Desktop Gate Active
                 </span>
-                <Chip tone="signal">€{cardAmount.toFixed(2)} Discrepancy</Chip>
+                <Chip tone={isDesktopVoice ? "signal" : "neutral"}>
+                  {isDesktopVoice ? "Live Desktop Voice" : `€${cardAmount.toFixed(2)} Discrepancy`}
+                </Chip>
               </div>
               <div className="mt-2 text-[15px] font-semibold leading-snug text-ink">
-                {cardClaimId.startsWith("CLM-") ? `Claim ${cardClaimId}` : `Shipment ${cardClaimId}`} Decision — Live ERP &amp; Vendor Email Held
+                Decision Gate Active on Desktop · Tap to Pull Call to iPhone (or click Transfer on Laptop)
               </div>
               <p className="mt-1 text-[12.5px] leading-relaxed text-ink-2">
-                {r.pendingApproval.spoken_summary}
+                {r.pendingApproval.spoken_summary ||
+                  `${cardClaimId.startsWith("CLM-") ? `Claim ${cardClaimId}` : `Shipment ${cardClaimId}`} decision pending (€${cardAmount.toFixed(2)} discrepancy). ERP hold active.`}
+                {isDesktopVoice && (
+                  <span className="mt-1 block font-medium text-signal">
+                    Live voice consult currently active on Laptop
+                  </span>
+                )}
               </p>
               <div className="mt-3">
                 <button
                   type="button"
-                  onClick={click(() => r.escalateToPhone(r.pendingApproval!.req_id))}
+                  onClick={click(() => {
+                    unlockAudioSession("play-and-record");
+                    if (onPullCallToPhone) {
+                      onPullCallToPhone();
+                    } else if (r.escalateToPhone && r.pendingApproval) {
+                      r.escalateToPhone(r.pendingApproval.req_id);
+                    } else if (onCallRecoupBack) {
+                      onCallRecoupBack();
+                    }
+                  })}
                   className={cx(btn("signal", "lg"), "h-12 w-full rounded-2xl text-[14px] font-semibold shadow-md")}
                 >
                   <PhoneCall className="h-4 w-4" />
-                  Answer / Take Voice Call Now
+                  📲 Answer / Pull Call to iPhone
                 </button>
               </div>
             </motion.div>
@@ -2179,11 +2210,13 @@ export function MobileGate({
   );
   const consult = runtimeConsult ?? fallbackConsult;
 
+  const isPhoneChannel = consult?.channel === "voice_call" || consult?.channel === "iphone_transferred";
+
   useEffect(() => {
-    if (consult?.active || consult?.ringing) {
+    if ((consult?.active || consult?.ringing) && isPhoneChannel) {
       setActiveCallId(consult.callId || "session-d-1042");
     }
-  }, [consult?.active, consult?.callId, consult?.ringing]);
+  }, [consult?.active, consult?.callId, consult?.ringing, isPhoneChannel]);
 
   useEffect(() => {
     if (r.events.length === 0) {
@@ -2225,6 +2258,7 @@ export function MobileGate({
         body: JSON.stringify({
           req_id: r.pendingApproval?.req_id,
           claim_id: DEFAULT_CLAIM_ID,
+          channel: "voice_call",
         }),
       });
     } catch {
@@ -2233,17 +2267,55 @@ export function MobileGate({
     setActiveCallId(`CONSULT-${DEFAULT_CLAIM_ID}`);
   }, [r.pendingApproval?.req_id]);
 
-  // Keep live call UI rendering as long as operatorConsult is active or local call is active,
-  // even after pendingApproval becomes null upon stage commit!
-  const isCallActive = Boolean(
-    (consult?.active || consult?.ringing || (activeCallId && !consult?.end)) &&
+  const handlePullCallToPhone = useCallback(async () => {
+    soundFx.playUiClick();
+    buzz([40, 60]);
+    setPausedCallDecision(false);
+    setDismissedCallKey(null);
+    unlockAudioSession("play-and-record");
+    const reqId = r.pendingApproval?.req_id;
+    const callId = consult?.callId || `CONSULT-${DEFAULT_CLAIM_ID}`;
+    setActiveCallId(callId);
+    if (r.escalateToPhone) {
+      await r.escalateToPhone(reqId);
+    } else {
+      try {
+        await fetch("/api/call/user-consult", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            req_id: reqId,
+            claim_id: DEFAULT_CLAIM_ID,
+            channel: "iphone_transferred",
+          }),
+        });
+      } catch {
+        // offline
+      }
+    }
+  }, [r, consult?.callId]);
+
+  // Phone (MobileGate.tsx) MUST ONLY enter showEscalationScreen when:
+  // 1. (consult?.active || consult?.ringing) is true AND isPhoneChannel (consult?.channel === "voice_call" || consult?.channel === "iphone_transferred")
+  // 2. The user explicitly tapped the manual pull-call button on /mobile (activeCallId set by manual user tap)
+  // 3. localCompletion is set or (consult?.end && isPhoneChannel && dismissedCallKey !== currentSessionKey)
+  // Do NOT set activeCallId or isPhoneCallActive or showEscalationScreen if consult?.channel === "desktop_voice"!
+  const isPhoneCallActive = Boolean(
+    consult?.channel !== "desktop_voice" &&
+    (
+      ((consult?.active || consult?.ringing) && isPhoneChannel) ||
+      (Boolean(activeCallId) && !consult?.end)
+    ) &&
     dismissedCallKey !== currentSessionKey
   );
 
   const showEscalationScreen = Boolean(
-    isCallActive ||
-      localCompletion ||
-      (consult?.end && dismissedCallKey !== currentSessionKey)
+    consult?.channel !== "desktop_voice" &&
+    (
+      isPhoneCallActive ||
+      Boolean(localCompletion) ||
+      Boolean(consult?.end && isPhoneChannel && dismissedCallKey !== currentSessionKey)
+    )
   );
 
   const screen = (
@@ -2253,10 +2325,12 @@ export function MobileGate({
         theme={theme}
         audioUnlocked={audioUnlocked}
         pausedCallDecision={pausedCallDecision}
+        isPhoneCallActive={isPhoneCallActive}
         onUnlockAudio={unlockAudio}
         onToggleTheme={onToggleTheme}
         onExit={onExit}
         onCallRecoupBack={handleCallRecoupBack}
+        onPullCallToPhone={handlePullCallToPhone}
       />
       <AnimatePresence>
         {showEscalationScreen && (

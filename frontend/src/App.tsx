@@ -1,4 +1,3 @@
-import { AnimatePresence } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 import { CommandBar } from "./components/CommandBar";
 import { ForgeVault, PlanPanel } from "./components/LeftRail";
@@ -6,7 +5,7 @@ import { LiveWindowLayer } from "./components/LiveWindows";
 import { MobileGate } from "./components/MobileGate";
 import { PipelineRibbon } from "./components/PipelineRibbon";
 import { RewindOverlay } from "./components/RewindOverlay";
-import { AnticipateCard, CostMonitor, DiffStack, RiskGateCard, StatsStrip } from "./components/RightRail";
+import { AnticipateCard, CostMonitor, DiffStack, StatsStrip } from "./components/RightRail";
 import { Telemetry } from "./components/Telemetry";
 import { TopBar } from "./components/TopBar";
 import { OperatorConsultPanel } from "./components/OperatorConsultPanel";
@@ -92,12 +91,7 @@ export default function App() {
   const latestClaim = claimsRows[claimsRows.length - 1];
   const committedClaimId =
     r.runStatus === "committed" || claimsRows.length > 0 ? String(latestClaim?.id ?? "CLM-D-1042") : null;
-  const isHighStakesConsult = Boolean(
-    r.pendingApproval &&
-      (r.pendingApproval.channel === "voice_call" ||
-        Number((r.pendingApproval.args?.row as Record<string, unknown> | undefined)?.amount ?? r.pendingApproval.args?.claim_amount ?? 587.3) >= 250 ||
-        /1042|d-1042|kappa/i.test(r.pendingApproval.risk_reason || r.pendingApproval.diff_preview || r.pendingApproval.spoken_summary || ""))
-  );
+  const desktopVoiceTurnHandler = r.sendDesktopVoiceTurn;
 
   return (
     <div className="recoup-canvas flex min-h-screen flex-col text-ink lg:h-screen lg:overflow-hidden">
@@ -112,6 +106,7 @@ export default function App() {
           brandName={brand_name}
           pendingApproval={r.pendingApproval}
           onApprove={r.decide}
+          onDesktopVoiceTurn={desktopVoiceTurnHandler}
           speaking={r.speaking}
           spokenText={r.spokenText}
           speechProgress={r.speechProgress}
@@ -152,11 +147,6 @@ export default function App() {
 
         {/* Center Column (col-span-5) */}
         <div className="min-h-0 flex flex-col gap-3 lg:col-span-5 lg:overflow-hidden">
-          <AnimatePresence initial={false}>
-            {r.pendingApproval && !isHighStakesConsult && !r.operatorConsult && (
-              <RiskGateCard key={r.pendingApproval.req_id} approval={r.pendingApproval} onDecide={r.decide} />
-            )}
-          </AnimatePresence>
           <div className="min-h-0 flex-1 flex flex-col [&>div]:h-full [&>div]:min-h-0 [&>div]:flex-1">
             <WorkspaceDeck r={r} />
           </div>
@@ -172,6 +162,7 @@ export default function App() {
             committedClaimId={committedClaimId}
             voiceOn={r.voiceOn}
             speaking={r.speaking}
+            onDesktopVoiceTurn={desktopVoiceTurnHandler}
             onEscalateToPhone={r.escalateToPhone}
             onSelectResolution={r.respondOperatorConsult}
             onReject={(reqId) => r.decide(reqId, false)}

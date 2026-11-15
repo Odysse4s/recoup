@@ -47,7 +47,7 @@ export interface WorkspaceState {
     call_status?: "ringing" | "connected" | "ended";
     connected_at?: number | null;
     mode: "user_consult";
-    channel?: "notification" | "voice_call";
+    channel?: "notification" | "voice_call" | "desktop_voice" | "iphone_transferred";
     call_id: string;
     req_id: string | null;
     claim_id: string;
@@ -154,7 +154,7 @@ export interface OperatorConsultState {
   callStatus?: "ringing" | "connected" | "ended";
   connectedAt?: number | null;
   mode: "user_consult" | "vendor";
-  channel?: "notification" | "voice_call";
+  channel?: "notification" | "voice_call" | "desktop_voice" | "iphone_transferred";
   callId: string;
   reqId: string | null;
   claimId: string;

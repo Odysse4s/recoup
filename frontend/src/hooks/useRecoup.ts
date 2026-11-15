@@ -184,7 +184,10 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
 
   const deferredApprovalRef = useRef<ApprovalNeededPayload | null>(null);
   const phoneCallActiveRef = useRef(false);
+  const phoneTransferredRef = useRef(false);
   const phoneCooldownTimerRef = useRef<number | null>(null);
+  const lastAgentTurnSpokenAtRef = useRef<number>(0);
+  const lastSpokenTurnKeyRef = useRef<string | null>(null);
 
   const markPhoneCallActive = useCallback(() => {
     if (phoneCooldownTimerRef.current !== null) {
@@ -192,6 +195,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       phoneCooldownTimerRef.current = null;
     }
     phoneCallActiveRef.current = true;
+    phoneTransferredRef.current = true;
     if (windowsEnabledRef.current) {
       stopSpeaking();
       setSpeaking(false);
@@ -204,18 +208,22 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     }
     phoneCooldownTimerRef.current = window.setTimeout(() => {
       phoneCallActiveRef.current = false;
+      phoneTransferredRef.current = false;
       phoneCooldownTimerRef.current = null;
     }, 8000);
   }, []);
 
   useEffect(() => {
+    const isPhoneChannel =
+      operatorConsult?.channel === "voice_call" ||
+      operatorConsult?.channel === "iphone_transferred";
     const isConsultActive = Boolean(operatorConsult?.active || operatorConsult?.ringing);
-    if (isConsultActive) {
+    if (isConsultActive && isPhoneChannel) {
       markPhoneCallActive();
-    } else if (operatorConsult?.end) {
+    } else if (operatorConsult?.end && (phoneCallActiveRef.current || isPhoneChannel)) {
       markPhoneCallEnded();
     }
-  }, [operatorConsult?.active, operatorConsult?.ringing, operatorConsult?.end, markPhoneCallActive, markPhoneCallEnded]);
+  }, [operatorConsult?.active, operatorConsult?.ringing, operatorConsult?.channel, operatorConsult?.end, markPhoneCallActive, markPhoneCallEnded]);
 
   useEffect(() => {
     liveCountRef.current = windows.filter((w) => !w.pinned && !w.manual).length;
@@ -365,6 +373,10 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         // Hydrate active call
         if (data.active_call) {
           const ac = data.active_call;
+          const isPhoneChannel = ac.channel === "voice_call" || ac.channel === "iphone_transferred";
+          if (isPhoneChannel) {
+            markPhoneCallActive();
+          }
           const mappedTurns: OperatorConsultTurn[] = (ac.turns ?? []).map((t) => ({
             speaker: t.speaker,
             text: t.text,
@@ -374,18 +386,13 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           }));
           const isConnected = ac.call_status === "connected" || (!ac.ringing && ac.active);
           setOperatorConsult((prev) => {
-            // Phone consult turns belong exclusively to the phone call (MobileGate.tsx); laptop speaker stays silent
-            const shouldAutoSpeakTurn = false;
-            if (shouldAutoSpeakTurn) {
-              // no auto-speak on desktop
-            }
             return {
               active: Boolean(ac.active),
               ringing: Boolean(ac.ringing) && ac.call_status !== "connected",
               callStatus: ac.call_status ?? (isConnected ? "connected" : ac.ringing ? "ringing" : undefined),
               connectedAt: ac.connected_at ? ac.connected_at * 1000 : (isConnected ? (prev?.connectedAt ?? Date.now()) : null),
               mode: "user_consult",
-              channel: ac.channel ?? "voice_call",
+              channel: ac.channel ?? prev?.channel ?? (isPhoneChannel ? "voice_call" : "desktop_voice"),
               callId: ac.call_id,
               reqId: ac.req_id ?? null,
               claimId: ac.claim_id,
@@ -749,12 +756,32 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     if (line) setNarration(line);
     const b = briefingFor(ev, activeBrandName);
     if (b) {
-      const isVoiceCallApproval =
-        ev.type === "approval_needed" &&
-        ((ev.payload as unknown as ApprovalNeededPayload)?.channel === "voice_call" ||
-          phoneCallActiveRef.current);
-      if (checkIsMobileRoute() || !windowsEnabledRef.current || isMobileCallManagingAudio() || phoneCallActiveRef.current || isVoiceCallApproval) {
+      if (
+        checkIsMobileRoute() ||
+        !windowsEnabledRef.current ||
+        isMobileCallManagingAudio() ||
+        phoneCallActiveRef.current
+      ) {
         setLastBriefing(b);
+      } else if (ev.type === "run_done") {
+        const payload = ev.payload as { status?: string; outcome?: string };
+        const isCommitted =
+          payload?.status === "committed" ||
+          payload?.outcome === "committed" ||
+          payload?.status === "done" ||
+          payload?.outcome === "done";
+        if (isCommitted) {
+          const recentlySpokeTurn = Date.now() - lastAgentTurnSpokenAtRef.current < 6000;
+          if (recentlySpokeTurn || phoneCallActiveRef.current) {
+            setLastBriefing(b);
+          } else {
+            brief(b, ev.type, false);
+          }
+        } else {
+          setLastBriefing(b);
+        }
+      } else if (ev.type === "offer") {
+        brief(b, ev.type, false);
       } else {
         brief(b, ev.type, ev.type === "approval_needed");
       }
@@ -782,10 +809,13 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       }
       case "call_start": {
         const p = ev.payload as unknown as CallStartPayload;
-        markPhoneCallActive();
-        if (windowsEnabledRef.current) {
-          stopSpeaking();
-          setSpeaking(false);
+        const isPhone = p.channel === "voice_call" || p.channel === "iphone_transferred";
+        if (isPhone) {
+          markPhoneCallActive();
+          if (windowsEnabledRef.current) {
+            stopSpeaking();
+            setSpeaking(false);
+          }
         }
         const callId = String(p.call_id ?? "CONSULT-CLM-D-1042");
         const isConnected = p.call_status === "connected";
@@ -795,7 +825,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           callStatus: isConnected ? "connected" : (p.call_status ?? "ringing"),
           connectedAt: isConnected ? (prev?.connectedAt ?? Date.now()) : (prev?.connectedAt ?? null),
           mode: "user_consult",
-          channel: p.channel ?? "voice_call",
+          channel: p.channel ?? prev?.channel ?? (isPhone ? "voice_call" : "desktop_voice"),
           callId,
           reqId: p.req_id ?? null,
           claimId: String(p.claim_id ?? "CLM-D-1042"),
@@ -808,17 +838,20 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           end: null,
           irisGate: (p as unknown as Record<string, unknown>)?.iris_gate ?? (prev as unknown as Record<string, unknown>)?.irisGate ?? null,
         } as OperatorConsultState));
-        if (!windowsEnabledRef.current && !isConnected) {
+        if (!windowsEnabledRef.current && !isConnected && isPhone) {
           soundFx.playIncomingCall();
         }
         break;
       }
       case "call_turn": {
         const turn = ev.payload as unknown as CallTurnPayload;
-        markPhoneCallActive();
-        if (windowsEnabledRef.current) {
-          stopSpeaking();
-          setSpeaking(false);
+        const isPhone = turn.channel === "voice_call" || turn.channel === "iphone_transferred";
+        if (isPhone || phoneCallActiveRef.current) {
+          markPhoneCallActive();
+          if (windowsEnabledRef.current) {
+            stopSpeaking();
+            setSpeaking(false);
+          }
         }
         const callId = String(turn.call_id ?? "");
         const inferredChoice: OperatorChoice | null =
@@ -836,7 +869,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             callStatus: isConnected ? "connected" : "ringing",
             connectedAt: isConnected ? Date.now() : null,
             mode: "user_consult",
-            channel: "voice_call",
+            channel: turn.channel ?? (isPhone ? "voice_call" : "desktop_voice"),
             callId: callId || `CONSULT-${claimId}`,
             reqId: null,
             claimId,
@@ -852,6 +885,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           const nextConnected = isConnected || base.callStatus === "connected" || !base.ringing;
           return {
             ...base,
+            channel: turn.channel ?? base.channel ?? "desktop_voice",
             active: turn.keep_call_open !== false,
             ringing: isConnected ? false : base.ringing,
             callStatus: turn.call_status ?? (nextConnected ? "connected" : base.callStatus),
@@ -875,10 +909,40 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           executeUiAction(turn.ui_action);
         }
 
-        // Phone consult turns belong exclusively to the phone call (MobileGate.tsx); laptop speaker stays silent
-        const shouldAutoSpeakTurn = false;
-        if (shouldAutoSpeakTurn && turn.text) {
-          // no auto-speak on desktop
+        if (
+          !isPhone &&
+          !phoneCallActiveRef.current &&
+          turn.speaker === "agent" &&
+          turn.text &&
+          voiceRef.current &&
+          !checkIsMobileRoute() &&
+          windowsEnabledRef.current &&
+          !isMobileCallManagingAudio()
+        ) {
+          const turnKey = `agent:${turn.text.trim()}`;
+          if (lastSpokenTurnKeyRef.current !== turnKey) {
+            lastSpokenTurnKeyRef.current = turnKey;
+            lastAgentTurnSpokenAtRef.current = Date.now();
+            speakCallTurn(
+              "agent",
+              turn.text,
+              {
+                onStart: () => {
+                  setSpokenText(turn.text);
+                  setSpeechProgress(0);
+                  setSpeaking(true);
+                  setOperatorConsult((c) => (c ? { ...c, activeSpeaker: "agent" } : c));
+                },
+                onEnd: () => {
+                  setSpeaking(false);
+                  setSpeechProgress(1);
+                  setOperatorConsult((c) => (c && c.activeSpeaker === "agent" ? { ...c, activeSpeaker: null } : c));
+                },
+                onProgress: (f) => setSpeechProgress((p) => Math.max(p, f)),
+              },
+              true
+            );
+          }
         }
         break;
       }
@@ -1297,8 +1361,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             enqueue([parsed]);
           } else if (parsed.type === "call_start") {
             const p = parsed.payload as unknown as CallStartPayload;
-            const isUserConsult = p?.mode === "user_consult" || p?.channel === "voice_call" || !p?.mode;
-            if (isUserConsult) {
+            const isPhone = p?.channel === "voice_call" || p?.channel === "iphone_transferred";
+            if (isPhone) {
               markPhoneCallActive();
               stopSpeaking();
               setSpeaking(false);
@@ -1312,6 +1376,13 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
               applyRef.current(parsed);
             }
           } else if (parsed.type === "call_turn") {
+            const turn = parsed.payload as unknown as CallTurnPayload;
+            const isPhone = turn?.channel === "voice_call" || turn?.channel === "iphone_transferred";
+            if (isPhone) {
+              markPhoneCallActive();
+              stopSpeaking();
+              setSpeaking(false);
+            }
             // Keep opening call_turn ordered behind queued call_start; dispatch live phone turns immediately
             if (queueRef.current.some((e) => e.type === "call_start")) {
               enqueue([parsed]);
@@ -1345,6 +1416,14 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
 
   // ---------------------------------------------------------------- actions
   const clearRun = () => {
+    phoneCallActiveRef.current = false;
+    phoneTransferredRef.current = false;
+    if (phoneCooldownTimerRef.current !== null) {
+      window.clearTimeout(phoneCooldownTimerRef.current);
+      phoneCooldownTimerRef.current = null;
+    }
+    lastAgentTurnSpokenAtRef.current = 0;
+    lastSpokenTurnKeyRef.current = null;
     commitCelebratedRef.current = false;
     forgeTestReceivedRef.current = false;
     forgeHeroUntilRef.current = 0;
@@ -1708,7 +1787,12 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   };
 
   const escalateToPhone = async (reqIdArg?: string | null, claimIdArg?: string) => {
+    stopSpeaking();
+    setSpeaking(false);
+    phoneTransferredRef.current = true;
+    phoneCallActiveRef.current = true;
     markPhoneCallActive();
+    setOperatorConsult((prev) => (prev ? { ...prev, channel: "iphone_transferred" } : prev));
     const pending = pendingApprovalRef.current ?? pendingApproval;
     const reqId = reqIdArg ?? pending?.req_id ?? null;
 
@@ -1889,7 +1973,234 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     }
   };
 
+  const sendDesktopVoiceTurn = async (text: string): Promise<void> => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    phoneCallActiveRef.current = false;
+    phoneTransferredRef.current = false;
+
+    // Barge-in: stop any playing speech
+    stopSpeaking();
+    setSpeaking(false);
+
+    const pending = pendingApprovalRef.current ?? pendingApproval;
+    const reqId = pending?.req_id ?? operatorConsult?.reqId ?? null;
+
+    // Smart claim extraction (identical to escalateToPhone)
+    let extractedClaimId: string | null = operatorConsult?.claimId || null;
+    let extractedClaimAmount: number | null = operatorConsult?.claimAmount || null;
+
+    const args = (pending?.args ?? {}) as Record<string, unknown>;
+    const row = (args.row ?? {}) as Record<string, unknown>;
+
+    if (!extractedClaimId) {
+      if (typeof row.id === "string" && row.id.trim()) {
+        extractedClaimId = row.id.trim();
+      } else if (typeof args.claim_id === "string" && args.claim_id.trim()) {
+        extractedClaimId = args.claim_id.trim();
+      } else if (typeof args.id === "string" && args.id.trim()) {
+        extractedClaimId = args.id.trim();
+      }
+    }
+
+    if (extractedClaimAmount === null) {
+      const rawAmt = row.amount ?? row.amount_eur ?? args.amount ?? args.amount_eur ?? args.claim_amount;
+      if (typeof rawAmt === "number" && !Number.isNaN(rawAmt)) {
+        extractedClaimAmount = rawAmt;
+      } else if (typeof rawAmt === "string") {
+        const parsed = parseFloat(rawAmt.replace(/[^0-9.]/g, ""));
+        if (!Number.isNaN(parsed)) extractedClaimAmount = parsed;
+      }
+    }
+
+    const pendingText = [pending?.diff_preview, pending?.risk_reason, pending?.spoken_summary]
+      .filter(Boolean)
+      .join(" ");
+
+    if (!extractedClaimId && pendingText) {
+      const match = pendingText.match(/\b(CLM-[A-Z0-9-]+)\b/i);
+      if (match) {
+        extractedClaimId = match[1].toUpperCase();
+      }
+    }
+
+    const claimsRows = (wsStateRef.current?.tables?.claims ?? []) as Record<string, unknown>[];
+    if (extractedClaimId) {
+      const matchingRow = claimsRows.find((r) => String(r.id ?? "").toUpperCase() === extractedClaimId?.toUpperCase());
+      if (matchingRow && extractedClaimAmount === null) {
+        const rowAmt = Number(matchingRow.amount ?? matchingRow.amount_eur ?? NaN);
+        if (!Number.isNaN(rowAmt)) extractedClaimAmount = rowAmt;
+      }
+    } else {
+      const latestClaim = claimsRows[claimsRows.length - 1];
+      if (latestClaim) {
+        extractedClaimId = String(latestClaim.id ?? "");
+        extractedClaimAmount = Number(latestClaim.amount ?? latestClaim.amount_eur ?? 587.3);
+      }
+    }
+
+    const claimId = extractedClaimId || "CLM-D-1042";
+
+    const runDemoVoiceFallback = async () => {
+      if (/redeliver|replace|re-deliver|22|hubs|tomorrow/i.test(trimmed)) {
+        await respondOperatorConsult("redelivery", reqId, claimId);
+        return;
+      }
+      if (/approve|refund|enforce|confirm|accept|credit\s*note|hold/i.test(trimmed)) {
+        await respondOperatorConsult("refund", reqId, claimId);
+        return;
+      }
+
+      // Conversational inquiry turn
+      const replyText = `Understood. Staging resolution for claim ${claimId}. Say 'approve' or 'refund' to commit EUR 587.30, or 'replace' for 22 units redelivery.`;
+      const userTurn: OperatorConsultTurn = {
+        speaker: "user",
+        text: trimmed,
+        audioUrl: null,
+        ts: Date.now() / 1000,
+      };
+      const agentTurn: OperatorConsultTurn = {
+        speaker: "agent",
+        text: replyText,
+        audioUrl: null,
+        ts: Date.now() / 1000 + 0.1,
+      };
+      setOperatorConsult((prev) => {
+        const base: OperatorConsultState = prev ?? {
+          active: true,
+          ringing: false,
+          callStatus: "connected",
+          connectedAt: Date.now(),
+          mode: "user_consult",
+          channel: "desktop_voice",
+          callId: `CONSULT-${claimId}`,
+          reqId,
+          claimId,
+          claimAmount: 587.3,
+          counterparty: "Operator Desktop",
+          turns: [],
+          activeSpeaker: null,
+          selectedChoice: null,
+          lastUiAction: null,
+          end: null,
+          irisGate: null,
+        };
+        return {
+          ...base,
+          active: true,
+          ringing: false,
+          callStatus: "connected",
+          channel: "desktop_voice",
+          turns: [...base.turns, userTurn, agentTurn],
+        };
+      });
+
+      const turnKey = `agent:${replyText.trim()}`;
+      if (
+        lastSpokenTurnKeyRef.current !== turnKey &&
+        voiceRef.current &&
+        !checkIsMobileRoute() &&
+        windowsEnabledRef.current &&
+        !isMobileCallManagingAudio() &&
+        !phoneCallActiveRef.current
+      ) {
+        lastSpokenTurnKeyRef.current = turnKey;
+        lastAgentTurnSpokenAtRef.current = Date.now();
+        speakCallTurn(
+          "agent",
+          replyText,
+          {
+            onStart: () => {
+              setSpokenText(replyText);
+              setSpeechProgress(0);
+              setSpeaking(true);
+              setOperatorConsult((c) => (c ? { ...c, activeSpeaker: "agent" } : c));
+            },
+            onEnd: () => {
+              setSpeaking(false);
+              setSpeechProgress(1);
+              setOperatorConsult((c) => (c && c.activeSpeaker === "agent" ? { ...c, activeSpeaker: null } : c));
+            },
+            onProgress: (f) => setSpeechProgress((p) => Math.max(p, f)),
+          },
+          true
+        );
+      }
+    };
+
+    if (modeRef.current === "demo" || (reqId && reqId.startsWith("req_demo"))) {
+      await runDemoVoiceFallback();
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/call/user-respond", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          transcript: trimmed,
+          req_id: reqId,
+          claim_id: claimId,
+          channel: "desktop_voice",
+        }),
+      });
+      if (!res.ok) throw new Error(`user-respond failed (${res.status})`);
+      const data = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        reply_text?: string;
+        confirmation_text?: string;
+        ui_action?: UiActionPayload;
+        turn?: CallTurnPayload;
+      } | null;
+
+      if (data?.ui_action) {
+        executeUiAction(data.ui_action);
+      }
+
+      const agentReply = data?.reply_text || data?.confirmation_text || data?.turn?.text;
+      if (agentReply) {
+        const turnKey = `agent:${agentReply.trim()}`;
+        if (
+          lastSpokenTurnKeyRef.current !== turnKey &&
+          voiceRef.current &&
+          !checkIsMobileRoute() &&
+          windowsEnabledRef.current &&
+          !isMobileCallManagingAudio() &&
+          !phoneCallActiveRef.current
+        ) {
+          lastSpokenTurnKeyRef.current = turnKey;
+          lastAgentTurnSpokenAtRef.current = Date.now();
+          speakCallTurn(
+            "agent",
+            agentReply,
+            {
+              onStart: () => {
+                setSpokenText(agentReply);
+                setSpeechProgress(0);
+                setSpeaking(true);
+                setOperatorConsult((c) => (c ? { ...c, activeSpeaker: "agent" } : c));
+              },
+              onEnd: () => {
+                setSpeaking(false);
+                setSpeechProgress(1);
+                setOperatorConsult((c) => (c && c.activeSpeaker === "agent" ? { ...c, activeSpeaker: null } : c));
+              },
+              onProgress: (f) => setSpeechProgress((p) => Math.max(p, f)),
+            },
+            true
+          );
+        }
+      }
+      await refreshState();
+    } catch {
+      await runDemoVoiceFallback();
+    }
+  };
+
   const pickupCall = useCallback(async () => {
+    phoneTransferredRef.current = true;
+    phoneCallActiveRef.current = true;
     markPhoneCallActive();
     if (windowsEnabledRef.current) {
       stopSpeaking();
@@ -1903,17 +2214,25 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       });
       if (res.ok) {
         setOperatorConsult((prev) =>
-          prev ? { ...prev, ringing: false, callStatus: "connected", connectedAt: prev.connectedAt ?? Date.now() } : prev
+          prev ? { ...prev, ringing: false, callStatus: "connected", connectedAt: prev.connectedAt ?? Date.now(), channel: "iphone_transferred" } : prev
         );
       }
     } catch {
       setOperatorConsult((prev) =>
-        prev ? { ...prev, ringing: false, callStatus: "connected", connectedAt: prev.connectedAt ?? Date.now() } : prev
+        prev ? { ...prev, ringing: false, callStatus: "connected", connectedAt: prev.connectedAt ?? Date.now(), channel: "iphone_transferred" } : prev
       );
     }
   }, [markPhoneCallActive, operatorConsult?.callId]);
 
   const reset = async () => {
+    phoneCallActiveRef.current = false;
+    phoneTransferredRef.current = false;
+    if (phoneCooldownTimerRef.current !== null) {
+      window.clearTimeout(phoneCooldownTimerRef.current);
+      phoneCooldownTimerRef.current = null;
+    }
+    lastAgentTurnSpokenAtRef.current = 0;
+    lastSpokenTurnKeyRef.current = null;
     deferredApprovalRef.current = null;
     clearWorkspaceUi();
     setMode("live");
@@ -2006,6 +2325,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     operatorConsult,
     escalateToPhone,
     respondOperatorConsult,
+    sendDesktopVoiceTurn,
     replayConsultTurn,
     triggerGoal,
     runStageDemo,

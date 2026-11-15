@@ -1,18 +1,22 @@
 import { AnimatePresence, motion } from "framer-motion";
 import {
   CheckCircle2,
+  CornerDownLeft,
+  Mic,
   PackageCheck,
   PhoneCall,
   PhoneIncoming,
   Radio,
+  Send,
   Smartphone,
   Volume2,
   XCircle,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ApprovalNeededPayload, OumiIrisGate, OumiIrisIntent } from "../contracts";
 import { soundFx } from "../lib/sound";
 import type { OperatorChoice, OperatorConsultState } from "../lib/types";
+import { stopSpeaking, useAutoVad, useSpeechInput } from "../lib/voice";
 import { btn, Chip, cx, Dot, Panel } from "./ui";
 import { VoiceOrb } from "./VoiceOrb";
 
@@ -31,6 +35,7 @@ export interface OperatorConsultPanelProps {
   committedClaimId?: string | null;
   voiceOn: boolean;
   speaking: boolean;
+  onDesktopVoiceTurn?: (text: string) => Promise<void> | void;
   onEscalateToPhone: (reqId?: string | null, claimId?: string) => void;
   onSelectResolution: (choice: OperatorChoice, reqId?: string | null, claimId?: string) => void;
   onReject?: (reqId: string) => void;
@@ -76,6 +81,7 @@ export function OperatorConsultPanel({
   committedClaimId = null,
   voiceOn,
   speaking,
+  onDesktopVoiceTurn,
   onEscalateToPhone,
   onSelectResolution,
   onReject,
@@ -92,13 +98,18 @@ export function OperatorConsultPanel({
     activeCall?.iris_gate ??
     null;
 
+  const isPhoneTransferred = Boolean(
+    (consult?.active || consult?.ringing) &&
+      (consult?.channel === "voice_call" || consult?.channel === "iphone_transferred")
+  );
+
   const routeLabel = useMemo(() => {
-    if (!irisGate?.route) return "iPhone Voice";
-    if (irisGate.route === "iphone_voice_call") return "iPhone Voice";
+    if (!irisGate?.route) return isPhoneTransferred ? "iPhone Voice" : "Laptop Voice";
+    if (irisGate.route === "iphone_voice_call") return isPhoneTransferred ? "iPhone Voice" : "Laptop Voice";
     if (irisGate.route === "desktop_queue") return "Desktop Queue";
     if (irisGate.route === "auto_execute") return "Auto Execute";
     return irisGate.route;
-  }, [irisGate?.route]);
+  }, [irisGate?.route, isPhoneTransferred]);
 
   const transcriptRef = useRef<HTMLDivElement>(null);
   const escalatedReqIdRef = useRef<string | null>(null);
@@ -106,6 +117,14 @@ export function OperatorConsultPanel({
   const [, setHovered] = useState(false);
   const [isDialing, setIsDialing] = useState(false);
   const [timerTick, setTimerTick] = useState(0);
+
+  // Laptop Mic & Auto-VAD State
+  const [laptopMicOn, setLaptopMicOn] = useState(false);
+  const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
+  const [sttSubmitting, setSttSubmitting] = useState(false);
+  const [quickAskText, setQuickAskText] = useState("");
+  const lastProcessedTranscriptRef = useRef<string>("");
+  const lastTranscriptTimeRef = useRef<number>(0);
 
   const claimId = useMemo(() => {
     if (consult?.claimId) return consult.claimId;
@@ -220,9 +239,10 @@ export function OperatorConsultPanel({
       )
   );
 
-  // Determine Call Status states
+  // Determine Call Status states (iPhone call)
   const isRinging = Boolean(
-    !callEndedWithoutDecision &&
+    isPhoneTransferred &&
+      !callEndedWithoutDecision &&
       !consult?.end &&
       consult?.callStatus !== "ended" &&
       extConsult?.callStatus !== "ended" &&
@@ -233,7 +253,8 @@ export function OperatorConsultPanel({
   );
 
   const isConnected = Boolean(
-    !callEndedWithoutDecision &&
+    isPhoneTransferred &&
+      !callEndedWithoutDecision &&
       !consult?.end &&
       consult?.callStatus !== "ended" &&
       extConsult?.callStatus !== "ended" &&
@@ -246,6 +267,31 @@ export function OperatorConsultPanel({
 
   const callLive = isRinging || isConnected;
 
+  // Stop media tracks helper
+  const stopLaptopMic = useCallback(() => {
+    if (mediaStream) {
+      mediaStream.getTracks().forEach((t) => t.stop());
+      setMediaStream(null);
+    }
+    setLaptopMicOn(false);
+  }, [mediaStream]);
+
+  // Clean up media tracks on unmount
+  useEffect(() => {
+    return () => {
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((t) => t.stop());
+      }
+    };
+  }, [mediaStream]);
+
+  // If phone is transferred or call completed, ensure laptop mic is stopped
+  useEffect(() => {
+    if (isPhoneTransferred || hasCommitted) {
+      stopLaptopMic();
+    }
+  }, [isPhoneTransferred, hasCommitted, stopLaptopMic]);
+
   // Reset dialing state once call becomes live or pendingApproval changes
   useEffect(() => {
     if (callLive || !pendingApproval) {
@@ -255,7 +301,7 @@ export function OperatorConsultPanel({
 
   const isExecutedLive = Boolean(
     (consult?.selectedChoice === "refund" || consult?.selectedChoice === "redelivery" || Boolean(committedClaimId)) &&
-      (consult?.active || isConnected || isRinging)
+      (consult?.active || isConnected || isRinging || consult?.channel === "desktop_voice")
   );
 
   const callCompleted = Boolean(
@@ -314,6 +360,120 @@ export function OperatorConsultPanel({
     const s = String(elapsedSec % 60).padStart(2, "0");
     return `${m}:${s}`;
   }, [timerTick]);
+
+  // Central speech text dispatcher with deduplication
+  const handleProcessedText = useCallback(
+    async (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+
+      const now = Date.now();
+      if (
+        trimmed.toLowerCase() === lastProcessedTranscriptRef.current.toLowerCase() &&
+        now - lastTranscriptTimeRef.current < 2500
+      ) {
+        return;
+      }
+      lastProcessedTranscriptRef.current = trimmed;
+      lastTranscriptTimeRef.current = now;
+
+      soundFx.playUiClick();
+      if (onDesktopVoiceTurn) {
+        await onDesktopVoiceTurn(trimmed);
+      }
+    },
+    [onDesktopVoiceTurn]
+  );
+
+  // Send recorded Audio Blob to Backend /api/voice/stt
+  const handleUtteranceBlob = useCallback(
+    async (blob: Blob, ext: string) => {
+      if (blob.size < 400) return;
+      setSttSubmitting(true);
+      try {
+        const formData = new FormData();
+        formData.append("audio", blob, `laptop_turn.${ext || "webm"}`);
+        const res = await fetch("/api/voice/stt", {
+          method: "POST",
+          body: formData,
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { ok?: boolean; text?: string; transcript?: string };
+          const sttText = (data.text || data.transcript || "").trim();
+          if (sttText) {
+            await handleProcessedText(sttText);
+          }
+        }
+      } catch (err) {
+        console.warn("STT POST /api/voice/stt error:", err);
+      } finally {
+        setSttSubmitting(false);
+      }
+    },
+    [handleProcessedText]
+  );
+
+  // Auto-VAD for hands-free utterance capture & barge-in
+  const vad = useAutoVad({
+    stream: mediaStream,
+    enabled: laptopMicOn && !isPhoneTransferred,
+    agentSpeaking: speaking,
+    muted: false,
+    onBargeIn: () => {
+      stopSpeaking();
+    },
+    onUtterance: (blob, _mimeType, ext) => {
+      void handleUtteranceBlob(blob, ext);
+    },
+  });
+
+  // Web Speech API fallback / instant recognizer
+  const speechInput = useSpeechInput((text, final) => {
+    if (final && text.trim() && laptopMicOn && !isPhoneTransferred) {
+      void handleProcessedText(text.trim());
+    }
+  });
+
+  useEffect(() => {
+    if (laptopMicOn && !isPhoneTransferred) {
+      if (speechInput.supported && !speechInput.listening) {
+        speechInput.start();
+      }
+    } else {
+      if (speechInput.listening) {
+        speechInput.stop();
+      }
+    }
+  }, [laptopMicOn, isPhoneTransferred, speechInput]);
+
+  // Toggle Laptop Mic
+  const toggleLaptopMic = async () => {
+    soundFx.playUiClick();
+    stopSpeaking();
+
+    if (laptopMicOn) {
+      stopLaptopMic();
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        setMediaStream(stream);
+        setLaptopMicOn(true);
+      } catch (err) {
+        console.warn("Microphone access failed", err);
+        setLaptopMicOn(true);
+      }
+    }
+  };
+
+  // Transfer to iPhone Handler
+  const handleTransferToPhone = () => {
+    soundFx.playUiClick();
+    stopLaptopMic();
+    stopSpeaking();
+    setIsDialing(true);
+    if (pendingApproval?.req_id) escalatedReqIdRef.current = pendingApproval.req_id;
+    onEscalateToPhone(activeReqId, claimId);
+  };
 
   const sanitizedTurns = useMemo(() => {
     if (!consult?.turns) return [];
@@ -378,7 +538,6 @@ export function OperatorConsultPanel({
       return;
     }
 
-    // If call is already ended/completed or inactive, show full text immediately
     if (isConsultEndedOrPast) {
       completedTurnSigsRef.current.add(lastTurnSig);
       setRevealingSig(null);
@@ -386,14 +545,12 @@ export function OperatorConsultPanel({
       return;
     }
 
-    // If this turn was already completely revealed, keep showing full text
     if (completedTurnSigsRef.current.has(lastTurnSig)) {
       setRevealingSig(null);
       setVisibleWordCount(Infinity);
       return;
     }
 
-    // On initial mount, if agent is not actively speaking, do not animate historical turn
     if (initialMountCheckRef.current) {
       initialMountCheckRef.current = false;
       if (!speakingRef.current && activeSpeakerRef.current !== "agent") {
@@ -412,18 +569,13 @@ export function OperatorConsultPanel({
       return;
     }
 
-    // Brand-new agent turn in active call: begin progressive reveal!
     setRevealingSig(lastTurnSig);
     setVisibleWordCount(0);
 
     let intervalId: ReturnType<typeof window.setInterval> | null = null;
 
-    // 1. Wait 350ms (matching TTS audio start latency)
     const timeoutId = window.setTimeout(() => {
-      // 2. Reveal first word
       setVisibleWordCount(1);
-
-      // 3. Progressively reveal words at ~3.2 words/sec (1 word every ~310ms)
       intervalId = window.setInterval(() => {
         setVisibleWordCount((prev) => {
           const next = prev + 1;
@@ -456,13 +608,19 @@ export function OperatorConsultPanel({
   const resolvedChoice = inferChoice(consult, committedClaimId);
 
   const panelTitle = isExecutedLive
-    ? `On Call with You · ${callDurationStr}`
+    ? isPhoneTransferred
+      ? `On Call with You · ${callDurationStr}`
+      : "Executed Live · Undo Ready"
     : callEndedWithoutDecision
     ? "Decision Gate · Awaiting PC Decision"
     : isConnected
     ? `On Call with You · ${callDurationStr}`
     : isRinging
     ? "Calling Your iPhone…"
+    : consult?.channel === "desktop_voice"
+    ? "Live Laptop Voice Consult"
+    : laptopMicOn
+    ? "Laptop Voice Gate Ready"
     : callCompleted
     ? "Resolution Committed"
     : "Decision Gate";
@@ -480,13 +638,19 @@ export function OperatorConsultPanel({
         title={panelTitle}
         icon={
           isExecutedLive ? (
-            <Smartphone className="text-ok" />
+            isPhoneTransferred ? (
+              <Smartphone className="text-ok" />
+            ) : (
+              <CheckCircle2 className="text-ok" />
+            )
           ) : callEndedWithoutDecision ? (
             <Smartphone className="text-warn" />
           ) : isConnected ? (
             <Smartphone className="text-ok" />
           ) : isRinging ? (
             <Radio className="animate-pulse text-signal" />
+          ) : consult?.channel === "desktop_voice" || laptopMicOn ? (
+            <Mic className="text-accent animate-pulse" />
           ) : (
             <PhoneIncoming className="text-signal" />
           )
@@ -494,7 +658,7 @@ export function OperatorConsultPanel({
         meta={
           isExecutedLive ? (
             <Chip tone="ok" className="font-mono text-[10px] font-bold ring-1 ring-ok/60 shadow-[0_0_12px_rgba(16,185,129,0.35)]">
-              <Dot tone="ok" live /> ✓ EXECUTED LIVE VIA IPHONE VOICE · UNDO READY
+              <Dot tone="ok" live /> {isPhoneTransferred ? "✓ EXECUTED LIVE VIA IPHONE VOICE · UNDO READY" : "✓ EXECUTED LIVE VIA LAPTOP VOICE · UNDO READY"}
             </Chip>
           ) : callEndedWithoutDecision ? (
             <Chip tone="warn" className="font-mono text-[10px]">
@@ -507,6 +671,14 @@ export function OperatorConsultPanel({
           ) : isRinging ? (
             <Chip tone="signal" className="font-mono text-[10px]">
               <Dot tone="signal" live /> RINGING
+            </Chip>
+          ) : consult?.channel === "desktop_voice" ? (
+            <Chip tone="accent" className="font-mono text-[10px]">
+              <Dot tone="accent" live /> LIVE LAPTOP VOICE
+            </Chip>
+          ) : laptopMicOn ? (
+            <Chip tone="accent" className="font-mono text-[10px]">
+              <Dot tone="accent" live /> LAPTOP MIC ACTIVE
             </Chip>
           ) : callCompleted ? (
             <Chip tone="ok" className="font-mono text-[10px]">
@@ -536,6 +708,8 @@ export function OperatorConsultPanel({
             ? "ok"
             : isRinging
             ? "signal"
+            : laptopMicOn || consult?.channel === "desktop_voice"
+            ? "accent"
             : "danger"
         }
       >
@@ -573,13 +747,13 @@ export function OperatorConsultPanel({
             </div>
           )}
 
-          {/* 1. Live Call Banner OR Prominent Transfer to iPhone Bar */}
+          {/* 1. Live Call Banner OR Prominent Laptop Voice & iPhone Transfer Actions */}
           {isExecutedLive ? (
             <div className="flex h-7 items-center justify-between rounded-lg border border-ok/70 bg-ok/15 px-2.5 text-[11.5px] shadow-[0_0_12px_rgba(16,185,129,0.25)]">
               <div className="flex min-w-0 items-center gap-1.5 font-bold text-ok">
                 <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-ok" />
                 <span className="truncate">
-                  ✓ EXECUTED LIVE VIA IPHONE VOICE · UNDO READY:{" "}
+                  {isPhoneTransferred ? "✓ EXECUTED LIVE VIA IPHONE VOICE: " : "✓ EXECUTED LIVE VIA LAPTOP VOICE: "}
                   <span className="font-semibold text-ink">
                     {isKappa
                       ? resolvedChoice === "redelivery"
@@ -606,12 +780,7 @@ export function OperatorConsultPanel({
                 <button
                   type="button"
                   disabled={isDialing}
-                  onClick={() => {
-                    soundFx.playUiClick();
-                    setIsDialing(true);
-                    if (pendingApproval?.req_id) escalatedReqIdRef.current = pendingApproval.req_id;
-                    onEscalateToPhone(activeReqId, claimId);
-                  }}
+                  onClick={handleTransferToPhone}
                   className={cx(btn("signal", "sm"), "h-5 px-2 text-[10px] font-semibold")}
                 >
                   <PhoneCall className="h-2.5 w-2.5" />
@@ -623,7 +792,7 @@ export function OperatorConsultPanel({
             <div className="flex h-7 items-center justify-between rounded-lg border border-ok/40 bg-ok/10 px-2.5 text-[11.5px]">
               <div className="flex items-center gap-1.5 font-medium text-ok">
                 <Dot tone="ok" live />
-                <span>On Call with You · {callDurationStr}</span>
+                <span>On Call with You (iPhone) · {callDurationStr}</span>
               </div>
               <div className="flex items-center gap-1.5">
                 <VoiceOrb variant="bars" tone="ok" className="h-3 w-10" />
@@ -649,42 +818,155 @@ export function OperatorConsultPanel({
               </span>
             </div>
           ) : (
-            /* Prominent "📲 Call / Transfer to My iPhone" Action Bar on Desktop Decision Gate */
-            <div className="rounded-xl border border-cyan-500/40 bg-gradient-to-r from-cyan-950/40 via-emerald-950/25 to-cyan-950/40 p-1.5 shadow-[0_0_16px_rgba(6,182,212,0.12)] ring-1 ring-cyan-500/20">
-              <button
-                type="button"
-                disabled={isDialing}
-                onClick={() => {
-                  soundFx.playUiClick();
-                  setIsDialing(true);
-                  if (pendingApproval?.req_id) escalatedReqIdRef.current = pendingApproval.req_id;
-                  onEscalateToPhone(activeReqId, claimId);
-                }}
-                className="group flex w-full items-center justify-between rounded-lg border border-cyan-400/45 bg-cyan-500/15 px-2.5 py-1.5 text-left transition-all hover:border-cyan-300 hover:bg-cyan-500/25 hover:shadow-[0_0_12px_rgba(6,182,212,0.3)] disabled:opacity-60"
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-cyan-500/25 text-cyan-300 ring-1 ring-cyan-400/40 transition-transform group-hover:scale-105">
-                    <Smartphone className="h-4 w-4 animate-pulse text-cyan-300" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5 text-[11.5px] font-bold text-cyan-200">
-                      <span>📲 Call / Transfer to My iPhone</span>
-                      {isDialing && (
-                        <span className="font-mono text-[9px] font-semibold text-cyan-400 animate-pulse">
-                          (Dialing…)
-                        </span>
+            /* Prominent Laptop Voice & iPhone Transfer Action Bar on Decision Gate */
+            <div className="space-y-1.5 rounded-xl border border-cyan-500/35 bg-gradient-to-r from-cyan-950/40 via-surface/60 to-cyan-950/40 p-2 shadow-[0_0_16px_rgba(6,182,212,0.1)] ring-1 ring-cyan-500/20">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {/* 1. Talk on Laptop Button */}
+                <button
+                  type="button"
+                  onClick={toggleLaptopMic}
+                  className={cx(
+                    "group flex items-center justify-between rounded-lg border p-2 text-left transition-all",
+                    laptopMicOn
+                      ? "border-emerald-500/60 bg-emerald-500/15 shadow-[0_0_12px_rgba(16,185,129,0.25)] ring-1 ring-emerald-500/50"
+                      : "border-cyan-500/40 bg-cyan-500/10 hover:border-cyan-400 hover:bg-cyan-500/20 hover:shadow-[0_0_12px_rgba(6,182,212,0.2)]"
+                  )}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div
+                      className={cx(
+                        "flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition-transform group-hover:scale-105",
+                        laptopMicOn
+                          ? "bg-emerald-500/25 text-emerald-300 ring-1 ring-emerald-400/50"
+                          : "bg-cyan-500/20 text-cyan-300 ring-1 ring-cyan-400/40"
                       )}
+                    >
+                      <Mic className={cx("h-4 w-4", laptopMicOn ? "animate-pulse text-emerald-400" : "text-cyan-300")} />
                     </div>
-                    <p className="truncate text-[9.5px] text-cyan-300/80">
-                      Stepping away? Continue via live Grok Voice on /mobile
-                    </p>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 text-[11px] font-bold text-ink">
+                        <span>{laptopMicOn ? "🎙️ Mic Active (Listening)" : "🎙️ Talk on Laptop"}</span>
+                        {sttSubmitting && (
+                          <span className="font-mono text-[9px] text-amber-300 animate-pulse">
+                            (Transcribing…)
+                          </span>
+                        )}
+                      </div>
+                      <p className="truncate text-[9px] text-ink-3">
+                        {laptopMicOn ? "Hands-free Auto-VAD active" : "Ask or Approve by Voice"}
+                      </p>
+                    </div>
                   </div>
+                  <div className="ml-1.5 flex shrink-0 items-center gap-1">
+                    {laptopMicOn ? (
+                      <VoiceOrb variant="bars" tone="ok" className="h-3 w-8" />
+                    ) : (
+                      <span className="rounded bg-cyan-400/20 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-cyan-300 ring-1 ring-cyan-400/30">
+                        Talk
+                      </span>
+                    )}
+                  </div>
+                </button>
+
+                {/* 2. Call / Transfer to My iPhone Button */}
+                <button
+                  type="button"
+                  disabled={isDialing}
+                  onClick={handleTransferToPhone}
+                  className="group flex items-center justify-between rounded-lg border border-purple-500/40 bg-purple-500/10 p-2 text-left transition-all hover:border-purple-400 hover:bg-purple-500/20 hover:shadow-[0_0_12px_rgba(168,85,247,0.2)] disabled:opacity-60"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-purple-500/20 text-purple-300 ring-1 ring-purple-400/40 transition-transform group-hover:scale-105">
+                      <Smartphone className="h-4 w-4 text-purple-300" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 text-[11px] font-bold text-purple-200">
+                        <span>📲 Transfer to iPhone</span>
+                        {isDialing && (
+                          <span className="font-mono text-[9px] font-semibold text-purple-300 animate-pulse">
+                            (Dialing…)
+                          </span>
+                        )}
+                      </div>
+                      <p className="truncate text-[9px] text-purple-300/80">
+                        Continue on /mobile with Grok Voice
+                      </p>
+                    </div>
+                  </div>
+                  <div className="ml-1.5 flex shrink-0 items-center gap-1 rounded bg-purple-400/20 px-1.5 py-0.5 font-mono text-[9.5px] font-semibold text-purple-300 ring-1 ring-purple-400/30">
+                    <PhoneCall className="h-2.5 w-2.5" />
+                    <span>{isDialing ? "Calling…" : "Call"}</span>
+                  </div>
+                </button>
+              </div>
+
+              {/* Quick-Ask Voice Hint Chips & Compact Quick-Ask Input */}
+              <div className="pt-1 border-t border-line/40 space-y-1.5">
+                <div className="flex items-center justify-between gap-1">
+                  <span className="text-[10px] font-medium text-ink-3">Try speaking or click to ask:</span>
+                  {laptopMicOn && (
+                    <button
+                      type="button"
+                      onClick={() => vad.sendNow()}
+                      className="inline-flex items-center gap-1 rounded bg-emerald-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-300 hover:bg-emerald-500/30"
+                    >
+                      <Send className="h-2.5 w-2.5" />
+                      Send Utterance
+                    </button>
+                  )}
                 </div>
-                <div className="ml-1.5 flex shrink-0 items-center gap-1 rounded bg-cyan-400/20 px-1.5 py-0.5 font-mono text-[9.5px] font-semibold text-cyan-300 ring-1 ring-cyan-400/30">
-                  <PhoneCall className="h-2.5 w-2.5" />
-                  <span>{isDialing ? "Connecting…" : "Transfer"}</span>
+                <div className="flex flex-wrap gap-1">
+                  {[
+                    "Break down the math",
+                    "Show invoices table",
+                    "Enforce the claim",
+                    "Take replacement hubs",
+                  ].map((hint) => (
+                    <button
+                      key={hint}
+                      type="button"
+                      onClick={() => {
+                        stopSpeaking();
+                        void handleProcessedText(hint);
+                      }}
+                      className="rounded-full border border-line/80 bg-sunken/80 px-2 py-0.5 text-[10px] text-ink-2 hover:border-accent/50 hover:bg-accent/10 hover:text-accent transition-colors"
+                    >
+                      💡 {hint}
+                    </button>
+                  ))}
                 </div>
-              </button>
+
+                {/* Compact text quick-ask input */}
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (!quickAskText.trim()) return;
+                    stopSpeaking();
+                    void handleProcessedText(quickAskText.trim());
+                    setQuickAskText("");
+                  }}
+                  className="flex items-center gap-1 pt-0.5"
+                >
+                  <input
+                    type="text"
+                    value={quickAskText}
+                    onChange={(e) => setQuickAskText(e.target.value)}
+                    placeholder="Ask Recoup anything or type approval command…"
+                    className="h-6 flex-1 rounded border border-line bg-surface/80 px-2 text-[10.5px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!quickAskText.trim()}
+                    className={cx(
+                      btn("primary", "sm"),
+                      "h-6 px-2 text-[10px] font-semibold disabled:opacity-40"
+                    )}
+                  >
+                    <span>Ask</span>
+                    <CornerDownLeft className="h-2.5 w-2.5 opacity-80" />
+                  </button>
+                </form>
+              </div>
             </div>
           )}
 
@@ -786,17 +1068,21 @@ export function OperatorConsultPanel({
             </div>
           )}
 
-          {/* 4. Compact Live Phone Chat (max-h-[120px] overflow-y-auto scroll-thin) */}
-          {consult && (consult.active || consult.ringing || sanitizedTurns.length > 0 || consult.end) && (
+          {/* 4. Compact Live Phone / Laptop Chat (max-h-[120px] overflow-y-auto scroll-thin) */}
+          {consult && (consult.active || consult.ringing || sanitizedTurns.length > 0 || consult.end || laptopMicOn) && (
             <div
               ref={transcriptRef}
               className="scroll-thin max-h-[120px] space-y-1.5 overflow-y-auto rounded-lg border border-line bg-sunken/40 p-2"
               aria-live="polite"
             >
-              {sanitizedTurns.length === 0 && (consult.ringing || consult.active) && (
+              {sanitizedTurns.length === 0 && (
                 <div className="flex items-center justify-center gap-1.5 py-2 font-mono text-[11px] text-ink-2">
-                  <Dot tone="signal" live />
-                  <span>Ringing your iPhone… Hands-free Grok Voice ready</span>
+                  <Dot tone={isPhoneTransferred ? "signal" : "accent"} live />
+                  <span>
+                    {isPhoneTransferred
+                      ? "Ringing your iPhone… Hands-free Grok Voice ready"
+                      : "Laptop Voice ready — ask a question or approve/reject by voice"}
+                  </span>
                 </div>
               )}
 
@@ -833,7 +1119,7 @@ export function OperatorConsultPanel({
                       >
                         <div className="mb-0.5 flex items-center justify-between gap-1.5 text-[9.5px] font-semibold">
                           <span className={isUser ? "text-signal" : "text-ok"}>
-                            {isUser ? "You" : brandName}
+                            {isUser ? (isPhoneTransferred ? "You (iPhone)" : "You (Laptop)") : brandName}
                           </span>
                           {!isUser && onReplayTurn && (
                             <button

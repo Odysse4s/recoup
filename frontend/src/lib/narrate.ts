@@ -117,7 +117,8 @@ export function narrate(ev: ServerEvent, brandName = "Recoup"): string {
     }
     case "call_turn": {
       const t = ev.payload as unknown as CallTurnPayload;
-      const who = t.speaker === "agent" ? brandName : "You (iPhone)";
+      const isDesktop = (t as { channel?: string }).channel === "desktop_voice";
+      const who = t.speaker === "agent" ? brandName : isDesktop ? "You" : "You (iPhone)";
       return `${who}: “${t.text}”`;
     }
     case "call_end": {
@@ -152,6 +153,15 @@ export function briefingFor(ev: ServerEvent, brandName = "Recoup"): string | nul
     const a = ev.payload as unknown as ApprovalNeededPayload;
     if (a.spoken_summary && a.spoken_summary.trim()) return a.spoken_summary.trim();
     return `Rehearsal complete. Risk gate active: ${brandName} is holding ${a.tool_name.replace(/_/g, " ")}. Reason: ${a.risk_reason}. Approve to commit staged changes, or reject to roll back.`;
+  }
+  if (ev.type === "run_done") {
+    const r = ev.payload as { status?: string; outcome?: string; spoken_summary?: string; summary?: string };
+    const status = String(r.status ?? r.outcome ?? "");
+    if (status === "committed" || status === "done") {
+      if (r.spoken_summary && r.spoken_summary.trim()) return r.spoken_summary.trim();
+      if (r.summary && r.summary.trim()) return r.summary.trim();
+      return "Audit complete and committed to the live ledger. Claim drafted, invoice placed on dispute hold, and vendor notification sent with one-click undo ready.";
+    }
   }
   if (ev.type === "offer") {
     const o = ev.payload as unknown as AnticipateOfferPayload;

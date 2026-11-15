@@ -145,7 +145,7 @@ export interface OumiIrisIntent {
 export interface CallStartPayload {
   call_id: string;
   mode?: "vendor" | "user_consult";
-  channel?: "notification" | "voice_call";
+  channel?: "notification" | "voice_call" | "desktop_voice" | "iphone_transferred";
   counterparty?: string;
   req_id?: string | null;
   claim_id?: string;
@@ -165,6 +165,7 @@ export interface CallTurnPayload {
   offer_pct?: number | null;
   keep_call_open?: boolean;
   call_status?: "ringing" | "connected" | "ended" | null;
+  channel?: "notification" | "voice_call" | "desktop_voice" | "iphone_transferred" | null;
   ui_action?: UiActionPayload | null;
   iris_intent?: OumiIrisIntent | null;
   irisIntent?: OumiIrisIntent | null;

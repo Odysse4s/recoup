@@ -163,7 +163,7 @@ class CallStartPayload(BaseModel):
     claim_amount: float = 587.30
     opening_pct: float | None = None
     floor_pct: float | None = None
-    channel: Literal["notification", "voice_call"] = "notification"
+    channel: Literal["notification", "voice_call", "desktop_voice", "iphone_transferred"] = "notification"
     call_status: Literal["ringing", "connected", "ended"] = "ringing"
 
 
@@ -175,6 +175,7 @@ class CallTurnPayload(BaseModel):
     offer_pct: float | None = None
     keep_call_open: bool = False
     call_status: Literal["ringing", "connected", "ended"] | None = None
+    channel: Literal["notification", "voice_call", "desktop_voice", "iphone_transferred"] | None = None
     ui_action: dict[str, Any] | None = None
 
 

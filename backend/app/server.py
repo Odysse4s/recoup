@@ -2278,6 +2278,58 @@ async def _transcribe_operator_consult_audio(
     return await _transcribe_audio_fallback(audio_bytes, filename, mime_type)
 
 
+@app.post("/api/voice/stt")
+async def voice_stt(request: Request):
+    """Transcribe recorded operator voice audio from desktop CommandBar / OperatorConsultPanel."""
+    content_type = (request.headers.get("content-type") or "").lower()
+    audio_bytes: bytes | None = None
+    filename = "operator_voice.webm"
+    mime_type = "audio/webm"
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        upload = form.get("audio") or form.get("file")
+        if upload is not None and hasattr(upload, "read"):
+            filename = getattr(upload, "filename", None) or filename
+            mime_type = getattr(upload, "content_type", None) or mime_type
+            audio_bytes = await upload.read()  # type: ignore[misc]
+    else:
+        raw_body = await request.body()
+        if raw_body.strip():
+            try:
+                body = json.loads(raw_body)
+            except Exception as exc:
+                raise HTTPException(400, "invalid JSON payload") from exc
+            if not isinstance(body, dict):
+                raise HTTPException(400, "expected JSON object")
+            mime_type = str(body.get("mime_type") or mime_type)
+            filename = str(body.get("filename") or filename)
+            b64_audio = body.get("audio_b64")
+            if isinstance(b64_audio, str) and b64_audio.strip():
+                encoded = b64_audio.split(",", 1)[-1].strip()
+                with contextlib.suppress(Exception):
+                    audio_bytes = base64.b64decode(encoded)
+
+    if not audio_bytes:
+        return {"ok": False, "text": "", "transcript": ""}
+
+    transcript = await _transcribe_operator_consult_audio(audio_bytes, filename, mime_type)
+    lowered = (transcript or "").lower().strip()
+    clean_utt = re.sub(r"[^\w\s]", "", lowered).strip()
+
+    if not lowered or lowered in _STT_NOISE_PHRASES or clean_utt in _STT_NOISE_PHRASES:
+        transcript = ""
+
+    if transcript:
+        _record_direct_voice_cost(transcript)
+
+    return {
+        "ok": bool(transcript),
+        "text": transcript,
+        "transcript": transcript,
+    }
+
+
 def _build_aade_mydata_xml(
     claim_id: str,
     choice: Literal["refund", "redelivery"],
@@ -3134,13 +3186,16 @@ async def call_pickup(request: Request):
     call_id = str(body.get("call_id") or f"CONSULT-{claim_id}").strip() or f"CONSULT-{claim_id}"
 
     now_ts = time.time()
+    existing_channel = ACTIVE_CALL.get("channel") if ACTIVE_CALL else None
+    pickup_channel = "iphone_transferred" if existing_channel == "iphone_transferred" else "voice_call"
+
     if ACTIVE_CALL is None or ACTIVE_CALL.get("call_id") != call_id:
         ACTIVE_CALL = {
             "active": True,
             "ringing": False,
             "call_status": "connected",
             "mode": "user_consult",
-            "channel": "voice_call",
+            "channel": pickup_channel,
             "call_id": call_id,
             "req_id": req_id,
             "claim_id": claim_id,
@@ -3162,6 +3217,8 @@ async def call_pickup(request: Request):
         ACTIVE_CALL["active"] = True
         ACTIVE_CALL["ringing"] = False
         ACTIVE_CALL["call_status"] = "connected"
+        ACTIVE_CALL["channel"] = pickup_channel
+        ACTIVE_CALL["counterparty"] = "Operator Mobile"
         ACTIVE_CALL["connected_at"] = now_ts
         ACTIVE_CALL["claim_id"] = claim_id
         ACTIVE_CALL["claim_amount"] = claim_amount
@@ -3183,7 +3240,7 @@ async def call_pickup(request: Request):
         {
             "call_id": call_id,
             "mode": "user_consult",
-            "channel": "voice_call",
+            "channel": pickup_channel,
             "call_status": "connected",
             "counterparty": "Operator Mobile",
             "req_id": req_id,
@@ -3197,6 +3254,7 @@ async def call_pickup(request: Request):
         "ok": True,
         "call_id": call_id,
         "call_status": "connected",
+        "channel": pickup_channel,
         "claim_id": claim_id,
         "req_id": req_id,
         "iris_gate": LATEST_IRIS_GATE,
@@ -3279,8 +3337,10 @@ async def start_user_consult_call(request: Request):
                 f"Should I enforce the {claim_amount:g} euro claim and email the supplier, or hold off?"
             )
 
-    channel = str(body.get("channel") or "voice_call")
-    if channel not in ("notification", "voice_call"):
+    raw_channel = str(body.get("channel") or "voice_call").strip()
+    if raw_channel in ("notification", "voice_call", "iphone_transferred"):
+        channel = raw_channel
+    else:
         channel = "voice_call"
 
     start_validated = CallStartPayload(
@@ -3316,18 +3376,12 @@ async def start_user_consult_call(request: Request):
         audio_url="/api/voice/turn-audio",
         keep_call_open=True,
         call_status="ringing",
+        channel=channel,
     )
     BUS.emit(
         run_id,
         EventType.CALL_TURN,
-        {
-            "call_id": turn_validated.call_id,
-            "speaker": turn_validated.speaker,
-            "text": turn_validated.text,
-            "audio_url": turn_validated.audio_url,
-            "keep_call_open": True,
-            "call_status": "ringing",
-        },
+        turn_validated.model_dump(),
         step=1,
         thought=f"Recoup Agent: {opening_text}",
         cost_eur=_voice_micro_cost(opening_text),
@@ -3340,35 +3394,68 @@ async def start_user_consult_call(request: Request):
         LATEST_IRIS_GATE = iris_gate
         _record_iris_usage(iris_gate)
 
-    ACTIVE_CALL = {
-        "active": True,
-        "ringing": True,
-        "call_status": "ringing",
-        "mode": "user_consult",
-        "channel": channel,
-        "call_id": call_id,
-        "req_id": req_id,
-        "claim_id": claim_id,
-        "claim_amount": claim_amount,
-        "supplier_id": supplier_id,
-        "supplier_name": supplier_name,
-        "delivery_id": delivery_id,
-        "invoice_id": invoice_id,
-        "recipient_email": recipient_email,
-        "is_kappa": is_kappa,
-        "counterparty": "Operator Mobile",
-        "iris_gate": LATEST_IRIS_GATE,
-        "turns": [
-            {
-                "speaker": "agent",
-                "text": opening_text,
-                "audio_url": "/api/voice/turn-audio",
-                "ts": time.time(),
-            }
-        ],
-        "selected_choice": None,
-        "end": None,
+    prior_turns: list[dict[str, Any]] = []
+    if (
+        ACTIVE_CALL is not None
+        and (ACTIVE_CALL.get("claim_id") == claim_id or ACTIVE_CALL.get("call_id") == call_id)
+        and ACTIVE_CALL.get("turns")
+    ):
+        prior_turns = list(ACTIVE_CALL["turns"])
+
+    new_turn = {
+        "speaker": "agent",
+        "text": opening_text,
+        "audio_url": "/api/voice/turn-audio",
+        "ts": time.time(),
     }
+    turns = prior_turns + [new_turn] if prior_turns else [new_turn]
+
+    if ACTIVE_CALL is not None and (ACTIVE_CALL.get("claim_id") == claim_id or ACTIVE_CALL.get("call_id") == call_id):
+        ACTIVE_CALL["active"] = True
+        ACTIVE_CALL["ringing"] = True
+        ACTIVE_CALL["call_status"] = "ringing"
+        ACTIVE_CALL["mode"] = "user_consult"
+        ACTIVE_CALL["channel"] = channel
+        ACTIVE_CALL["counterparty"] = "Operator Mobile"
+        ACTIVE_CALL["call_id"] = call_id
+        ACTIVE_CALL["turns"] = turns
+        ACTIVE_CALL["claim_id"] = claim_id
+        ACTIVE_CALL["claim_amount"] = claim_amount
+        ACTIVE_CALL["supplier_id"] = supplier_id
+        ACTIVE_CALL["supplier_name"] = supplier_name
+        ACTIVE_CALL["delivery_id"] = delivery_id
+        ACTIVE_CALL["invoice_id"] = invoice_id
+        ACTIVE_CALL["recipient_email"] = recipient_email
+        ACTIVE_CALL["is_kappa"] = is_kappa
+        ACTIVE_CALL["selected_choice"] = None
+        ACTIVE_CALL["end"] = None
+        if req_id and not ACTIVE_CALL.get("req_id"):
+            ACTIVE_CALL["req_id"] = req_id
+        if LATEST_IRIS_GATE is not None:
+            ACTIVE_CALL["iris_gate"] = LATEST_IRIS_GATE
+    else:
+        ACTIVE_CALL = {
+            "active": True,
+            "ringing": True,
+            "call_status": "ringing",
+            "mode": "user_consult",
+            "channel": channel,
+            "call_id": call_id,
+            "req_id": req_id,
+            "claim_id": claim_id,
+            "claim_amount": claim_amount,
+            "supplier_id": supplier_id,
+            "supplier_name": supplier_name,
+            "delivery_id": delivery_id,
+            "invoice_id": invoice_id,
+            "recipient_email": recipient_email,
+            "is_kappa": is_kappa,
+            "counterparty": "Operator Mobile",
+            "iris_gate": LATEST_IRIS_GATE,
+            "turns": turns,
+            "selected_choice": None,
+            "end": None,
+        }
 
     return {
         "ok": True,
@@ -3392,6 +3479,7 @@ class UserRespondBody(BaseModel):
     hangup: bool = False
     mime_type: str = "audio/webm"
     audio_b64: str | None = None
+    channel: str | None = None
 
 
 _HANGUP_INTENT_RE = re.compile(
@@ -3495,6 +3583,8 @@ async def handle_user_consult_response(request: Request):
     filename = "operator_reply.webm"
     mime_type = "audio/webm"
 
+    passed_channel: str | None = None
+
     if "multipart/form-data" in content_type:
         form = await request.form()
         raw_req = str(form.get("req_id") or "").strip()
@@ -3510,6 +3600,9 @@ async def handle_user_consult_response(request: Request):
         raw_hang = form.get("hangup")
         if raw_hang is not None:
             hangup = str(raw_hang).strip().lower() in ("true", "1", "yes")
+        raw_ch = form.get("channel")
+        if raw_ch is not None and str(raw_ch).strip():
+            passed_channel = str(raw_ch).strip()
         upload = form.get("audio") or form.get("file")
         if upload is not None and hasattr(upload, "read"):
             filename = getattr(upload, "filename", None) or filename
@@ -3535,6 +3628,9 @@ async def handle_user_consult_response(request: Request):
             raw_ui = str(body.get("ui_command") or "").strip().lower()
             ui_command = raw_ui or None
             hangup = bool(body.get("hangup", False))
+            raw_ch = body.get("channel")
+            if raw_ch is not None and str(raw_ch).strip():
+                passed_channel = str(raw_ch).strip()
             mime_type = str(body.get("mime_type") or mime_type)
             b64_audio = body.get("audio_b64")
             if isinstance(b64_audio, str) and b64_audio.strip():
@@ -3574,13 +3670,26 @@ async def handle_user_consult_response(request: Request):
     call_id = f"CONSULT-{claim_id}"
     run_id = f"consult_{uuid.uuid4().hex[:6]}"
 
+    if passed_channel in ("desktop_voice", "voice_call", "iphone_transferred"):
+        effective_channel = passed_channel
+    elif (
+        ACTIVE_CALL is not None
+        and (ACTIVE_CALL.get("call_id") == call_id or ACTIVE_CALL.get("claim_id") == claim_id)
+        and ACTIVE_CALL.get("channel") in ("desktop_voice", "voice_call", "iphone_transferred")
+    ):
+        effective_channel = ACTIVE_CALL["channel"]
+    else:
+        effective_channel = "desktop_voice"
+
+    counterparty = "Operator Desktop" if effective_channel == "desktop_voice" else "Operator Mobile"
+
     if ACTIVE_CALL is None or ACTIVE_CALL.get("call_id") != call_id:
         ACTIVE_CALL = {
             "active": True,
             "ringing": False,
             "call_status": "connected",
             "mode": "user_consult",
-            "channel": "voice_call",
+            "channel": effective_channel,
             "call_id": call_id,
             "req_id": req_id,
             "claim_id": claim_id,
@@ -3591,7 +3700,7 @@ async def handle_user_consult_response(request: Request):
             "invoice_id": invoice_id,
             "recipient_email": recipient_email,
             "is_kappa": is_kappa,
-            "counterparty": "Operator Mobile",
+            "counterparty": counterparty,
             "turns": [],
             "selected_choice": None,
             "end": None,
@@ -3600,6 +3709,8 @@ async def handle_user_consult_response(request: Request):
         ACTIVE_CALL["active"] = True
         ACTIVE_CALL["ringing"] = False
         ACTIVE_CALL["call_status"] = "connected"
+        ACTIVE_CALL["channel"] = effective_channel
+        ACTIVE_CALL["counterparty"] = counterparty
         ACTIVE_CALL["claim_id"] = claim_id
         ACTIVE_CALL["claim_amount"] = claim_amount
         ACTIVE_CALL["supplier_id"] = supplier_id
@@ -3622,6 +3733,7 @@ async def handle_user_consult_response(request: Request):
             return {
                 "ok": True,
                 "call_id": call_id,
+                "channel": effective_channel,
                 "keep_call_open": True,
                 "call_status": "connected",
                 "ignored_noise": True,
@@ -3724,6 +3836,7 @@ async def handle_user_consult_response(request: Request):
                 text=transcript,
                 keep_call_open=False,
                 call_status="ended",
+                channel=effective_channel,
             )
             BUS.emit(
                 run_id,
@@ -3741,6 +3854,7 @@ async def handle_user_consult_response(request: Request):
             audio_url="/api/voice/turn-audio",
             keep_call_open=False,
             call_status="ended",
+            channel=effective_channel,
         )
         BUS.emit(
             run_id,
@@ -3783,6 +3897,7 @@ async def handle_user_consult_response(request: Request):
         return {
             "ok": True,
             "call_id": call_id,
+            "channel": effective_channel,
             "keep_call_open": False,
             "call_status": "ended",
             "choice": ACTIVE_CALL.get("selected_choice") if has_committed else None,
@@ -3818,6 +3933,7 @@ async def handle_user_consult_response(request: Request):
                 text=transcript,
                 keep_call_open=True,
                 call_status="connected",
+                channel=effective_channel,
             )
             BUS.emit(
                 run_id,
@@ -3852,6 +3968,7 @@ async def handle_user_consult_response(request: Request):
                 keep_call_open=True,
                 call_status="connected",
                 ui_action=ui_action,
+                channel=effective_channel,
             )
             BUS.emit(
                 run_id,
@@ -3881,6 +3998,7 @@ async def handle_user_consult_response(request: Request):
             return {
                 "ok": True,
                 "call_id": call_id,
+                "channel": effective_channel,
                 "keep_call_open": True,
                 "call_status": "connected",
                 "choice": None,
@@ -3925,6 +4043,7 @@ async def handle_user_consult_response(request: Request):
                 text=transcript,
                 keep_call_open=True,
                 call_status="connected",
+                channel=effective_channel,
             )
             BUS.emit(
                 run_id,
@@ -3963,6 +4082,7 @@ async def handle_user_consult_response(request: Request):
                 keep_call_open=True,
                 call_status="connected",
                 ui_action=ui_action,
+                channel=effective_channel,
             )
             BUS.emit(
                 run_id,
@@ -3992,6 +4112,7 @@ async def handle_user_consult_response(request: Request):
             return {
                 "ok": True,
                 "call_id": call_id,
+                "channel": effective_channel,
                 "keep_call_open": True,
                 "call_status": "connected",
                 "choice": None,
@@ -4035,6 +4156,7 @@ async def handle_user_consult_response(request: Request):
         return {
             "ok": True,
             "call_id": call_id,
+            "channel": effective_channel,
             "keep_call_open": False,
             "call_status": "ended",
             "choice": "reject",
@@ -4066,6 +4188,7 @@ async def handle_user_consult_response(request: Request):
             text=transcript,
             keep_call_open=keep_call_open,
             call_status=call_status,
+            channel=effective_channel,
         )
         BUS.emit(
             run_id,
@@ -4083,6 +4206,7 @@ async def handle_user_consult_response(request: Request):
             audio_url="/api/voice/turn-audio",
             keep_call_open=keep_call_open,
             call_status=call_status,
+            channel=effective_channel,
         )
         BUS.emit(
             run_id,
@@ -4123,6 +4247,7 @@ async def handle_user_consult_response(request: Request):
         return {
             "ok": True,
             "call_id": call_id,
+            "channel": effective_channel,
             "keep_call_open": keep_call_open,
             "call_status": call_status,
             "choice": None,
@@ -4203,6 +4328,7 @@ async def handle_user_consult_response(request: Request):
             text=transcript,
             keep_call_open=keep_call_open,
             call_status="connected",
+            channel=effective_channel,
         )
         BUS.emit(
             run_id,
@@ -4451,6 +4577,7 @@ async def handle_user_consult_response(request: Request):
             keep_call_open=keep_call_open,
             call_status=call_status,
             ui_action=ui_action,
+            channel=effective_channel,
         )
         BUS.emit(
             run_id,
@@ -4515,6 +4642,7 @@ async def handle_user_consult_response(request: Request):
         return {
             "ok": True,
             "call_id": call_id,
+            "channel": effective_channel,
             "keep_call_open": keep_call_open,
             "call_status": call_status,
             "ui_action": ui_action,
@@ -4574,6 +4702,7 @@ async def handle_user_consult_response(request: Request):
             text=transcript,
             keep_call_open=True,
             call_status="connected",
+            channel=effective_channel,
         )
         BUS.emit(
             run_id,
@@ -4602,6 +4731,7 @@ async def handle_user_consult_response(request: Request):
             keep_call_open=True,
             call_status="connected",
             ui_action=ui_action,
+            channel=effective_channel,
         )
         BUS.emit(
             run_id,
@@ -4631,6 +4761,7 @@ async def handle_user_consult_response(request: Request):
         return {
             "ok": True,
             "call_id": call_id,
+            "channel": effective_channel,
             "keep_call_open": True,
             "call_status": "connected",
             "choice": None,
@@ -4659,6 +4790,7 @@ async def handle_user_consult_response(request: Request):
                 text=transcript,
                 keep_call_open=True,
                 call_status="connected",
+                channel=effective_channel,
             )
             BUS.emit(
                 run_id,
@@ -4692,6 +4824,7 @@ async def handle_user_consult_response(request: Request):
                 keep_call_open=True,
                 call_status="connected",
                 ui_action=ui_action,
+                channel=effective_channel,
             )
             BUS.emit(
                 run_id,
@@ -4719,6 +4852,7 @@ async def handle_user_consult_response(request: Request):
             return {
                 "ok": True,
                 "call_id": call_id,
+                "channel": effective_channel,
                 "keep_call_open": True,
                 "call_status": "connected",
                 "choice": None,
@@ -4743,6 +4877,7 @@ async def handle_user_consult_response(request: Request):
                 text=transcript,
                 keep_call_open=True,
                 call_status="connected",
+                channel=effective_channel,
             )
             BUS.emit(
                 run_id,
@@ -4780,6 +4915,7 @@ async def handle_user_consult_response(request: Request):
                 keep_call_open=True,
                 call_status="connected",
                 ui_action=ui_action,
+                channel=effective_channel,
             )
             BUS.emit(
                 run_id,
@@ -4807,6 +4943,7 @@ async def handle_user_consult_response(request: Request):
             return {
                 "ok": True,
                 "call_id": call_id,
+                "channel": effective_channel,
                 "keep_call_open": True,
                 "call_status": "connected",
                 "choice": None,
@@ -4848,6 +4985,7 @@ async def handle_user_consult_response(request: Request):
             return {
                 "ok": True,
                 "call_id": call_id,
+                "channel": effective_channel,
                 "keep_call_open": False,
                 "call_status": "ended",
                 "choice": None,
@@ -4895,6 +5033,7 @@ async def handle_user_consult_response(request: Request):
             text=transcript,
             keep_call_open=True,
             call_status="connected",
+            channel=effective_channel,
         )
         BUS.emit(
             run_id,
@@ -4911,6 +5050,7 @@ async def handle_user_consult_response(request: Request):
             audio_url="/api/voice/turn-audio",
             keep_call_open=True,
             call_status="connected",
+            channel=effective_channel,
         )
         BUS.emit(
             run_id,
@@ -4936,6 +5076,7 @@ async def handle_user_consult_response(request: Request):
         return {
             "ok": True,
             "call_id": call_id,
+            "channel": effective_channel,
             "keep_call_open": True,
             "call_status": "connected",
             "choice": None,
@@ -4991,6 +5132,7 @@ async def handle_user_consult_response(request: Request):
         text=transcript,
         keep_call_open=True,
         call_status="connected",
+        channel=effective_channel,
     )
     BUS.emit(
         run_id,
@@ -5008,6 +5150,7 @@ async def handle_user_consult_response(request: Request):
         audio_url="/api/voice/turn-audio",
         keep_call_open=True,
         call_status="connected",
+        channel=effective_channel,
     )
     BUS.emit(
         run_id,
@@ -5035,6 +5178,7 @@ async def handle_user_consult_response(request: Request):
     return {
         "ok": True,
         "call_id": call_id,
+        "channel": effective_channel,
         "keep_call_open": True,
         "call_status": "connected",
         "choice": None,
