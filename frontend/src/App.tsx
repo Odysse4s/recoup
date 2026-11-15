@@ -30,7 +30,7 @@ const PRESET_SCENARIOS: Preset[] = [
   },
 ];
 
-const isMobileRoute = () => window.location.pathname === "/mobile" || window.location.hash === "#mobile";
+const isMobileRoute = () => window.location.pathname.startsWith("/mobile") || window.location.hash === "#mobile";
 
 export default function App() {
   const [mobile, setMobile] = useState(isMobileRoute);

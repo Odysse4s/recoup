@@ -117,6 +117,9 @@ export function OperatorConsultPanel({
   const [, setHovered] = useState(false);
   const [isDialing, setIsDialing] = useState(false);
   const [timerTick, setTimerTick] = useState(0);
+  const [autoTransferSec, setAutoTransferSec] = useState<number | null>(null);
+  const autoTransferCancelledReqRef = useRef<string | null>(null);
+  const autoTransferFiredReqRef = useRef<string | null>(null);
 
   // Laptop Mic & Auto-VAD State
   const [laptopMicOn, setLaptopMicOn] = useState(false);
@@ -429,10 +432,17 @@ export function OperatorConsultPanel({
     return false;
   }, []);
 
+  const cancelAutoTransfer = useCallback(() => {
+    const key = pendingApproval?.req_id ?? consult?.reqId ?? "manual";
+    autoTransferCancelledReqRef.current = key;
+    setAutoTransferSec(null);
+  }, [consult?.reqId, pendingApproval?.req_id]);
+
   const handleProcessedText = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
       if (!trimmed) return;
+      cancelAutoTransfer();
 
       const now = Date.now();
       if (
@@ -449,7 +459,7 @@ export function OperatorConsultPanel({
         await onDesktopVoiceTurn(trimmed);
       }
     },
-    [isNearDuplicateTranscript, onDesktopVoiceTurn]
+    [cancelAutoTransfer, isNearDuplicateTranscript, onDesktopVoiceTurn]
   );
 
   // Send recorded Audio Blob to Backend /api/voice/stt (only when Web Speech API hasn't already handled the utterance!)
@@ -546,6 +556,7 @@ export function OperatorConsultPanel({
 
   // Toggle Laptop Mic
   const toggleLaptopMic = async () => {
+    cancelAutoTransfer();
     soundFx.playUiClick();
     stopSpeaking();
 
@@ -563,15 +574,69 @@ export function OperatorConsultPanel({
     }
   };
 
-  // Transfer to iPhone Handler
+  // Core Transfer to iPhone Executor (manual click OR 20s no-action auto-escalation)
+  const triggerPhoneTransfer = useCallback(
+    (playClick = true) => {
+      const key = pendingApproval?.req_id ?? activeReqId ?? "transferred";
+      autoTransferFiredReqRef.current = key;
+      setAutoTransferSec(null);
+      if (playClick) soundFx.playUiClick();
+      stopLaptopMic();
+      stopSpeaking();
+      setIsDialing(true);
+      if (pendingApproval?.req_id) escalatedReqIdRef.current = pendingApproval.req_id;
+      onEscalateToPhone(activeReqId, claimId);
+    },
+    [activeReqId, claimId, onEscalateToPhone, pendingApproval?.req_id, stopLaptopMic]
+  );
+
+  // Transfer to iPhone Button Handler
   const handleTransferToPhone = () => {
-    soundFx.playUiClick();
-    stopLaptopMic();
-    stopSpeaking();
-    setIsDialing(true);
-    if (pendingApproval?.req_id) escalatedReqIdRef.current = pendingApproval.req_id;
-    onEscalateToPhone(activeReqId, claimId);
+    cancelAutoTransfer();
+    triggerPhoneTransfer(true);
   };
+
+  // Start / reset 20-second auto-escalation countdown when Decision Gate opens with no user action
+  useEffect(() => {
+    const reqKey = pendingApproval?.req_id;
+    if (
+      !reqKey ||
+      isPhoneTransferred ||
+      callLive ||
+      isDialing ||
+      laptopMicOn ||
+      hasCommitted ||
+      callCompleted ||
+      callEndedWithoutDecision ||
+      autoTransferCancelledReqRef.current === reqKey ||
+      autoTransferFiredReqRef.current === reqKey
+    ) {
+      setAutoTransferSec(null);
+      return;
+    }
+    setAutoTransferSec((prev) => (prev === null ? 20 : prev));
+  }, [
+    callCompleted,
+    callEndedWithoutDecision,
+    callLive,
+    hasCommitted,
+    isDialing,
+    isPhoneTransferred,
+    laptopMicOn,
+    pendingApproval?.req_id,
+  ]);
+
+  useEffect(() => {
+    if (autoTransferSec === null) return;
+    if (autoTransferSec <= 0) {
+      triggerPhoneTransfer(false);
+      return;
+    }
+    const t = window.setTimeout(() => {
+      setAutoTransferSec((prev) => (prev !== null ? prev - 1 : null));
+    }, 1000);
+    return () => window.clearTimeout(t);
+  }, [autoTransferSec, triggerPhoneTransfer]);
 
   const sanitizedTurns = useMemo(() => {
     if (!consult?.turns) return [];
@@ -1111,14 +1176,28 @@ export function OperatorConsultPanel({
                   </div>
                 </button>
 
-                {/* 2. Call / Transfer to My iPhone Button */}
+                {/* 2. Call / Transfer to My iPhone Button (Auto-escalates after 20s of no action, or click anytime) */}
                 <button
                   type="button"
                   disabled={isDialing}
                   onClick={handleTransferToPhone}
-                  className="group flex items-center justify-between rounded-lg border border-purple-500/40 bg-purple-500/8 hover:border-purple-500/70 hover:bg-purple-500/15 dark:bg-purple-500/10 dark:hover:border-purple-400 dark:hover:bg-purple-500/20 p-2 text-left transition-all hover:shadow-[0_0_12px_rgba(168,85,247,0.18)] disabled:opacity-60"
+                  className="group relative overflow-hidden flex items-center justify-between rounded-lg border border-purple-500/45 bg-purple-500/8 hover:border-purple-500/75 hover:bg-purple-500/15 dark:bg-purple-500/10 dark:hover:border-purple-400 dark:hover:bg-purple-500/20 p-2 text-left transition-all hover:shadow-[0_0_12px_rgba(168,85,247,0.18)] disabled:opacity-60"
                 >
-                  <div className="flex items-center gap-2 min-w-0">
+                  {autoTransferSec !== null && !isDialing && (
+                    <div
+                      aria-hidden="true"
+                      className="pointer-events-none absolute inset-y-0 left-0 bg-purple-500/12 dark:bg-purple-400/15 transition-[width] duration-1000 ease-linear"
+                      style={{ width: `${Math.max(0, Math.min(100, ((20 - autoTransferSec) / 20) * 100))}%` }}
+                    />
+                  )}
+                  {autoTransferSec !== null && !isDialing && (
+                    <div
+                      aria-hidden="true"
+                      className="pointer-events-none absolute bottom-0 left-0 h-[2.5px] bg-gradient-to-r from-purple-500 via-fuchsia-500 to-purple-400 transition-[width] duration-1000 ease-linear"
+                      style={{ width: `${Math.max(0, Math.min(100, (autoTransferSec / 20) * 100))}%` }}
+                    />
+                  )}
+                  <div className="relative z-10 flex items-center gap-2 min-w-0">
                     <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-purple-500/15 text-purple-700 ring-1 ring-purple-500/35 dark:bg-purple-500/20 dark:text-purple-300 dark:ring-purple-400/40 transition-transform group-hover:scale-105">
                       <Smartphone className="h-4 w-4 text-purple-700 dark:text-purple-300" />
                     </div>
@@ -1132,13 +1211,26 @@ export function OperatorConsultPanel({
                         )}
                       </div>
                       <p className="truncate text-[9px] text-purple-700/85 dark:text-purple-300/80">
-                        Continue on /mobile with Grok Voice
+                        {autoTransferSec !== null && !isDialing
+                          ? `Auto-calls in ${autoTransferSec}s · click now`
+                          : "Continue on /mobile with Grok Voice"}
                       </p>
                     </div>
                   </div>
-                  <div className="ml-1.5 flex shrink-0 items-center gap-1 rounded bg-purple-500/15 px-1.5 py-0.5 font-mono text-[9.5px] font-semibold text-purple-800 ring-1 ring-purple-500/30 dark:bg-purple-400/20 dark:text-purple-300 dark:ring-purple-400/30">
+                  <div
+                    className={cx(
+                      "relative z-10 ml-1.5 flex shrink-0 items-center gap-1 rounded bg-purple-500/15 px-1.5 py-0.5 font-mono text-[9.5px] font-semibold text-purple-800 ring-1 ring-purple-500/30 dark:bg-purple-400/20 dark:text-purple-300 dark:ring-purple-400/30 tabular-nums",
+                      autoTransferSec !== null && autoTransferSec <= 5 && !isDialing && "animate-pulse ring-purple-500/70"
+                    )}
+                  >
                     <PhoneCall className="h-2.5 w-2.5" />
-                    <span>{isDialing ? "Calling…" : "Call"}</span>
+                    <span>
+                      {isDialing
+                        ? "Calling…"
+                        : autoTransferSec !== null
+                        ? `${autoTransferSec}s`
+                        : "Call"}
+                    </span>
                   </div>
                 </button>
               </div>
@@ -1191,7 +1283,11 @@ export function OperatorConsultPanel({
                   <input
                     type="text"
                     value={quickAskText}
-                    onChange={(e) => setQuickAskText(e.target.value)}
+                    onFocus={cancelAutoTransfer}
+                    onChange={(e) => {
+                      cancelAutoTransfer();
+                      setQuickAskText(e.target.value);
+                    }}
                     placeholder="Ask Recoup anything or type approval command…"
                     className="h-6 flex-1 rounded border border-line bg-surface/80 px-2 text-[10.5px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none"
                   />
@@ -1245,6 +1341,7 @@ export function OperatorConsultPanel({
                   type="button"
                   disabled={callLive && Boolean(consult?.selectedChoice)}
                   onClick={() => {
+                    cancelAutoTransfer();
                     soundFx.playUiClick();
                     onSelectResolution("refund", activeReqId, claimId);
                   }}
@@ -1271,6 +1368,7 @@ export function OperatorConsultPanel({
                   type="button"
                   disabled={callLive && Boolean(consult?.selectedChoice)}
                   onClick={() => {
+                    cancelAutoTransfer();
                     soundFx.playUiClick();
                     if (isKappa) {
                       onSelectResolution("redelivery", activeReqId, claimId);
@@ -1304,6 +1402,7 @@ export function OperatorConsultPanel({
                   <button
                     type="button"
                     onClick={() => {
+                      cancelAutoTransfer();
                       soundFx.playUiClick();
                       onReject(pendingApproval.req_id);
                     }}

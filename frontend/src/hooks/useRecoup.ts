@@ -912,7 +912,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         const isPhone = p.channel === "voice_call" || p.channel === "iphone_transferred";
         if (isPhone) {
           markPhoneCallActive();
-          if (windowsEnabledRef.current) {
+          if (windowsEnabledRef.current && !checkIsMobileRoute() && !isMobileCallManagingAudio()) {
             stopSpeaking();
             setSpeaking(false);
           }
@@ -948,7 +948,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         const isPhone = turn.channel === "voice_call" || turn.channel === "iphone_transferred";
         if (isPhone || phoneCallActiveRef.current) {
           markPhoneCallActive();
-          if (windowsEnabledRef.current) {
+          if (windowsEnabledRef.current && !checkIsMobileRoute() && !isMobileCallManagingAudio()) {
             stopSpeaking();
             setSpeaking(false);
           }
@@ -1557,8 +1557,10 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             const isPhone = p?.channel === "voice_call" || p?.channel === "iphone_transferred";
             if (isPhone) {
               markPhoneCallActive();
-              stopSpeaking();
-              setSpeaking(false);
+              if (windowsEnabledRef.current && !checkIsMobileRoute() && !isMobileCallManagingAudio()) {
+                stopSpeaking();
+                setSpeaking(false);
+              }
             }
             const hasPendingPacerEvents = queueRef.current.some((e) =>
               ["forge_spec", "forge_test", "tool_call", "tool_done", "approval_needed"].includes(e.type)
@@ -1573,8 +1575,10 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             const isPhone = turn?.channel === "voice_call" || turn?.channel === "iphone_transferred";
             if (isPhone) {
               markPhoneCallActive();
-              stopSpeaking();
-              setSpeaking(false);
+              if (windowsEnabledRef.current && !checkIsMobileRoute() && !isMobileCallManagingAudio()) {
+                stopSpeaking();
+                setSpeaking(false);
+              }
             }
             // Keep opening call_turn ordered behind queued call_start; dispatch live phone turns immediately
             if (queueRef.current.some((e) => e.type === "call_start")) {
@@ -1715,7 +1719,9 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     if (approved) {
       triggerCommitCelebration();
     }
-    stopSpeaking();
+    if (!checkIsMobileRoute() && !isMobileCallManagingAudio()) {
+      stopSpeaking();
+    }
     if (modeRef.current === "demo" || reqId.startsWith("req_demo")) {
       if (!approved) {
         restoreDemoBaseline(true);

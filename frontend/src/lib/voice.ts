@@ -149,29 +149,39 @@ export function unlockAudioSession(mode: "playback" | "play-and-record" = "playb
     // Ignore audio context errors
   }
 
-  // 3. Prime silent <audio> element to unlock iOS media playback
+  // 3. Prime silent <audio> element ONCE to unlock iOS media playback without ever pausing active speech
   try {
     const el = getPrimedAudioElement();
-    if (el) {
+    if (el && !mediaElementPrimed && currentAudio !== el && (el.paused || el.ended)) {
       el.loop = false;
-      el.play().then(() => {
-        el.pause();
-        el.loop = false;
-      }).catch(() => {});
+      const p = el.play();
+      if (p && typeof p.then === "function") {
+        p.then(() => {
+          mediaElementPrimed = true;
+          if (currentAudio !== el) {
+            el.pause();
+            el.loop = false;
+          }
+        }).catch(() => {});
+      } else {
+        mediaElementPrimed = true;
+      }
     }
   } catch {
     // Ignore silent audio prime error
   }
 
-  // 4. Unlock SpeechSynthesis
-  try {
-    if (typeof window !== "undefined" && window.speechSynthesis) {
-      const u = new SpeechSynthesisUtterance(" ");
-      u.volume = 0.01;
-      window.speechSynthesis.speak(u);
+  // 4. Unlock SpeechSynthesis ONLY in playback-only mode (never during iOS play-and-record calls where it steals audio focus)
+  if (mode !== "play-and-record" && !mobileCallOwnsAudio) {
+    try {
+      if (typeof window !== "undefined" && window.speechSynthesis && !window.speechSynthesis.speaking) {
+        const u = new SpeechSynthesisUtterance(" ");
+        u.volume = 0.01;
+        window.speechSynthesis.speak(u);
+      }
+    } catch {
+      // Ignore synth prime error
     }
-  } catch {
-    // Ignore synth prime error
   }
 
   return sharedAudioContext;
@@ -186,6 +196,9 @@ export function getSharedAudioContext(): AudioContext | null {
   }
   return unlockAudioSession();
 }
+
+let mediaElementPrimed = false;
+let pendingMicPromise: Promise<MediaStream | null> | null = null;
 
 export async function acquirePersistentMicStream(): Promise<MediaStream | null> {
   if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) return null;
@@ -203,31 +216,43 @@ export async function acquirePersistentMicStream(): Promise<MediaStream | null> 
     return warmMicStream;
   }
 
-  try {
-    unlockAudioSession("play-and-record");
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-        channelCount: 1,
-      },
-    });
-    stream.getAudioTracks().forEach((t) => {
-      t.enabled = true;
-    });
-    warmMicStream = stream;
-    activeWarmMicStream = stream;
-    unlockAudioSession("play-and-record");
-    return stream;
-  } catch (err) {
-    console.warn("acquirePersistentMicStream permission or hardware error", err);
-    return null;
+  if (pendingMicPromise) {
+    return pendingMicPromise;
   }
+
+  pendingMicPromise = (async () => {
+    try {
+      unlockAudioSession("play-and-record");
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+      });
+      stream.getAudioTracks().forEach((t) => {
+        t.enabled = true;
+      });
+      warmMicStream = stream;
+      activeWarmMicStream = stream;
+      unlockAudioSession("play-and-record");
+      return stream;
+    } catch (err) {
+      console.warn("acquirePersistentMicStream permission or hardware error", err);
+      return null;
+    } finally {
+      pendingMicPromise = null;
+    }
+  })();
+
+  return pendingMicPromise;
 }
 
-export function mutePersistentMicStream(): void {
+export function mutePersistentMicStream(force = false): void {
   if (!warmMicStream) return;
+  // Never let passive handlers disable the mic while an active mobile call owns audio
+  if (mobileCallOwnsAudio && !force) return;
   try {
     warmMicStream.getAudioTracks().forEach((t) => {
       t.enabled = false;
@@ -293,25 +318,63 @@ function pickVoice(): SpeechSynthesisVoice | undefined {
   );
 }
 
+const turnAudioCache = new Map<string, { buffer: ArrayBuffer; contentType: string }>();
+const inflightTurnFetches = new Map<string, Promise<{ buffer: ArrayBuffer; contentType: string } | null>>();
+
 async function fetchRemoteTurnAudio(text: string): Promise<{ buffer: ArrayBuffer; contentType: string } | null> {
-  try {
-    const signal = typeof AbortSignal !== "undefined" && "timeout" in AbortSignal ? AbortSignal.timeout(4500) : undefined;
-    const res = await fetch("/api/voice/turn-audio", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ speaker: "agent", text }),
-      ...(signal ? { signal } : {}),
-    });
-    const rawType = res.headers.get("content-type") ?? "";
-    if (!res.ok || res.status === 204 || !rawType.startsWith("audio")) {
-      return null;
-    }
-    const contentType = rawType.split(";")[0].trim() || "audio/mpeg";
-    const buffer = await res.arrayBuffer();
-    return { buffer, contentType };
-  } catch {
-    return null;
+  const key = text.trim();
+  if (!key) return null;
+
+  const cached = turnAudioCache.get(key);
+  if (cached) {
+    return { buffer: cached.buffer.slice(0), contentType: cached.contentType };
   }
+
+  const existing = inflightTurnFetches.get(key);
+  if (existing) {
+    const res = await existing;
+    return res ? { buffer: res.buffer.slice(0), contentType: res.contentType } : null;
+  }
+
+  const req = (async () => {
+    try {
+      const signal = typeof AbortSignal !== "undefined" && "timeout" in AbortSignal ? AbortSignal.timeout(10000) : undefined;
+      const res = await fetch("/api/voice/turn-audio", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ speaker: "agent", text: key }),
+        ...(signal ? { signal } : {}),
+      });
+      const rawType = res.headers.get("content-type") ?? "";
+      if (!res.ok || res.status === 204 || !rawType.startsWith("audio")) {
+        return null;
+      }
+      const contentType = rawType.split(";")[0].trim() || "audio/mpeg";
+      const buffer = await res.arrayBuffer();
+      if (buffer.byteLength > 0) {
+        if (turnAudioCache.size >= 20) {
+          const oldest = turnAudioCache.keys().next().value;
+          if (oldest) turnAudioCache.delete(oldest);
+        }
+        turnAudioCache.set(key, { buffer: buffer.slice(0), contentType });
+      }
+      return { buffer, contentType };
+    } catch {
+      return null;
+    } finally {
+      inflightTurnFetches.delete(key);
+    }
+  })();
+
+  inflightTurnFetches.set(key, req);
+  const out = await req;
+  return out ? { buffer: out.buffer.slice(0), contentType: out.contentType } : null;
+}
+
+export function prefetchTurnAudio(text: string): void {
+  const clean = text.trim();
+  if (!clean || turnAudioCache.has(clean) || inflightTurnFetches.has(clean)) return;
+  void fetchRemoteTurnAudio(clean);
 }
 
 let backendUnreachable = false;

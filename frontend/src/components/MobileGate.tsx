@@ -13,6 +13,7 @@ import {
   PackageCheck,
   PhoneCall,
   PhoneOff,
+  Send,
   ShieldCheck,
   Sparkles,
   Sun,
@@ -45,6 +46,7 @@ import {
   isMobileCallManagingAudio,
   mutePersistentMicStream,
   pickRecorderMimeType,
+  prefetchTurnAudio,
   setMobileCallOwnsAudio,
   speakCallTurn,
   stopSpeaking,
@@ -369,6 +371,7 @@ function OperatorEscalationCall({
   const [localTurns, setLocalTurns] = useState<MobileConsultTurn[]>([]);
   const [warmStream, setWarmStream] = useState<MediaStream | null>(null);
   const [committedChoice, setCommittedChoice] = useState<OperatorChoice | null>(null);
+  const [customPrompt, setCustomPrompt] = useState("");
 
   const activeStreamingTurnRef = useRef<ActiveStreamingTurn | null>(null);
   const actionToastTimerRef = useRef<number | null>(null);
@@ -430,6 +433,13 @@ function OperatorEscalationCall({
 
     return DEFAULT_OPENING_QUESTION;
   }, [consult?.turns, approval?.spoken_summary]);
+
+  // Pre-fetch opening TTS MP3 into RAM while phone is ringing so Accept Call plays in 0ms
+  useEffect(() => {
+    if (openingText) {
+      prefetchTurnAudio(openingText);
+    }
+  }, [openingText]);
 
   const mergedTurns = useMemo<MobileConsultTurn[]>(() => {
     const sseTurns = consult?.turns ?? [];
@@ -609,8 +619,8 @@ function OperatorEscalationCall({
   useEffect(() => {
     return () => {
       if (actionToastTimerRef.current) window.clearTimeout(actionToastTimerRef.current);
-      mutePersistentMicStream();
       setMobileCallOwnsAudio(false);
+      mutePersistentMicStream(true);
     };
   }, []);
 
@@ -666,14 +676,17 @@ function OperatorEscalationCall({
     if (spokenEndKeyRef.current === key) return;
     spokenEndKeyRef.current = key;
     buzz([30, 50, 30]);
-    mutePersistentMicStream();
-    setWarmStream(null);
     setMobileCallOwnsAudio(false);
+    mutePersistentMicStream(true);
+    setWarmStream(null);
     if (r.voiceOn) {
       const lastAgent = [...(consult.turns ?? [])].reverse().find((t) => t.speaker === "agent");
-      const textToSpeak =
-        lastAgent && lastAgent.text !== openingText ? lastAgent.text : consult.end.summary;
-      speakAgentLine(textToSpeak, false);
+      const textToSpeak = (
+        lastAgent && lastAgent.text !== openingText ? lastAgent.text : consult.end.summary
+      ).trim();
+      if (textToSpeak && lastSpokenTextRef.current !== textToSpeak) {
+        speakAgentLine(textToSpeak, false);
+      }
     }
   }, [consult?.callId, consult?.end, consult?.turns, openingText, r.voiceOn, speakAgentLine]);
 
@@ -709,8 +722,8 @@ function OperatorEscalationCall({
         setLocalTurns((prev) => [...prev, { speaker: "user", text: userLine, ts: Date.now() }]);
       }
 
-      // Sync staged decision in runtime even if call stays open
-      if (reqId && (data.resolved || data.approved !== undefined)) {
+      // Sync staged decision in mock demo runtime when call stays open (live mode is resolved server-side)
+      if (reqId && r.mode === "demo" && (data.resolved || data.approved !== undefined)) {
         r.decide(reqId, data.approved ?? true);
       }
 
@@ -745,9 +758,9 @@ function OperatorEscalationCall({
 
       if (!isCommitted) {
         // Early hangup / call ended without committing a choice!
-        mutePersistentMicStream();
-        setWarmStream(null);
         setMobileCallOwnsAudio(false);
+        mutePersistentMicStream(true);
+        setWarmStream(null);
 
         const replyText = data.reply_text?.trim() || data.confirmation_text?.trim();
         if (isPhysicalButtonTap) {
@@ -796,9 +809,9 @@ function OperatorEscalationCall({
       });
 
       buzz([40, 60, 40]);
-      mutePersistentMicStream();
-      setWarmStream(null);
       setMobileCallOwnsAudio(false);
+      mutePersistentMicStream(true);
+      setWarmStream(null);
 
       if (reqId && (r.mode === "demo" || data.resolved === false)) {
         r.decide(reqId, data.approved ?? true);
@@ -818,13 +831,14 @@ function OperatorEscalationCall({
       utteranceAbortRef.current?.abort();
       const abortCtrl = new AbortController();
       utteranceAbortRef.current = abortCtrl;
-      const timeoutId = window.setTimeout(() => abortCtrl.abort(), 8500);
+      const timeoutId = window.setTimeout(() => abortCtrl.abort(), 14000);
 
       setSubmitting(true);
       buzz(25);
       try {
         const form = new FormData();
         form.append("audio", blob, `utterance.${ext}`);
+        form.append("channel", "iphone_transferred");
         if (reqId) form.append("req_id", reqId);
         form.append("claim_id", claimId || DEFAULT_CLAIM_ID);
         if (consult?.callId) form.append("call_id", consult.callId);
@@ -923,51 +937,57 @@ function OperatorEscalationCall({
       primed.loop = false;
     }
 
-    // 1. Mobile call owns audio
+    // 1. Mobile call owns audio & synchronously blesses iOS AudioContext + HTMLAudioElement inside user tap
     setMobileCallOwnsAudio(true);
-
-    // 2. Unlock iOS Audio & SpeechSynthesis into play-and-record so mic stays 100% active
     unlockAudioSession("play-and-record");
     onUnlockAudio();
 
-    // 3. Play Recoup's opening question immediately, synchronously within this tap gesture -
-    //    onEnd transitions automatically into listening! This must fire BEFORE any `await`
-    //    below: delaying it behind a mic-permission prompt or a slow network round trip can
-    //    lose the browser's user-activation window (iOS Safari especially), which is why
-    //    pickup sometimes played no audio at all.
     const turnId = `agent-open-${Date.now()}`;
     setLocalTurns([{ id: turnId, speaker: "agent", text: "…", ts: Date.now() }]);
-    streamAgentTurn(openingText, turnId, true);
     setAnswered(true);
 
-    // 4. Open warm mic MediaStream once (can proceed while the opening line is speaking).
+    // 2. Notify backend / desktop immediately in background (non-blocking)
+    void (async () => {
+      try {
+        if (!consult?.active) {
+          await fetch("/api/call/user-consult", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              req_id: reqId,
+              claim_id: claimId || DEFAULT_CLAIM_ID,
+              channel: "iphone_transferred",
+            }),
+          }).catch(() => {});
+        }
+        await fetch("/api/call/pickup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            call_id: consult?.callId || `CONSULT-${claimId || DEFAULT_CLAIM_ID}`,
+            claim_id: claimId || DEFAULT_CLAIM_ID,
+            req_id: reqId,
+            channel: "iphone_transferred",
+          }),
+        }).catch(() => {});
+      } catch {
+        // offline / demo
+      }
+    })();
+
+    // 3. Acquire persistent mic stream first so any iOS "Allow Microphone" system sheet
+    //    finishes BEFORE Recoup speaks (preventing iOS modal audio interruption) AND stays unmuted!
     const stream = await acquirePersistentMicStream();
     if (stream) {
+      stream.getAudioTracks().forEach((t) => {
+        t.enabled = true;
+      });
       setWarmStream(stream);
     }
 
-    // 5. Ensure server consult is active and notify desktop immediately via pickup. Neither
-    //    of these needs to block the opening line, so they run after it's already started.
-    try {
-      if (!consult?.active) {
-        await fetch("/api/call/user-consult", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ req_id: reqId, claim_id: claimId || DEFAULT_CLAIM_ID }),
-        }).catch(() => {});
-      }
-      await fetch("/api/call/pickup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          call_id: consult?.callId || `CONSULT-${claimId || DEFAULT_CLAIM_ID}`,
-          claim_id: claimId || DEFAULT_CLAIM_ID,
-          req_id: reqId,
-        }),
-      }).catch(() => {});
-    } catch {
-      // offline / demo
-    }
+    // 4. Resume iOS AudioContext after permission prompt & play pre-fetched opening question out loud
+    getSharedAudioContext()?.resume().catch(() => {});
+    streamAgentTurn(openingText, turnId, true);
   }, [claimId, consult?.active, consult?.callId, onUnlockAudio, openingText, reqId, streamAgentTurn]);
 
   // Red End Call Button Handler: tells server to hang up, transitions cleanly
@@ -979,9 +999,9 @@ function OperatorEscalationCall({
     if (primed) {
       primed.loop = false;
     }
-    mutePersistentMicStream();
-    setWarmStream(null);
     setMobileCallOwnsAudio(false);
+    mutePersistentMicStream(true);
+    setWarmStream(null);
 
     try {
       const res = await fetch("/api/call/user-respond", {
@@ -989,6 +1009,7 @@ function OperatorEscalationCall({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           call_id: consult?.callId,
+          channel: "iphone_transferred",
           hangup: true,
           text: "hang up",
           transcript: "hang up",
@@ -1060,6 +1081,7 @@ function OperatorEscalationCall({
             choice: params.choice,
             ui_command: params.ui_command,
             hangup: params.hangup,
+            channel: "iphone_transferred",
             req_id: reqId,
             claim_id: claimId || DEFAULT_CLAIM_ID,
             call_id: consult?.callId,
@@ -1486,7 +1508,7 @@ function OperatorEscalationCall({
                 ? "Auto-sends on pause · or tap orb to send now"
                 : isSyncing
                 ? "Syncing with desktop… (tap orb to cancel & speak again)"
-                : "Live Full-Duplex · Speak anytime to interrupt"}
+                : "Hands-free Auto-VAD · or tap orb to talk / send"}
             </p>
           </div>
         </div>
@@ -1495,9 +1517,29 @@ function OperatorEscalationCall({
         {!resolvedEnd && (
           <div className="mb-4 space-y-1.5 rounded-2xl border border-line bg-surface/75 p-3 backdrop-blur-xl">
             {latestAgentTurn && (
-              <div className="text-[12.5px] leading-snug">
-                <span className="font-bold text-ok">{r.brand.brand_name} AI: </span>
-                <span className="text-ink-2">{latestAgentTurn.text}</span>
+              <div className="flex items-start justify-between gap-2 text-[12.5px] leading-snug">
+                <div className="min-w-0 flex-1">
+                  <span className="font-bold text-ok">{r.brand.brand_name} AI: </span>
+                  <span className="text-ink-2">
+                    {latestAgentTurn.text === "…" ? openingText : latestAgentTurn.text}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    soundFx.playUiClick();
+                    unlockAudioSession("play-and-record");
+                    speakAgentLine(
+                      latestAgentTurn.text === "…" ? openingText : latestAgentTurn.text,
+                      true
+                    );
+                  }}
+                  title="Replay Recoup voice"
+                  className="shrink-0 inline-flex items-center gap-1 rounded-full border border-ok/35 bg-ok/10 px-2 py-0.5 text-[10.5px] font-semibold text-ok active:scale-95"
+                >
+                  <Volume2 className="h-3 w-3" />
+                  <span>Replay</span>
+                </button>
               </div>
             )}
             {latestUserTurn && (
@@ -1720,9 +1762,36 @@ function OperatorEscalationCall({
                 </button>
               </div>
 
-              <p className="mb-4 text-[12px] text-ink-3">
-                Send instant voice-to-desktop commands or decisions without microphone input:
+              <p className="mb-3 text-[12px] text-ink-3">
+                Ask anything or trigger decisions directly over the live phone call:
               </p>
+
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const q = customPrompt.trim();
+                  if (!q || submitting) return;
+                  setCustomPrompt("");
+                  void submitQuickTrigger({ transcript: q });
+                }}
+                className="mb-3 flex items-center gap-2"
+              >
+                <input
+                  type="text"
+                  value={customPrompt}
+                  onChange={(e) => setCustomPrompt(e.target.value)}
+                  placeholder="Ask Recoup anything or type command…"
+                  className="h-10 flex-1 rounded-xl border border-line bg-surface px-3 text-[13px] text-ink placeholder:text-ink-3 focus:border-signal focus:outline-none"
+                />
+                <button
+                  type="submit"
+                  disabled={!customPrompt.trim() || submitting}
+                  className={cx(btn("signal", "sm"), "h-10 rounded-xl px-3.5 text-[12.5px] font-semibold disabled:opacity-40")}
+                >
+                  <Send className="h-3.5 w-3.5" />
+                  <span>Send</span>
+                </button>
+              </form>
 
               <div className="space-y-2.5">
                 {/* 1. What are my options? */}
@@ -1800,6 +1869,34 @@ function OperatorEscalationCall({
                     €{claimAmount.toFixed(2)} Net
                   </Chip>
                 </button>
+
+                {/* 3b. Take 22 replacement hubs (Kappa scenario) */}
+                {(claimId === DEFAULT_CLAIM_ID || claimId === "CLM-D-1042" || claimId === "D-1042") && (
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={() =>
+                      submitQuickTrigger({
+                        transcript: "Take the 22 replacement hubs tomorrow",
+                        choice: "redelivery",
+                      })
+                    }
+                    className="flex w-full items-center justify-between rounded-2xl border border-signal/45 bg-signal/12 px-4 py-3 text-left transition-colors hover:bg-signal/18 active:scale-[0.99]"
+                  >
+                    <span className="flex items-center gap-3">
+                      <PackageCheck className="h-5 w-5 text-signal" />
+                      <div>
+                        <div className="text-[13.5px] font-semibold text-ink">
+                          Take 22 replacement hubs + €202.30 credit
+                        </div>
+                        <div className="text-[11.5px] text-ink-3">
+                          📦 “Take the 22 replacement hubs tomorrow”
+                        </div>
+                      </div>
+                    </span>
+                    <Chip tone="signal">replace</Chip>
+                  </button>
+                )}
 
                 {/* 4. Hang up for now */}
                 <button
@@ -2198,17 +2295,24 @@ export function MobileGate({
     return ctx?.state === "running";
   });
 
+  const unlockPlaybackOnly = useCallback(() => {
+    unlockAudioSession("playback");
+    setAudioUnlocked(true);
+  }, []);
+
   const unlockAudio = useCallback(async () => {
     soundFx.playUiClick();
     soundFx.playStageTick(0);
     unlockAudioSession("play-and-record");
-    try {
-      const stream = await acquirePersistentMicStream();
-      if (stream) {
-        mutePersistentMicStream();
+    if (!isMobileCallManagingAudio()) {
+      try {
+        const stream = await acquirePersistentMicStream();
+        if (stream && !isMobileCallManagingAudio()) {
+          mutePersistentMicStream();
+        }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
     }
     setAudioUnlocked(true);
   }, []);
@@ -2216,7 +2320,8 @@ export function MobileGate({
   useEffect(() => {
     if (audioUnlocked) return;
     const handleGesture = () => {
-      unlockAudio();
+      // Passive touchstart/click ONLY unlocks playback — NEVER pops getUserMedia or mutes an active call mic!
+      unlockPlaybackOnly();
     };
     window.addEventListener("touchstart", handleGesture, { passive: true, once: true });
     window.addEventListener("click", handleGesture, { passive: true, once: true });
@@ -2224,7 +2329,7 @@ export function MobileGate({
       window.removeEventListener("touchstart", handleGesture);
       window.removeEventListener("click", handleGesture);
     };
-  }, [audioUnlocked, unlockAudio]);
+  }, [audioUnlocked, unlockPlaybackOnly]);
 
   useEffect(() => {
     const fit = () => {
@@ -2267,15 +2372,15 @@ export function MobileGate({
   }, [localCompletion, r.pendingApproval?.req_id]);
 
   const currentSessionKey =
-    consult?.callId ?? activeCallId ?? r.pendingApproval?.req_id ?? localCompletion?.sessionKey ?? "session-d-1042";
+    r.pendingApproval?.req_id ?? consult?.reqId ?? consult?.callId ?? activeCallId ?? localCompletion?.sessionKey ?? "session-d-1042";
 
   const handleEndWithoutDecision = useCallback(() => {
     setLocalCompletion(null);
     setActiveCallId(null);
     setDismissedCallKey(currentSessionKey);
     setPausedCallDecision(true);
-    mutePersistentMicStream();
     setMobileCallOwnsAudio(false);
+    mutePersistentMicStream(true);
   }, [currentSessionKey]);
 
   const resolvedMobileClaimId = useMemo(() => {
@@ -2389,7 +2494,7 @@ export function MobileGate({
             r={r}
             localCompletion={localCompletion}
             audioUnlocked={audioUnlocked}
-            onUnlockAudio={unlockAudio}
+            onUnlockAudio={unlockPlaybackOnly}
             onSetLocalCompletion={setLocalCompletion}
             onDismissCompleted={() => {
               setLocalCompletion(null);
