@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { AudioLines, FileDown, Mic, MicOff, Moon, Play, RotateCcw, ShieldCheck, Smartphone, Sun, Volume2, VolumeX } from "lucide-react";
+import { AudioLines, FileDown, Moon, Play, RotateCcw, ShieldCheck, Smartphone, Sun, Volume2, VolumeX } from "lucide-react";
 import type { RecoupRuntime } from "../hooks/useRecoup";
 import { soundFx, useSfx } from "../lib/sound";
 import { PACE, type Speed } from "../lib/speed";
@@ -256,7 +256,8 @@ export function VoicePill({ r, compact }: { r: RecoupRuntime; compact?: boolean 
           r.voiceOn ? "text-ink-2 hover:bg-surface hover:text-ink" : "text-ink-3 opacity-60 hover:bg-surface hover:text-ink-2"
         )}
       >
-        {r.voiceOn ? <Mic className="h-3 w-3 text-accent" /> : <MicOff className="h-3 w-3" />}
+        {r.voiceOn ? <AudioLines className="h-3.5 w-3.5 text-accent" /> : <VolumeX className="h-3 w-3" />}
+        <span>TTS</span>
       </button>
 
       <span className="h-3.5 w-px bg-line" aria-hidden />

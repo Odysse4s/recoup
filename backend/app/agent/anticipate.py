@@ -146,7 +146,7 @@ def gather_workspace_evidence(env: Env) -> str:
         parts.append(f"Files: {rel_files}")
         inlined = 0
         for p in all_files:
-            if inlined >= 5:
+            if inlined >= 20:
                 break
             if p.suffix.lower() in {".md", ".txt", ".json", ".csv"} and p.stat().st_size <= 2500:
                 rel = p.relative_to(env.root_dir).as_posix()

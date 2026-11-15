@@ -19,6 +19,7 @@ services:
       - ./backend/app:/app/app
       - recoup_workspace:/app/workspace
       - recoup_llm_cache:/app/.llm_cache
+      - recoup_voice_cache:/app/.voice_cache
     restart: unless-stopped
 
   frontend:
@@ -39,3 +40,4 @@ services:
 volumes:
   recoup_workspace:
   recoup_llm_cache:
+  recoup_voice_cache:

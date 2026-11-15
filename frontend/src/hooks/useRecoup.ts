@@ -162,6 +162,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   const [requestedDeckView, setRequestedDeckView] = useState<{ view: "graph" | "db" | "split"; seq: number } | null>(null);
   const [requestedDbTable, setRequestedDbTable] = useState<{ table: string; seq: number } | null>(null);
   const executeUiActionRef = useRef<((uiAction: UiActionPayload) => void) | null>(null);
+  const triggerGoalRef = useRef<((goalText: string) => Promise<void>) | null>(null);
+  const acceptOfferRef = useRef<((offerId: string) => Promise<void>) | null>(null);
   const lastUiActionRef = useRef<{ key: string; ts: number } | null>(null);
 
   const queueRef = useRef<ServerEvent[]>([]);
@@ -600,23 +602,39 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     // 2. Play commit success chime
     soundFx.playCommitSuccess();
 
-    // 3. Spawn the 2 celebratory Live Commit Windows sequentially
-    const [win1, win2] = buildCommitWindows(choice);
+    // 3. Spawn the 2 celebratory Live Commit Windows sequentially with dynamic claim context
+    const activeClaimId = operatorConsult?.claimId || "CLM-D-1042";
+    const isKappaCommit = activeClaimId === "CLM-D-1042" || /kappa|1042/i.test(activeClaimId);
+    const claimsRows = (wsStateRef.current?.tables?.claims ?? []) as Record<string, unknown>[];
+    const matchedClaim =
+      claimsRows.find((r) => String(r.id ?? "") === activeClaimId) ??
+      (claimsRows.length > 0 ? claimsRows[claimsRows.length - 1] : undefined);
+    const [win1, win2] = buildCommitWindows(choice, {
+      isKappa: isKappaCommit,
+      claimId: activeClaimId,
+      invoiceId: matchedClaim?.invoice_id ? String(matchedClaim.invoice_id) : undefined,
+      supplierId: matchedClaim?.supplier_id ? String(matchedClaim.supplier_id) : undefined,
+      amount: typeof operatorConsult?.claimAmount === "number" && operatorConsult.claimAmount > 0
+        ? operatorConsult.claimAmount
+        : matchedClaim?.amount
+        ? Number(matchedClaim.amount)
+        : undefined,
+    });
     if (win1) {
       spawnWindow(win1);
       window.setTimeout(() => {
         dockWindow(win1.id, "db");
-      }, 15000);
+      }, 5200);
     }
     if (win2) {
       window.setTimeout(() => {
         spawnWindow(win2);
         window.setTimeout(() => {
           dockWindow(win2.id, "diff");
-        }, 15000);
+        }, 5200);
       }, 950);
     }
-  }, [operatorConsult?.selectedChoice, spawnWindow, dockWindow]);
+  }, [operatorConsult?.selectedChoice, operatorConsult?.claimId, operatorConsult?.claimAmount, spawnWindow, dockWindow]);
 
   const togglePin = useCallback((id: string) => {
     setWindows((ws) => ws.map((w) => (w.id === id ? { ...w, pinned: !w.pinned } : w)));
@@ -723,6 +741,16 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
           setWindows((ws) => ws.map((w) => (w.pinned ? { ...w, pinned: false } : w)));
           void refreshState();
         }, 400);
+      } else if (uiAction.action === "trigger_goal") {
+        const nextGoal = uiAction.goal?.trim();
+        const nextOfferId = uiAction.offer_id?.trim();
+        window.setTimeout(() => {
+          if (nextOfferId && acceptOfferRef.current) {
+            void acceptOfferRef.current(nextOfferId);
+          } else if (nextGoal && triggerGoalRef.current) {
+            void triggerGoalRef.current(nextGoal);
+          }
+        }, 1400);
       }
     },
     [report, spawnWindow, refreshState, triggerCommitCelebration]
@@ -730,15 +758,39 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   executeUiActionRef.current = executeUiAction;
 
   // ---------------------------------------------------------------- reducer
-  const markPlan = (toolName: string, status: "running" | "done" | "failed") =>
+  const markPlan = (toolName: string, status: "running" | "done" | "failed", forgeOnly = false) =>
     setPlan((prev) => {
       if (!prev) return prev;
-      const match = (s: PlanPayload["steps"][number]) => s.tool === toolName || s.tool.endsWith(`:${toolName}`);
-      const targetIdx =
-        status === "running"
-          ? prev.steps.findIndex((s) => match(s) && s.status !== "done")
-          : prev.steps.findIndex((s) => match(s) && s.status === "running");
-      const fallbackIdx = targetIdx >= 0 ? targetIdx : prev.steps.findIndex(match);
+      const missingKey = `MISSING:${toolName}`;
+      const matchForge = (s: PlanPayload["steps"][number]) =>
+        s.tool === missingKey || s.tool.endsWith(`:${toolName}`);
+      const matchExact = (s: PlanPayload["steps"][number]) => s.tool === toolName;
+      const matchAny = (s: PlanPayload["steps"][number]) => matchExact(s) || matchForge(s);
+
+      let targetIdx = -1;
+      if (forgeOnly) {
+        targetIdx =
+          status === "running"
+            ? prev.steps.findIndex((s) => matchForge(s) && s.status !== "done")
+            : prev.steps.findIndex((s) => matchForge(s) && s.status !== "done");
+      } else {
+        // Prefer exact non-MISSING step first so Step 4 never gets stolen by Step 3 (MISSING:...)
+        targetIdx =
+          status === "running"
+            ? prev.steps.findIndex((s) => matchExact(s) && s.status !== "done")
+            : prev.steps.findIndex((s) => matchExact(s) && s.status === "running");
+        if (targetIdx < 0) {
+          targetIdx = prev.steps.findIndex((s) => matchExact(s) && s.status !== "done");
+        }
+        if (targetIdx < 0) {
+          targetIdx =
+            status === "running"
+              ? prev.steps.findIndex((s) => matchAny(s) && s.status !== "done")
+              : prev.steps.findIndex((s) => matchAny(s) && s.status === "running");
+        }
+      }
+
+      const fallbackIdx = targetIdx >= 0 ? targetIdx : prev.steps.findIndex(forgeOnly ? matchForge : matchAny);
       if (fallbackIdx < 0) return prev;
       return {
         ...prev,
@@ -1012,6 +1064,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         setForgeSpec(spec);
         setForgeTest(null);
         setStage("forge");
+        if (spec?.name) markPlan(spec.name, "running", true);
         forgeTestReceivedRef.current = false;
         soundFx.playForgeStart();
         if (windowsEnabledRef.current && spec?.name) {
@@ -1040,6 +1093,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         setForgeTest(ft);
         setForgedCode((m) => ({ ...m, [ft.name]: ft }));
         setStage("forge");
+        if (ft?.name && ft.registered) markPlan(ft.name, "done", true);
         forgeTestReceivedRef.current = true;
         const heroMs = speedRef.current === "turbo" ? 450 : speedRef.current === "2x" ? 950 : speedRef.current === "0.5x" ? 2800 : 1800;
         forgeHeroUntilRef.current = Date.now() + heroMs;
@@ -1089,15 +1143,20 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         }
         break;
       }
-      case "forge_registered":
+      case "forge_registered": {
+        const regName = String((ev.payload as { name?: string; tool?: string })?.name ?? (ev.payload as { tool?: string })?.tool ?? "");
+        if (regName) markPlan(regName, "done", true);
         if (modeRef.current !== "demo") refreshState();
         break;
+      }
       case "tool_call": {
         const call = callOf(ev);
         setStage("rehearse");
         if (call?.name) {
           markPlan(call.name, "running");
-          spawnWindow(toolWindow(call, ev.latency_ms || undefined));
+          const argPath = call.args?.path ? String(call.args.path) : "";
+          const fileContent = argPath ? wsStateRef.current?.files?.[argPath] : undefined;
+          spawnWindow(toolWindow(call, ev.latency_ms || undefined, fileContent));
         }
         break;
       }
@@ -1129,10 +1188,22 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         if (name) markPlan(name, "failed");
         break;
       }
-      case "verify":
-        setVerify(ev.payload as unknown as VerifyPayload);
+      case "verify": {
+        const vp = ev.payload as unknown as VerifyPayload;
+        setVerify(vp);
         setStage("verify");
+        if (vp?.passed) {
+          setPlan((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  steps: prev.steps.map((s) => (s.status === "failed" ? s : { ...s, status: "done" })),
+                }
+              : prev
+          );
+        }
         break;
+      }
       case "rehearse_report":
         setReport((ev.payload as { report: ChangeReport }).report);
         setRehearsalActive(false);
@@ -1143,6 +1214,10 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         setPendingApproval(ev.payload as unknown as ApprovalNeededPayload);
         setStage("gate");
         setRunStatus("awaiting");
+        // Auto-clear non-pinned rehearsal windows shortly after Gate opens so workspace & Decision Gate stay clean
+        window.setTimeout(() => {
+          setWindows((ws) => ws.filter((w) => w.pinned));
+        }, 1600);
         if (windowsEnabledRef.current) soundFx.playRiskGateAlert();
         else soundFx.playIncomingCall();
         break;
@@ -1481,18 +1556,23 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       enqueue(mockEvents());
     }
   };
+  triggerGoalRef.current = triggerGoal;
 
   const runStageDemo = async () => {
+    if (speedRef.current === "turbo" || speedRef.current === "2x") {
+      setSpeed("1x");
+      speedRef.current = "1x";
+    }
     clearRun();
     setRunStartedAt(Date.now());
     setRunStatus("running");
     const brandName = brandOf(wsStateRef.current?.domain).brand_name;
-    setNarration(`Running fast live stage audit demo for ${brandName} shipment D-1042…`);
+    setNarration(`Running live stage audit demo for ${brandName} shipment D-1042…`);
     try {
       const res = await fetch("/api/demo/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pace_ms: 2100, anticipate_after: true }),
+        body: JSON.stringify({ pace_ms: 2300, anticipate_after: true }),
       });
       if (!res.ok) throw new Error(`Demo run failed with status ${res.status}`);
       setMode("live");
@@ -1604,17 +1684,29 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       soundFx.playCommitSuccess();
       return;
     }
+    clearRun();
+    setRunStartedAt(Date.now());
+    setRunStatus("running");
+    setStage("plan");
+    setNarration(`Launching follow-up audit loop: ${currentOffer?.prediction.need ?? offerId}…`);
     try {
       const res = await fetch(`/api/offers/${offerId}/accept`, { method: "POST" });
       if (res.ok) {
-        await refreshState();
+        setMode("live");
+      } else if (currentOffer?.prediction?.goal_prompt) {
+        await triggerGoal(currentOffer.prediction.goal_prompt);
       } else {
-        setNarration(`Could not apply proactive offer (${res.status}). Workspace unchanged.`);
+        await refreshState();
       }
     } catch {
-      setNarration("Backend unreachable while applying proactive offer.");
+      if (currentOffer?.prediction?.goal_prompt) {
+        await triggerGoal(currentOffer.prediction.goal_prompt);
+      } else {
+        setNarration("Backend unreachable while applying proactive offer.");
+      }
     }
   };
+  acceptOfferRef.current = acceptOffer;
 
   const dismissOffer = async (offerId: string) => {
     setOffer(null);

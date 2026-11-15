@@ -145,12 +145,14 @@ class VerifyPayload(BaseModel):
 
 # ---------- supplier & operator calls ----------
 class UiActionPayload(BaseModel):
-    action: Literal["open_file", "switch_view", "commit_resolution"]
+    action: Literal["open_file", "switch_view", "commit_resolution", "trigger_goal"]
     path: str | None = None
     content: str | None = None
     view: str | None = None
     table: str | None = None
     choice: Literal["refund", "redelivery"] | None = None
+    goal: str | None = None
+    offer_id: str | None = None
     label: str = ""
 
 

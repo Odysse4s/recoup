@@ -221,7 +221,7 @@ def _reconcile_three_way_claim(env: Env, done_calls: list[ToolCall]) -> VerifyCr
     for rel in write_paths:
         target = env.root_dir / rel
         if target.exists():
-            txt = target.read_text(encoding="utf-8", errors="replace")
+            txt = target.read_text(encoding="utf-8", errors="replace").replace(",", "")
             if amt_str_2 not in txt and amt_str_1 not in txt:
                 return VerifyCriterionResult(
                     criterion="[Compliance Critic] 3-way financial & invoice hold reconciliation",
@@ -232,7 +232,7 @@ def _reconcile_three_way_claim(env: Env, done_calls: list[ToolCall]) -> VerifyCr
     # 3. Check queued external email outbox matches the exact claim amount
     for item in env.outbox:
         if item.get("tool") == "send_email":
-            combined = f"{item.get('subject', '')} {item.get('body', '')}"
+            combined = f"{item.get('subject', '')} {item.get('body', '')}".replace(",", "")
             if amt_str_2 not in combined and amt_str_1 not in combined:
                 return VerifyCriterionResult(
                     criterion="[Compliance Critic] 3-way financial & invoice hold reconciliation",

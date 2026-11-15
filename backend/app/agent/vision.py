@@ -248,6 +248,42 @@ def _inspect_photo_with_gemini(file_path: Path, llm: LLMProvider | None = None) 
     try:
         data = llm_mod._post_with_retry(url, {"x-goog-api-key": api_key}, payload)
     except Exception:
+        if "PYTEST_CURRENT_TEST" not in os.environ and os.getenv("FAL_KEY", "").strip():
+            with contextlib.suppress(Exception):
+                fal_key = os.getenv("FAL_KEY", "").strip()
+                fal_url = os.getenv("FAL_ROUTER_URL", "https://fal.run/openrouter/router/openai/v1").rstrip("/")
+                fal_payload = {
+                    "model": os.getenv("FAL_VISION_LLM_MODEL", "google/gemini-2.5-flash"),
+                    "messages": [
+                        {"role": "system", "content": VISION_SYSTEM},
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        f"Inspect attachment `{file_path.name}` for delivery discrepancies "
+                                        "(damaged cartons, broken tamper seals, short unit counts, invoice amounts) "
+                                        "and return a JSON array of concise finding strings."
+                                    ),
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:{mime_type};base64,{b64_bytes}"},
+                                },
+                            ],
+                        },
+                    ],
+                    "max_tokens": 1024,
+                }
+                fal_data = llm_mod._post_with_retry(
+                    f"{fal_url}/chat/completions",
+                    {"Authorization": f"Key {fal_key}"},
+                    fal_payload,
+                )
+                fal_txt = str(((fal_data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
+                if fal_txt.strip():
+                    return _parse_vision_response_text(fal_txt)
         if os.getenv("LLM_FALLBACK_FAKE", "1") == "1":
             return list(DEFAULT_PHOTO_FINDINGS)
         raise

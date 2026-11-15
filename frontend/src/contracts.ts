@@ -108,12 +108,14 @@ export interface VerifyPayload {
 }
 
 export interface UiActionPayload {
-  action: "open_file" | "switch_view" | "commit_resolution";
+  action: "open_file" | "switch_view" | "commit_resolution" | "trigger_goal";
   path?: string | null;
   content?: string | null;
   view?: string | null;
   table?: string | null;
   choice?: "refund" | "redelivery" | null;
+  goal?: string | null;
+  offer_id?: string | null;
   label?: string;
 }
 

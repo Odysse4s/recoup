@@ -151,29 +151,33 @@ export function OperatorConsultPanel({
   }, [committedClaimId, consult?.claimId, pendingApproval]);
 
   const isKappa = useMemo(() => {
-    const searchCorpus = [
+    const rawCorpus = [
       pendingApproval?.risk_reason,
       pendingApproval?.diff_preview,
       pendingApproval?.spoken_summary,
       JSON.stringify(pendingApproval?.args || {}),
       consult?.counterparty,
       consult?.claimId,
-      claimId,
+      committedClaimId,
     ]
       .filter(Boolean)
       .join(" ");
 
-    if (/atlas|orion|d-2010|inv-9901|3005/i.test(searchCorpus)) {
+    if (/atlas|orion|nova|d-2010|d-3005|d-1050|d-1017|d-1031|inv-9901|inv-8801|inv-7790|followup/i.test(rawCorpus)) {
       return false;
     }
     if (claimId && claimId !== "CLM-D-1042" && !/1042|kappa|7781/i.test(claimId)) {
       return false;
     }
-    if (claimId === "CLM-D-1042" || /kappa|sup-kappa|d-1042|inv-7781/i.test(searchCorpus)) {
+    if (/kappa|sup-kappa|d-1042|inv-7781/i.test(rawCorpus)) {
       return true;
     }
-    return true;
-  }, [claimId, consult?.claimId, consult?.counterparty, pendingApproval]);
+    // If rawCorpus has custom supplier/invoice context without mentioning Kappa/D-1042, treat as custom scenario!
+    if (rawCorpus.trim().length > 4) {
+      return false;
+    }
+    return claimId === "CLM-D-1042";
+  }, [claimId, committedClaimId, consult?.claimId, consult?.counterparty, pendingApproval]);
 
   const claimAmount = useMemo(() => {
     if (typeof consult?.claimAmount === "number" && consult.claimAmount > 0) {
@@ -285,12 +289,18 @@ export function OperatorConsultPanel({
     };
   }, [mediaStream]);
 
-  // If phone is transferred or call completed, ensure laptop mic is stopped
+  const consultSessionEnded = Boolean(
+    consult?.end ||
+      consult?.callStatus === "ended" ||
+      extConsult?.callStatus === "ended"
+  );
+
+  // Stop laptop mic ONLY when transferred to iPhone or when operator explicitly closes the consult ("No thanks" / hangup)
   useEffect(() => {
-    if (isPhoneTransferred || hasCommitted) {
+    if (isPhoneTransferred || consultSessionEnded) {
       stopLaptopMic();
     }
-  }, [isPhoneTransferred, hasCommitted, stopLaptopMic]);
+  }, [isPhoneTransferred, consultSessionEnded, stopLaptopMic]);
 
   // Reset dialing state once call becomes live or pendingApproval changes
   useEffect(() => {
@@ -413,13 +423,23 @@ export function OperatorConsultPanel({
     [handleProcessedText]
   );
 
+  const echoGuardUntilRef = useRef<number>(0);
+  useEffect(() => {
+    if (speaking) {
+      echoGuardUntilRef.current = Date.now() + 8000;
+    } else if (echoGuardUntilRef.current > Date.now()) {
+      echoGuardUntilRef.current = Date.now() + 650;
+    }
+  }, [speaking]);
+
   // Auto-VAD for hands-free utterance capture & barge-in
   const vad = useAutoVad({
     stream: mediaStream,
-    enabled: laptopMicOn && !isPhoneTransferred,
+    enabled: laptopMicOn && !isPhoneTransferred && !consultSessionEnded,
     agentSpeaking: speaking,
-    muted: false,
+    muted: sttSubmitting,
     onBargeIn: () => {
+      echoGuardUntilRef.current = 0;
       stopSpeaking();
     },
     onUtterance: (blob, _mimeType, ext) => {
@@ -427,24 +447,29 @@ export function OperatorConsultPanel({
     },
   });
 
-  // Web Speech API fallback / instant recognizer
+  // Web Speech API fallback / instant recognizer (strictly paused while laptop TTS is speaking so speaker audio never echoes back!)
   const speechInput = useSpeechInput((text, final) => {
-    if (final && text.trim() && laptopMicOn && !isPhoneTransferred) {
+    if (speakingRef.current || Date.now() < echoGuardUntilRef.current) return;
+    if (final && text.trim() && laptopMicOn && !isPhoneTransferred && !consultSessionEnded) {
       void handleProcessedText(text.trim());
     }
   });
 
   useEffect(() => {
-    if (laptopMicOn && !isPhoneTransferred) {
-      if (speechInput.supported && !speechInput.listening) {
-        speechInput.start();
-      }
-    } else {
+    if (!laptopMicOn || isPhoneTransferred || consultSessionEnded || speaking) {
       if (speechInput.listening) {
         speechInput.stop();
       }
+      return;
     }
-  }, [laptopMicOn, isPhoneTransferred, speechInput]);
+    const delayMs = Math.max(80, echoGuardUntilRef.current - Date.now());
+    const t = window.setTimeout(() => {
+      if (laptopMicOn && !isPhoneTransferred && !consultSessionEnded && !speakingRef.current && speechInput.supported && !speechInput.listening) {
+        speechInput.start();
+      }
+    }, delayMs);
+    return () => window.clearTimeout(t);
+  }, [laptopMicOn, isPhoneTransferred, consultSessionEnded, speaking, speechInput]);
 
   // Toggle Laptop Mic
   const toggleLaptopMic = async () => {
@@ -749,26 +774,105 @@ export function OperatorConsultPanel({
 
           {/* 1. Live Call Banner OR Prominent Laptop Voice & iPhone Transfer Actions */}
           {isExecutedLive ? (
-            <div className="flex h-7 items-center justify-between rounded-lg border border-ok/70 bg-ok/15 px-2.5 text-[11.5px] shadow-[0_0_12px_rgba(16,185,129,0.25)]">
-              <div className="flex min-w-0 items-center gap-1.5 font-bold text-ok">
-                <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-ok" />
-                <span className="truncate">
-                  {isPhoneTransferred ? "✓ EXECUTED LIVE VIA IPHONE VOICE: " : "✓ EXECUTED LIVE VIA LAPTOP VOICE: "}
-                  <span className="font-semibold text-ink">
-                    {isKappa
-                      ? resolvedChoice === "redelivery"
-                        ? "22 Replacement Hubs + €202.30 Credit + AADE 9.3"
-                        : "€587.30 Refund + AADE 5.1 + Kappa Emailed"
-                      : resolvedChoice === "redelivery"
-                      ? `Hold / Replacement · ${claimId}`
-                      : `Enforce ${formattedClaimAmount || "Claim"} · ${claimId}`}
+            <div className="space-y-1.5">
+              <div className="flex h-7 items-center justify-between rounded-lg border border-ok/70 bg-ok/15 px-2.5 text-[11.5px] shadow-[0_0_12px_rgba(16,185,129,0.25)]">
+                <div className="flex min-w-0 items-center gap-1.5 font-bold text-ok">
+                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-ok" />
+                  <span className="truncate">
+                    {isPhoneTransferred ? "✓ EXECUTED LIVE VIA IPHONE VOICE: " : "✓ EXECUTED LIVE VIA LAPTOP VOICE: "}
+                    <span className="font-semibold text-ink">
+                      {isKappa
+                        ? resolvedChoice === "redelivery"
+                          ? "22 Replacement Hubs + €202.30 Credit + AADE 9.3"
+                          : "€587.30 Refund + AADE 5.1 + Kappa Emailed"
+                        : resolvedChoice === "redelivery"
+                        ? `Hold / Replacement · ${claimId}`
+                        : `Enforce ${formattedClaimAmount || "Claim"} · ${claimId}`}
+                    </span>
                   </span>
-                </span>
+                </div>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <VoiceOrb variant="bars" tone="ok" className="h-3 w-8" />
+                  <span className="font-mono text-[10px] font-semibold text-ok">{callDurationStr}</span>
+                </div>
               </div>
-              <div className="flex shrink-0 items-center gap-1.5">
-                <VoiceOrb variant="bars" tone="ok" className="h-3 w-8" />
-                <span className="font-mono text-[10px] font-semibold text-ok">{callDurationStr}</span>
-              </div>
+
+              {!isPhoneTransferred && !consultSessionEnded && (
+                <div className="space-y-1.5 rounded-xl border border-emerald-500/35 bg-surface/65 p-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={toggleLaptopMic}
+                      className={cx(
+                        "flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition-all",
+                        laptopMicOn
+                          ? "border-emerald-500/60 bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/40"
+                          : "border-cyan-500/40 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20"
+                      )}
+                    >
+                      <Mic className={cx("h-3.5 w-3.5", laptopMicOn && "animate-pulse")} />
+                      <span>{laptopMicOn ? "🎙️ Still Listening — Ask Anything or Assign Next Task" : "🎙️ Resume Laptop Voice"}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        stopSpeaking();
+                        void handleProcessedText("No thanks, that's all");
+                      }}
+                      className="rounded-lg border border-line bg-sunken px-2 py-1 text-[10px] font-medium text-ink-2 hover:border-ok/50 hover:text-ok"
+                    >
+                      End Voice Session
+                    </button>
+                  </div>
+
+                  <div className="flex flex-wrap gap-1">
+                    {[
+                      "No thanks, that's all",
+                      "Yes, audit paid shipments D-1017 & D-1031",
+                      "Check delivery D-3005 from Atlas Industrial Supply",
+                    ].map((hint) => (
+                      <button
+                        key={hint}
+                        type="button"
+                        onClick={() => {
+                          stopSpeaking();
+                          void handleProcessedText(hint);
+                        }}
+                        className="rounded-full border border-line/80 bg-sunken/80 px-2 py-0.5 text-[10px] text-ink-2 hover:border-accent/50 hover:bg-accent/10 hover:text-accent transition-colors"
+                      >
+                        ⚡ {hint}
+                      </button>
+                    ))}
+                  </div>
+
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (!quickAskText.trim()) return;
+                      stopSpeaking();
+                      void handleProcessedText(quickAskText.trim());
+                      setQuickAskText("");
+                    }}
+                    className="flex items-center gap-1"
+                  >
+                    <input
+                      type="text"
+                      value={quickAskText}
+                      onChange={(e) => setQuickAskText(e.target.value)}
+                      placeholder="Ask follow-up, say 'No thanks', or assign a new supplier audit…"
+                      className="h-6 flex-1 rounded border border-line bg-surface/80 px-2 text-[10.5px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none"
+                    />
+                    <button
+                      type="submit"
+                      disabled={!quickAskText.trim()}
+                      className={cx(btn("primary", "sm"), "h-6 px-2 text-[10px] font-semibold disabled:opacity-40")}
+                    >
+                      <span>Send</span>
+                      <CornerDownLeft className="h-2.5 w-2.5 opacity-80" />
+                    </button>
+                  </form>
+                </div>
+              )}
             </div>
           ) : callEndedWithoutDecision ? (
             <div className="flex h-7 items-center justify-between rounded-lg border border-warn/45 bg-warn/15 px-2.5 text-[11px] text-warn">
@@ -916,12 +1020,10 @@ export function OperatorConsultPanel({
                   )}
                 </div>
                 <div className="flex flex-wrap gap-1">
-                  {[
-                    "Break down the math",
-                    "Show invoices table",
-                    "Enforce the claim",
-                    "Take replacement hubs",
-                  ].map((hint) => (
+                  {(isKappa
+                    ? ["Break down the math", "Show invoices table", "Enforce the claim", "Take replacement hubs"]
+                    : ["Break down the math", "Show invoices table", "Enforce the claim", "Hold off for now"]
+                  ).map((hint) => (
                     <button
                       key={hint}
                       type="button"

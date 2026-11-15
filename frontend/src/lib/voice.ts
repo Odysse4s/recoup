@@ -295,10 +295,12 @@ function pickVoice(): SpeechSynthesisVoice | undefined {
 
 async function fetchRemoteTurnAudio(text: string): Promise<{ buffer: ArrayBuffer; contentType: string } | null> {
   try {
+    const signal = typeof AbortSignal !== "undefined" && "timeout" in AbortSignal ? AbortSignal.timeout(4500) : undefined;
     const res = await fetch("/api/voice/turn-audio", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ speaker: "agent", text }),
+      ...(signal ? { signal } : {}),
     });
     const rawType = res.headers.get("content-type") ?? "";
     if (!res.ok || res.status === 204 || !rawType.startsWith("audio")) {
@@ -315,10 +317,12 @@ async function fetchRemoteTurnAudio(text: string): Promise<{ buffer: ArrayBuffer
 async function fetchRemoteBriefing(text: string, kind: string): Promise<{ buffer: ArrayBuffer; contentType: string } | null> {
   if (Date.now() < remoteRetryAfter) return null;
   try {
+    const signal = typeof AbortSignal !== "undefined" && "timeout" in AbortSignal ? AbortSignal.timeout(4500) : undefined;
     const res = await fetch("/api/voice/briefing", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text, kind }),
+      ...(signal ? { signal } : {}),
     });
     const rawType = res.headers.get("content-type") ?? "";
     if (!res.ok || res.status === 204 || !rawType.startsWith("audio")) {

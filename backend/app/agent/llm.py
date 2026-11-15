@@ -458,7 +458,10 @@ def _post_with_retry(
     """
     import httpx
 
-    timeout = httpx.Timeout(connect=3.0, read=15.0, write=10.0, pool=3.0)
+    if "PYTEST_CURRENT_TEST" not in os.environ and max_attempts == 5:
+        max_attempts = 2
+    read_s = 15.0 if "PYTEST_CURRENT_TEST" in os.environ else 10.0
+    timeout = httpx.Timeout(connect=3.0, read=read_s, write=10.0, pool=3.0)
     for attempt in range(max_attempts):
         try:
             r = httpx.post(url, headers=headers, json=payload, timeout=timeout)
@@ -611,6 +614,15 @@ class GeminiProvider:
 
         api_key = os.getenv("GEMINI_API_KEY", "").strip()
         if not api_key:
+            if "PYTEST_CURRENT_TEST" not in os.environ and os.getenv("FAL_KEY", "").strip():
+                fal_model = os.getenv("FAL_LLM_MODEL", "google/gemini-2.5-flash")
+                fal_url = os.getenv("FAL_ROUTER_URL", "https://fal.run/openrouter/router/openai/v1")
+                return OpenAICompatProvider(
+                    model=fal_model,
+                    base_url=fal_url,
+                    api_key_env="FAL_KEY",
+                    auth_scheme="Key",
+                ).complete(system, messages, tools)
             if os.getenv("LLM_FALLBACK_FAKE", "1") == "1":
                 fb = FakeProvider()
                 fb.turn = sum(1 for m in messages if m.get("role") == "assistant")
@@ -647,6 +659,16 @@ class GeminiProvider:
         try:
             data = _post_with_retry(url, {"x-goog-api-key": api_key}, payload)
         except Exception:
+            if "PYTEST_CURRENT_TEST" not in os.environ and os.getenv("FAL_KEY", "").strip():
+                with __import__("contextlib").suppress(Exception):
+                    fal_model = os.getenv("FAL_LLM_MODEL", "google/gemini-2.5-flash")
+                    fal_url = os.getenv("FAL_ROUTER_URL", "https://fal.run/openrouter/router/openai/v1")
+                    return OpenAICompatProvider(
+                        model=fal_model,
+                        base_url=fal_url,
+                        api_key_env="FAL_KEY",
+                        auth_scheme="Key",
+                    ).complete(system, messages, tools)
             if os.getenv("LLM_FALLBACK_FAKE", "1") == "1":
                 fb = FakeProvider()
                 fb.turn = sum(1 for m in messages if m.get("role") == "assistant")
@@ -748,10 +770,12 @@ class OpenAICompatProvider:
         model: str,
         base_url: str,
         api_key_env: str = "OPENAI_API_KEY",
+        auth_scheme: str = "Bearer",
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.api_key_env = api_key_env
+        self.auth_scheme = auth_scheme
         self.use_cache = os.getenv("LLM_CACHE", "1") == "1"
 
     def complete(
@@ -767,7 +791,9 @@ class OpenAICompatProvider:
         api_key = os.getenv(self.api_key_env, "").strip()
         if not api_key:
             if os.getenv("LLM_FALLBACK_FAKE", "1") == "1":
-                return FakeProvider().complete(system, messages, tools)
+                fb = FakeProvider()
+                fb.turn = sum(1 for m in messages if m.get("role") == "assistant")
+                return fb.complete(system, messages, tools)
             raise RuntimeError(f"{self.api_key_env} is not set")
 
         payload: dict[str, Any] = {
@@ -789,12 +815,14 @@ class OpenAICompatProvider:
             ]
 
         url = f"{self.base_url}/chat/completions"
-        headers = {"Authorization": f"Bearer {api_key}"}
+        headers = {"Authorization": f"{self.auth_scheme} {api_key}"}
         try:
             data = _post_with_retry(url, headers, payload)
         except Exception:
             if os.getenv("LLM_FALLBACK_FAKE", "1") == "1":
-                return FakeProvider().complete(system, messages, tools)
+                fb = FakeProvider()
+                fb.turn = sum(1 for m in messages if m.get("role") == "assistant")
+                return fb.complete(system, messages, tools)
             raise
 
         choice = (data.get("choices") or [{}])[0]
@@ -898,6 +926,13 @@ def get_provider() -> LLMProvider:
         )
     if kind == "oumi":
         return OumiProvider()
+    if kind == "fal":
+        return OpenAICompatProvider(
+            model=os.getenv("FAL_LLM_MODEL", "google/gemini-2.5-flash"),
+            base_url=os.getenv("FAL_ROUTER_URL", "https://fal.run/openrouter/router/openai/v1"),
+            api_key_env="FAL_KEY",
+            auth_scheme="Key",
+        )
     if kind == "openai":
         model = os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL") or "gpt-4o-mini"
         if model.startswith("claude-"):

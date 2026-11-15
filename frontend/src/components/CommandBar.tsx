@@ -605,9 +605,16 @@ export function CommandBar({
                             type="button"
                             onClick={() => {
                               soundFx.playUiClick();
-                              onChange(
-                                "Check delivery D-1042 from Kappa Office Systems — 22 hubs arrived missing or broken and invoice INV-7781 is overcharged"
-                              );
+                              if (/1042|kappa/i.test(ev.source) || ev.findings.some((f) => /1042|kappa|7781/i.test(f))) {
+                                onChange(
+                                  "Check delivery D-1042 from Kappa Office Systems — 22 hubs arrived missing or broken and invoice INV-7781 is overcharged"
+                                );
+                              } else {
+                                const summary = ev.findings?.slice(0, 2).join("; ") || "inspect discrepancies";
+                                onChange(
+                                  `Audit uploaded ${ev.kind} (${ev.source}: ${summary}), cross-check contract & ERP tables, and stage any supplier claim`
+                                );
+                              }
                               setEvidenceOpen(false);
                               inputRef.current?.focus();
                             }}

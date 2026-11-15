@@ -16,7 +16,7 @@ import {
   SquareTerminal,
   XCircle,
 } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { anchorCenter } from "../lib/anchors";
 import { highlightLine } from "../lib/highlight";
 import { soundFx } from "../lib/sound";
@@ -573,23 +573,6 @@ function LiveWindowCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Background tabs pause requestAnimationFrame; never let a hidden tab stall
-  useEffect(() => {
-    const finishIfHidden = () => {
-      if (document.hidden && !pinnedRef.current && !dockingRef.current) {
-        dockingRef.current = true;
-        onDocked(win.id, win.target);
-      }
-    };
-    const t = window.setTimeout(finishIfHidden, 0);
-    document.addEventListener("visibilitychange", finishIfHidden);
-    return () => {
-      window.clearTimeout(t);
-      document.removeEventListener("visibilitychange", finishIfHidden);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   // Track code/stage signature to detect when forge transitions from spec to verified Python code
   const prevSigRef = useRef<string>("");
   useEffect(() => {
@@ -605,25 +588,14 @@ function LiveWindowCard({
     prevSigRef.current = sig;
   }, [win.id, win.forgeStage, win.code, win.kind]);
 
-  // Stage 1 — origin pop: spring into the deck position
-  useLayoutEffect(() => {
+  // Stage 1 — clean entry transition into typing (parent motion.div handles smooth spring slide-in without fighting CSS transitions)
+  useEffect(() => {
     if (win.skipAutoPop && !win.manual) return;
-    const el = scope.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    const origin = anchorCenter(win.origin) ?? { x: r.left + r.width / 2, y: window.innerHeight };
-    const dx = origin.x - (r.left + r.width / 2);
-    const dy = origin.y - (r.top + r.height / 2);
-    const pop = paceRef.current.pop / 1000;
-    (async () => {
-      await animate(el, { x: dx, y: dy, scale: 0.1, opacity: 0, filter: "blur(8px)" }, { duration: 0 });
-      await animate(
-        el,
-        { x: 0, y: 0, scale: 1, opacity: 1, filter: "blur(0px)" },
-        { type: "spring", duration: pop, bounce: 0.2, opacity: { duration: pop * 0.5 }, filter: { duration: pop * 0.7 } }
-      );
+    const popMs = Math.min(260, Math.max(120, paceRef.current.pop));
+    const t = window.setTimeout(() => {
       setPhase(win.instant ? "hold" : "typing");
-    })();
+    }, popMs);
+    return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -725,11 +697,13 @@ function LiveWindowCard({
   const allLines = win.code.split("\n").length;
   const typing = phase === "typing" || phase === "pop";
 
-  // Key clicks
+  // Key clicks (foreground card only, subtle every 4th line — zero background SFX spam)
   const typedLines = lines.length;
   useEffect(() => {
-    if (phase === "typing" && !win.pinned && typedLines > 1) soundFx.playKeyTick(typedLines);
-  }, [typedLines, phase, win.pinned]);
+    if (phase === "typing" && stackIndex === 0 && !win.pinned && typedLines > 1 && typedLines % 4 === 0) {
+      soundFx.playKeyTick(typedLines);
+    }
+  }, [typedLines, phase, win.pinned, stackIndex]);
 
   const pct = Math.round(progress * 100);
   const n = win.assertions.length;
@@ -770,7 +744,7 @@ function LiveWindowCard({
             : "0 8px 26px -4px rgba(0, 0, 0, 0.65), 0 0 14px rgba(56, 189, 248, 0.28)",
       }}
       className={cx(
-        "group relative overflow-hidden rounded-xl bg-raised transition-all duration-300",
+        "group relative overflow-hidden rounded-xl bg-raised transition-shadow duration-200",
         isForge ? "w-[min(560px,92vw)]" : "w-[min(450px,88vw)]",
         stackIndex > 0 && "cursor-pointer ring-1 ring-sky-400/40 hover:ring-sky-400/80"
       )}
@@ -1094,7 +1068,7 @@ export function LiveWindowLayer({
   };
 
   return (
-    <div className="fixed right-5 bottom-5 z-40 w-[min(560px,92vw)] h-[440px] pointer-events-none">
+    <div className="fixed right-5 bottom-5 lg:right-auto lg:left-1/2 lg:-translate-x-1/2 z-40 w-[min(560px,92vw)] h-[440px] pointer-events-none">
       <AnimatePresence initial={false}>
         {currentDeck.map((w) => {
           let stackIndex = 0;

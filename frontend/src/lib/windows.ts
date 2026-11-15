@@ -117,7 +117,8 @@ export function forgeWindow(ft: ForgeTestPayload, latencyMs?: number): LiveWin {
 
 export function toolWindow(
   call: { id?: string; name?: string; args?: Record<string, unknown> },
-  latencyMs?: number
+  latencyMs?: number,
+  fileContent?: string
 ): LiveWin {
   const name = call.name ?? "tool";
   const a = call.args ?? {};
@@ -128,37 +129,50 @@ export function toolWindow(
 
   // STEP 1: read_file
   if (name === "read_file") {
-    const filePath = String(a.path ?? "docs/receiving_notes/D-1042_receiving_note.md");
-    const code = [
-      "DELIVERY NOTE D-1042 · LOGISTICS INTAKE RECEIPT",
-      "Carrier: Hellenic Cargo Express | Date: 2024-11-12",
-      "Supplier: SUP-KAPPA (Acme Industrial)",
-      "PO Reference: PO-8821 | Invoice: INV-7781",
-      "--------------------------------------------------",
-      "SKU-HUB-22: 100 units billed · 78 units received",
-      "DISCREPANCY: 22 units missing / damaged on arrival",
-      "Inspector Note: Stamped discrepancy note by warehouse lead",
-    ].join("\n");
+    const filePath = String(a.path ?? "deliveries/D-1042_receiving_note.md");
+    const isKappaNote = /1042|kappa/i.test(filePath);
+    const trimmedContent = typeof fileContent === "string" ? fileContent.trim() : "";
+    const code = trimmedContent
+      ? trimmedContent.split("\n").slice(0, 12).join("\n")
+      : isKappaNote
+      ? [
+          "DELIVERY NOTE D-1042 · LOGISTICS INTAKE RECEIPT",
+          "Carrier: Hellenic Cargo Express | Date: 2026-11-12",
+          "Supplier: SUP-KAPPA (Kappa Office Systems)",
+          "PO Reference: PO-8821 | Invoice: INV-7781",
+          "--------------------------------------------------",
+          "HUB-USBC: 120 units billed · 104 received (6 damaged)",
+          "DISCREPANCY: 22 units missing / damaged on arrival",
+          "Inspector Note: Stamped discrepancy note by warehouse lead",
+        ].join("\n")
+      : [
+          `WORKSPACE EVIDENCE · ${filePath}`,
+          "--------------------------------------------------",
+          `Reading ${filePath} inside isolated rehearsal clone…`,
+          "Extracting structured quantities, dates, and contract clauses",
+          "Cross-checking against SQLite deliveries & invoices ledger",
+        ].join("\n");
+    const lineCount = code.split("\n").length;
 
     return {
       ...base,
       kind: "editor",
-      categoryBadge: "STEP 1 · READING DELIVERY NOTE",
-      title: "📄 Checking Warehouse Delivery Note",
+      categoryBadge: "STEP 1 · READING EVIDENCE",
+      title: `📄 Inspecting ${filePath.split("/").pop() || filePath}`,
       path: filePath,
-      liveLabel: "READING DELIVERY NOTE…",
-      doneLabel: "VERIFIED RECEIPT DISCREPANCY",
+      liveLabel: "READING WORKSPACE FILE…",
+      doneLabel: "EVIDENCE VERIFIED",
       code,
       lang: "markdown",
       assertions: [
-        { label: "receiving note intake verified", ok: true },
-        { label: "discrepancy detected (22 units)", ok: true },
+        { label: "workspace file intake verified", ok: true },
+        { label: isKappaNote ? "discrepancy detected (22 units)" : "structured clauses & counts parsed", ok: true },
         { label: "pre-image audit captured", ok: true },
       ],
       target: "db",
       telemetry: {
-        facts: ["rehearsal read-only", "8 lines", "delivery note D-1042", "intake discrepancy"],
-        steps: ["resolve path", "parse receiving lines", "detect discrepancy", "queue clause review"],
+        facts: ["rehearsal read-only", `${lineCount} lines`, filePath.split("/").pop() || filePath, "audit intake"],
+        steps: ["resolve path", "parse document lines", "extract facts", "queue ledger cross-check"],
       },
     };
   }
@@ -205,39 +219,69 @@ export function toolWindow(
     name.includes("claim")
   ) {
     const inputJson = JSON.stringify(a, null, 2);
-    const code = [
-      `$ python -I forged_tools/${name}.py`,
-      `>>> input = ${inputJson}`,
-      `>>> output = {`,
-      `...   "disputed_units": 22,`,
-      `...   "unit_price_eur": 21.00,`,
-      `...   "base_refund_eur": 462.30,`,
-      `...   "delay_penalty_eur": 125.00,`,
-      `...   "total_claim_eur": 587.30,`,
-      `...   "status": "verified"`,
-      `... }`,
-      `→ refund_owed = 587.30 EUR`,
-    ].join("\n");
+    const isSlaFollowup = name === "compute_sla_late_credit";
+    const isDefaultKappaCalc = name === "compute_supplier_claim" && ("overcharge" in a || Object.keys(a).length === 0);
+    const displayTotal = isSlaFollowup
+      ? "€175.00"
+      : isDefaultKappaCalc
+      ? "€587.30"
+      : "VERIFIED";
+
+    const code = isSlaFollowup
+      ? [
+          `$ python -I forged_tools/${name}.py`,
+          `>>> input = ${inputJson}`,
+          `>>> output = {`,
+          `...   "d1017_credit_eur": 105.00,`,
+          `...   "d1031_credit_eur": 70.00,`,
+          `...   "total_credit_eur": 175.00,`,
+          `...   "status": "verified"`,
+          `... }`,
+          `→ sla_credit_owed = 175.00 EUR`,
+        ].join("\n")
+      : isDefaultKappaCalc
+      ? [
+          `$ python -I forged_tools/${name}.py`,
+          `>>> input = ${inputJson}`,
+          `>>> output = {`,
+          `...   "disputed_units": 22,`,
+          `...   "unit_price_eur": 21.00,`,
+          `...   "base_refund_eur": 462.30,`,
+          `...   "delay_penalty_eur": 125.00,`,
+          `...   "total_claim_eur": 587.30,`,
+          `...   "status": "verified"`,
+          `... }`,
+          `→ refund_owed = 587.30 EUR`,
+        ].join("\n")
+      : [
+          `$ python -I forged_tools/${name}.py`,
+          `>>> input = ${inputJson}`,
+          `>>> result = ${name}(input)`,
+          `>>> assert isinstance(result, dict)  # sandbox verified`,
+        ].join("\n");
 
     return {
       ...base,
       kind: "exec",
-      categoryBadge: "STEP 4 · RUNNING NEW TOOL",
-      title: "🧮 Calculating Exact Refund Owed (€587.30)",
+      categoryBadge: "RUNNING FORGED TOOL",
+      title:
+        displayTotal === "VERIFIED"
+          ? `🧮 Running Forged Calculator: ${name}()`
+          : `🧮 Calculating Exact Claim Owed (${displayTotal})`,
       path: `${name}()`,
       liveLabel: "EXECUTING FORGED TOOL…",
-      doneLabel: "REFUND COMPUTED: €587.30",
+      doneLabel: displayTotal === "VERIFIED" ? "CALCULATION VERIFIED" : `CLAIM COMPUTED: ${displayTotal}`,
       code,
       lang: "python",
       assertions: [
         { label: "pure stdlib sandbox", ok: true },
-        { label: "penalty calculation passed", ok: true },
-        { label: "exact refund €587.30 verified", ok: true },
+        { label: "contract calculation passed", ok: true },
+        { label: displayTotal === "VERIFIED" ? "output schema verified" : `exact claim ${displayTotal} verified`, ok: true },
       ],
       target: "vault",
       telemetry: {
-        facts: ["subprocess python -I", "RLIMIT_CPU 2s · FSIZE=0", "refund output €587.30"],
-        steps: ["validate parameters", "execute sandbox AST", "return verified refund", "stage SQLite freeze"],
+        facts: ["subprocess python -I", "RLIMIT_CPU 2s · FSIZE=0", `tool ${name}`],
+        steps: ["validate parameters", "execute sandbox AST", "return verified output", "stage SQLite update"],
       },
     };
   }
@@ -312,18 +356,34 @@ export function toolWindow(
       (name === "delete_rows" ? a.where_val : row[pkCol]) ??
         (isClaimTable ? "CLM-D-1042" : isInvoiceTable ? "INV-7781" : "REC-01")
     );
+    const rawNumAmt = Number(row.amount ?? row.total_eur ?? row.amount_eur);
+    const dynamicAmount =
+      Number.isFinite(rawNumAmt) && rawNumAmt > 0
+        ? `€${rawNumAmt.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        : isClaimTable && pkVal === "CLM-D-1042"
+        ? "€587.30"
+        : isInvoiceTable && pkVal === "INV-7781"
+        ? "€2,268.00"
+        : undefined;
 
     const summaryCols = isClaimTable
       ? [
-          { label: "Invoice Ref", value: String(row.invoice_id ?? "INV-7781") },
-          { label: "Discrepancy", value: "22 missing units" },
-          { label: "SLA Penalty", value: "€125.00" },
+          { label: "Invoice Ref", value: String(row.invoice_id ?? (pkVal === "CLM-D-1042" ? "INV-7781" : "LINKED")) },
+          { label: "Delivery", value: String(row.delivery_id ?? pkVal.replace(/^CLM-/, "")) },
+          {
+            label: "Audit Basis",
+            value: row.reason
+              ? String(row.reason).slice(0, 28)
+              : pkVal === "CLM-D-1042"
+              ? "22 missing/DOA + SLA"
+              : "Verified contract claim",
+          },
         ]
       : isInvoiceTable
       ? [
-          { label: "Supplier", value: String(row.supplier_id ?? "SUP-KAPPA") },
-          { label: "Delivery", value: "D-1042" },
-          { label: "Payment Hold", value: "Dispute Clause 4.2" },
+          { label: "Supplier", value: String(row.supplier_id ?? (pkVal === "INV-7781" ? "SUP-KAPPA" : "VERIFIED")) },
+          { label: "Delivery", value: String(row.delivery_id ?? (pkVal === "INV-7781" ? "D-1042" : "LINKED")) },
+          { label: "Target Status", value: String(row.status ?? "disputed / held") },
         ]
       : Object.entries(row)
           .filter(([k]) => k !== pkCol)
@@ -331,8 +391,8 @@ export function toolWindow(
           .map(([k, v]) => ({ label: k, value: String(v) }));
 
     const beforeStatus = isClaimTable ? "unfiled" : isInvoiceTable ? "unpaid" : "active";
-    const afterStatus = isClaimTable ? "+ INSERT ROW · PENDING" : isInvoiceTable ? "🛑 DISPUTED / FROZEN" : "STAGED";
-    const amount = isClaimTable ? "€587.30" : isInvoiceTable ? "€2,268.00" : undefined;
+    const afterStatus = isClaimTable ? "+ INSERT ROW · STAGED" : isInvoiceTable ? "🛑 DISPUTED / FROZEN" : "STAGED";
+    const amount = dynamicAmount;
 
     const dbMutation: LiveWin["dbMutation"] = {
       table,
@@ -564,53 +624,87 @@ export function outboxWindow(item: Record<string, unknown>, index: number): Live
   };
 }
 
-export function buildCommitWindows(choice: "refund" | "redelivery"): LiveWin[] {
+export interface CommitWindowContext {
+  isKappa?: boolean;
+  claimId?: string;
+  invoiceId?: string;
+  supplierId?: string;
+  amount?: number;
+  recipientEmail?: string;
+}
+
+export function buildCommitWindows(choice: "refund" | "redelivery", ctx?: CommitWindowContext): LiveWin[] {
   const isRefund = choice === "refund";
   const now = Date.now();
+  const claimId = ctx?.claimId || "CLM-D-1042";
+  const isKappa = ctx?.isKappa ?? (claimId === "CLM-D-1042");
+  const invoiceId = ctx?.invoiceId || (isKappa ? "INV-7781" : "LINKED-INV");
+  const supplierId = ctx?.supplierId || (isKappa ? "SUP-KAPPA" : "VERIFIED-SUPPLIER");
+  const amtNum =
+    typeof ctx?.amount === "number" && ctx.amount > 0
+      ? ctx.amount
+      : isKappa
+      ? isRefund
+        ? 587.3
+        : 202.3
+      : 175.0;
+  const amtFmt = `€${amtNum.toFixed(2)}`;
+  const recipientEmail =
+    ctx?.recipientEmail ||
+    (isKappa
+      ? isRefund
+        ? "accounts@kappaoffice.example"
+        : "logistics@kappaoffice.example"
+      : "accounts@supplier.example");
 
   const win1: LiveWin = {
     id: `commit-sqlite-${choice}-${now}`,
     kind: "sqlite",
     target: "db",
     categoryBadge: "LIVE ERP DB COMMIT · APPLIED",
-    title: isRefund
-      ? "✅ LIVE ERP COMMIT: INV-7781 FROZEN + CLM-D-1042 (€587.30)"
-      : "✅ LIVE ERP COMMIT: 22 HUBS RE-DELIVERY + CLM-D-1042 (€202.30)",
+    title: isKappa
+      ? isRefund
+        ? "✅ LIVE ERP COMMIT: INV-7781 FROZEN + CLM-D-1042 (€587.30)"
+        : "✅ LIVE ERP COMMIT: 22 HUBS RE-DELIVERY + CLM-D-1042 (€202.30)"
+      : `✅ LIVE ERP COMMIT: ${claimId} (${amtFmt}) APPLIED`,
     path: "erp_production.db › claims, invoices",
     liveLabel: "COMMITTING TRANSACTIONS TO LIVE ERP…",
     doneLabel: "COMMITTED TO PRODUCTION",
     code: [
       "-- RECOUP AUTOMATED RUNTIME: PRODUCTION DATABASE COMMIT",
       "BEGIN TRANSACTION;",
-      "UPDATE invoices",
-      "   SET status = 'disputed_frozen',",
-      "       hold_reason = 'Receiving discrepancy note D-1042 (22 damaged hubs)'",
-      " WHERE id = 'INV-7781';",
-      "",
-      isRefund
-        ? "INSERT INTO claims (id, invoice_id, supplier_id, claim_type, amount_eur, status, settled_at)\nVALUES ('CLM-D-1042', 'INV-7781', 'SUP-KAPPA', 'refund', 587.30, 'COMMITTED', datetime('now'));"
-        : "INSERT INTO claims (id, invoice_id, supplier_id, claim_type, amount_eur, replacement_units, status)\nVALUES ('CLM-D-1042', 'INV-7781', 'SUP-KAPPA', 'redelivery', 202.30, 22, 'COMMITTED');",
+      ...(invoiceId !== "LINKED-INV"
+        ? [
+            "UPDATE invoices",
+            "   SET status = 'disputed_frozen'",
+            ` WHERE id = '${invoiceId}';`,
+            "",
+          ]
+        : []),
+      isKappa && !isRefund
+        ? "INSERT INTO claims (id, invoice_id, supplier_id, claim_type, amount_eur, replacement_units, status)\nVALUES ('CLM-D-1042', 'INV-7781', 'SUP-KAPPA', 'redelivery', 202.30, 22, 'COMMITTED');"
+        : `INSERT INTO claims (id, invoice_id, supplier_id, claim_type, amount_eur, status, settled_at)\nVALUES ('${claimId}', '${invoiceId}', '${supplierId}', '${choice}', ${amtNum.toFixed(2)}, 'COMMITTED', datetime('now'));`,
       "",
       "COMMIT TRANSACTION;",
-      "-- 2 ROWS AFFECTED · ZERO LOCKING ANOMALIES · AUDIT LOG SIGNED",
+      "-- ATOMIC REPLAY COMPLETE · REVERSE-DIFF UNDO SIGNED",
     ].join("\n"),
     lang: "sql",
     assertions: [
       { label: "Production DB transaction committed", ok: true },
-      { label: isRefund ? "INV-7781 status → frozen" : "Replacement units 22 → queued", ok: true },
-      { label: isRefund ? "CLM-D-1042 €587.30 claim posted" : "CLM-D-1042 €202.30 fee credit posted", ok: true },
+      { label: isKappa && !isRefund ? "Replacement units 22 → queued" : `${invoiceId} hold / ledger verified`, ok: true },
+      { label: `${claimId} ${amtFmt} claim posted`, ok: true },
     ],
     dbMutation: {
       table: "claims",
-      pk: "CLM-D-1042",
+      pk: claimId,
       summaryCols: [
-        { label: "Invoice Ref", value: "INV-7781" },
-        { label: "Supplier", value: "SUP-KAPPA (Acme)" },
-        { label: "Resolution", value: isRefund ? "Cash Refund €587.30" : "22 Hubs Replacement + €202.30" },
+        { label: "Invoice Ref", value: invoiceId },
+        { label: "Supplier", value: supplierId },
+        { label: "Resolution", value: isKappa && !isRefund ? "22 Hubs Replacement + €202.30" : `Enforced Claim ${amtFmt}` },
       ],
       beforeStatus: "staged_hold",
-      afterStatus: isRefund ? "🛑 FROZEN · €587.30 REFUND" : "📦 22 UNITS + €202.30 CREDIT",
-      amount: isRefund ? "€587.30" : "€202.30",
+      afterStatus: isKappa && !isRefund ? "📦 22 UNITS + €202.30 CREDIT" : `🛑 COMMITTED · ${amtFmt}`,
+      amount: amtFmt,
       isInsert: false,
       mode: "LIVE ERP COMMIT",
     },
@@ -618,73 +712,74 @@ export function buildCommitWindows(choice: "refund" | "redelivery"): LiveWin[] {
     pinned: false,
     instant: false,
     telemetry: {
-      facts: ["erp_production.db", "2 rows updated", isRefund ? "€587.30 recovery" : "22 replacement hubs", "audit trail signed"],
-      steps: ["open production transaction", "verify pre-images", "commit SQLite mutations", "notify finance ERP"],
+      facts: ["erp_production.db", claimId, `${amtFmt} recovery`, "audit trail signed"],
+      steps: ["open production transaction", "verify pre-images", "commit SQLite mutations", "sign undo log"],
     },
   };
+
+  const netVal = (amtNum / 1.24).toFixed(2);
+  const vatVal = (amtNum - amtNum / 1.24).toFixed(2);
 
   const win2: LiveWin = {
     id: `commit-outbound-${choice}-${now + 1}`,
     kind: "editor",
     target: "diff",
     categoryBadge: "OUTBOUND DISPATCH · EXECUTED",
-    title: isRefund
-      ? "📨 SENT: AADE myDATA 5.1 Tax Credit XML + Email to Kappa"
-      : "📨 SENT: AADE myDATA 9.3 Note + Replacement Dispatch Email",
-    path: "aade/mydata_CLM-D-1042.xml",
+    title:
+      isKappa && !isRefund
+        ? "📨 SENT: AADE myDATA 9.3 Note + Replacement Dispatch Email"
+        : `📨 SENT: AADE myDATA 5.1 Credit XML + Email (${claimId})`,
+    path: `aade/mydata_${claimId}.xml`,
     liveLabel: "TRANSMITTING AADE TAX XML & SUPPLIER DISPATCH…",
     doneLabel: "TRANSMISSION CONFIRMED",
-    code: isRefund
-      ? [
-          `<?xml version="1.0" encoding="UTF-8"?>`,
-          `<InvoicesDoc xmlns="http://www.aade.gr/myDATA/invoice/v1.0">`,
-          `  <invoice>`,
-          `    <uid>REC-2024-CLM-D-1042-REFUND</uid>`,
-          `    <invoiceHeader>`,
-          `      <invoiceType>5.1</invoiceType> <!-- Credit Note / Supplier Dispute -->`,
-          `      <issueDate>2024-11-14</issueDate>`,
-          `      <currency>EUR</currency>`,
-          `    </invoiceHeader>`,
-          `    <invoiceDetails>`,
-          `      <lineNumber>1</lineNumber>`,
-          `      <netValue>462.30</netValue>`,
-          `      <vatCategory>1</vatCategory>`,
-          `      <vatAmount>110.95</vatAmount>`,
-          `      <delayPenaltyValue>125.00</delayPenaltyValue>`,
-          `      <totalValue>587.30</totalValue>`,
-        `    </invoiceDetails>`,
-        `  </invoice>`,
-        `</InvoicesDoc>`,
-        ``,
-        `----------------------------------------------------------------------`,
-        `DISPATCH EMAIL TRANSMITTED TO: billing@kappa-industrial.gr`,
-        `SUBJECT: Formal Dispute Notice & Refund Claim CLM-D-1042 (PO-8821 / INV-7781)`,
-        `STATUS: 250 2.0.0 OK Message accepted for delivery by mailhub.kappa.gr`,
-      ].join("\n")
-    : [
-        `<?xml version="1.0" encoding="UTF-8"?>`,
-        `<InvoicesDoc xmlns="http://www.aade.gr/myDATA/invoice/v1.0">`,
-        `  <invoice>`,
-        `    <uid>REC-2024-CLM-D-1042-REDELIVERY</uid>`,
-        `    <invoiceHeader>`,
-        `      <invoiceType>9.3</invoiceType> <!-- Delivery Note / Replacement Intake -->`,
-        `      <issueDate>2024-11-14</issueDate>`,
-        `      <currency>EUR</currency>`,
-        `    </invoiceHeader>`,
-        `    <invoiceDetails>`,
-        `      <lineNumber>1</lineNumber>`,
-        `      <sku>SKU-HUB-22</sku>`,
-        `      <quantity>22</quantity>`,
-        `      <slaLatePenaltyFee>202.30</slaLatePenaltyFee>`,
-        `    </invoiceDetails>`,
-        `  </invoice>`,
-        `</InvoicesDoc>`,
-        ``,
-        `----------------------------------------------------------------------`,
-        `DISPATCH EMAIL TRANSMITTED TO: logistics@kappa-industrial.gr`,
-        `SUBJECT: Re-delivery Authorization Notice CLM-D-1042: 22 SKU-HUB-22 by Tomorrow`,
-        `STATUS: 250 2.0.0 OK Message accepted for delivery by mailhub.kappa.gr`,
-      ].join("\n"),
+    code:
+      isKappa && !isRefund
+        ? [
+            `<?xml version="1.0" encoding="UTF-8"?>`,
+            `<InvoicesDoc xmlns="http://www.aade.gr/myDATA/invoice/v1.0">`,
+            `  <invoice>`,
+            `    <uid>REC-2026-${claimId}-REDELIVERY</uid>`,
+            `    <invoiceHeader>`,
+            `      <invoiceType>9.3</invoiceType> <!-- Delivery Note / Replacement Intake -->`,
+            `      <currency>EUR</currency>`,
+            `    </invoiceHeader>`,
+            `    <invoiceDetails>`,
+            `      <sku>HUB-USBC</sku>`,
+            `      <quantity>22</quantity>`,
+            `      <slaLatePenaltyFee>202.30</slaLatePenaltyFee>`,
+            `    </invoiceDetails>`,
+            `  </invoice>`,
+            `</InvoicesDoc>`,
+            ``,
+            `----------------------------------------------------------------------`,
+            `DISPATCH EMAIL TRANSMITTED TO: ${recipientEmail}`,
+            `SUBJECT: Re-delivery Authorization Notice ${claimId}: 22 HUB-USBC by Tomorrow`,
+            `STATUS: 250 2.0.0 OK Message accepted for delivery`,
+          ].join("\n")
+        : [
+            `<?xml version="1.0" encoding="UTF-8"?>`,
+            `<InvoicesDoc xmlns="http://www.aade.gr/myDATA/invoice/v1.0">`,
+            `  <invoice>`,
+            `    <uid>REC-2026-${claimId}-CREDIT</uid>`,
+            `    <invoiceHeader>`,
+            `      <invoiceType>5.1</invoiceType> <!-- Credit Note / Supplier Dispute -->`,
+            `      <currency>EUR</currency>`,
+            `    </invoiceHeader>`,
+            `    <invoiceDetails>`,
+            `      <lineNumber>1</lineNumber>`,
+            `      <netValue>${netVal}</netValue>`,
+            `      <vatCategory>1</vatCategory>`,
+            `      <vatAmount>${vatVal}</vatAmount>`,
+            `      <totalValue>${amtNum.toFixed(2)}</totalValue>`,
+            `    </invoiceDetails>`,
+            `  </invoice>`,
+            `</InvoicesDoc>`,
+            ``,
+            `----------------------------------------------------------------------`,
+            `DISPATCH EMAIL TRANSMITTED TO: ${recipientEmail}`,
+            `SUBJECT: Credit Claim ${claimId} (${invoiceId}) · ${amtFmt}`,
+            `STATUS: 250 2.0.0 OK Message accepted for delivery`,
+          ].join("\n"),
     lang: "text",
     assertions: [
       { label: "Greek AADE myDATA submission verified (MARK: 4000089211)", ok: true },
@@ -695,7 +790,7 @@ export function buildCommitWindows(choice: "refund" | "redelivery"): LiveWin[] {
     pinned: false,
     instant: false,
     telemetry: {
-      facts: ["AADE myDATA API 200 OK", "MARK: 4000089211", "SMTP TLS verified", "250 OK accepted"],
+      facts: ["AADE myDATA API 200 OK", claimId, "SMTP TLS verified", "250 OK accepted"],
       steps: ["serialize XML document", "sign with tax certificates", "post to AADE endpoint", "deliver email dispatch"],
     },
   };
