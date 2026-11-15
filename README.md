@@ -60,3 +60,9 @@ cd frontend && npm install && npm run typecheck && npm run dev
 ## Built With
 
 Google Gemini 2.5 Flash · fal.ai (xAI Grok Voice, Wizper STT, Vision & LLM Gateway) · Oumi Iris (System-1 Logprob Gate) · FastAPI · SQLite · React 19 · TypeScript · Vite · Tailwind CSS · Framer Motion.
+
+## Team & License
+
+Built in 36 hours at the **GenAI Summit SEE Hackathon** (Athens, Nov 2026) by **Odysseas Avdikos**, **Orestis Spyrou**, and **Efthymios Grizanitis**.
+
+Copyright © 2026 Odysseas Avdikos, Orestis Spyrou, and Efthymios Grizanitis. **All Rights Reserved** — see [LICENSE](LICENSE). Source code is published strictly for technical evaluation and recruitment review.
