@@ -196,6 +196,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   const phoneCooldownTimerRef = useRef<number | null>(null);
   const lastAgentTurnSpokenAtRef = useRef<number>(0);
   const lastSpokenTurnKeyRef = useRef<string | null>(null);
+  const [voiceInitiated, setVoiceInitiated] = useState(false);
+  const userInitiatedVoiceRef = useRef(false);
 
   const markPhoneCallActive = useCallback(() => {
     if (phoneCooldownTimerRef.current !== null) {
@@ -265,6 +267,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   const brief = useCallback(
     (text: string, kind: string, interrupt = false) => {
       setLastBriefing(text);
+      if (!userInitiatedVoiceRef.current) return;
       if (!voiceRef.current) return;
       if (checkIsMobileRoute() || !windowsEnabledRef.current || isMobileCallManagingAudio()) return;
       if (phoneCallActiveRef.current) return;
@@ -893,6 +896,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
 
     switch (ev.type) {
       case "rehearse_start":
+        userInitiatedVoiceRef.current = false;
+        setVoiceInitiated(false);
         setRehearsalActive(true);
         setVerify(null);
         setStage("plan");
@@ -1015,6 +1020,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         }
 
         if (
+          userInitiatedVoiceRef.current &&
           !isPhone &&
           !phoneCallActiveRef.current &&
           turn.speaker === "agent" &&
@@ -2232,6 +2238,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   const sendDesktopVoiceTurn = async (text: string): Promise<void> => {
     const trimmed = text.trim();
     if (!trimmed) return;
+    userInitiatedVoiceRef.current = true;
+    setVoiceInitiated(true);
 
     const normVoice = (s: string) =>
       s
@@ -2528,6 +2536,8 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
 
   const startDesktopConsult = useCallback(
     (reqIdArg?: string | null, claimIdArg?: string, claimAmountArg?: number | null, isKappaArg?: boolean) => {
+      userInitiatedVoiceRef.current = true;
+      setVoiceInitiated(true);
       phoneCallActiveRef.current = false;
       phoneTransferredRef.current = false;
 
@@ -2716,6 +2726,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     speed,
     setSpeed,
     voiceOn,
+    voiceInitiated,
     toggleVoice,
     speaking,
     lastBriefing,

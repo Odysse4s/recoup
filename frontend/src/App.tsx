@@ -168,6 +168,7 @@ export default function App() {
             pendingApproval={r.pendingApproval}
             committedClaimId={committedClaimId}
             voiceOn={r.voiceOn}
+            voiceInitiated={r.voiceInitiated}
             speaking={r.speaking}
             onStartDesktopConsult={r.startDesktopConsult}
             onDesktopVoiceTurn={desktopVoiceTurnHandler}

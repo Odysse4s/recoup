@@ -34,6 +34,7 @@ export interface OperatorConsultPanelProps {
   pendingApproval: ApprovalNeededPayload | null;
   committedClaimId?: string | null;
   voiceOn: boolean;
+  voiceInitiated?: boolean;
   speaking: boolean;
   onStartDesktopConsult?: (
     reqId?: string | null,
@@ -87,6 +88,7 @@ export function OperatorConsultPanel({
   pendingApproval,
   committedClaimId = null,
   voiceOn,
+  voiceInitiated = false,
   speaking,
   onStartDesktopConsult,
   onDesktopVoiceTurn,
@@ -324,6 +326,7 @@ export function OperatorConsultPanel({
   useEffect(() => {
     const callIdKey = consult?.callId ?? "default";
     if (
+      voiceInitiated &&
       hasCommitted &&
       consult?.active &&
       consult?.channel === "desktop_voice" &&
@@ -343,7 +346,7 @@ export function OperatorConsultPanel({
         }
       })();
     }
-  }, [hasCommitted, consult?.active, consult?.channel, consult?.callId, consultSessionEnded, isPhoneTransferred, laptopMicOn]);
+  }, [voiceInitiated, hasCommitted, consult?.active, consult?.channel, consult?.callId, consultSessionEnded, isPhoneTransferred, laptopMicOn]);
 
   // Reset dialing state once call becomes live or pendingApproval changes
   useEffect(() => {

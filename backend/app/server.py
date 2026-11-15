@@ -476,7 +476,12 @@ async def _run(goal: str, run_id: str, anticipate_after: bool = True):
         plan, report, fp, previews = await rehearse(goal, REAL, run_id)
         status = await replay(run_id, plan, report, fp, previews, REAL, LOG)
         claims_summary = (report.db_summary or {}).get("claims")
-        claims_mutated = int((claims_summary.inserted if claims_summary else 0) + (claims_summary.updated if claims_summary else 0))
+        if isinstance(claims_summary, dict):
+            claims_mutated = int(claims_summary.get("inserted", 0) + claims_summary.get("updated", 0))
+        elif claims_summary is not None:
+            claims_mutated = int(getattr(claims_summary, "inserted", 0) + getattr(claims_summary, "updated", 0))
+        else:
+            claims_mutated = 0
         outbox_count = len(report.external_outbox or [])
         clean_audit = status == "committed" and claims_mutated == 0 and outbox_count == 0
         spoken_done = (
