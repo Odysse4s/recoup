@@ -20,7 +20,8 @@ export type EventType =
   | "call_turn"
   | "call_end"
   | "offer"
-  | "run_done";
+  | "run_done"
+  | "workspace_reset";
 
 export interface ToolCall {
   id: string;

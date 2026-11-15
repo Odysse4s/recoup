@@ -165,6 +165,8 @@ export function narrate(ev: ServerEvent, brandName = "Recoup"): string {
       const o = ev.payload as unknown as AnticipateOfferPayload;
       return `Proactive AP sweep complete: ${brandName} pre-rehearsed ${o.prediction.need}.`;
     }
+    case "workspace_reset":
+      return idleNarration(brandName);
     default:
       return ev.thought ?? "";
   }

@@ -63,6 +63,36 @@ const DEFAULT_CLAIM_ID = "CLM-D-1042";
 const DEFAULT_OPENING_QUESTION =
   "Hey! Kappa's delivery is short 22 hubs—they owe us 587 euros. Should I demand the full refund, or take replacement hubs?";
 
+function extractApprovalAmount(
+  approval: ApprovalNeededPayload | null,
+  consult?: OperatorConsultState | null
+): number {
+  if (typeof consult?.claimAmount === "number" && consult.claimAmount > 0) return consult.claimAmount;
+  const argRow = approval?.args?.row as Record<string, unknown> | undefined;
+  const numericCandidate =
+    (typeof approval?.args?.claim_amount === "number" ? approval.args.claim_amount : null) ??
+    (typeof approval?.args?.amount === "number" ? approval.args.amount : null) ??
+    (typeof argRow?.amount === "number" ? argRow.amount : null) ??
+    (typeof argRow?.total === "number" ? argRow.total : null);
+  if (typeof numericCandidate === "number" && numericCandidate > 0) return numericCandidate;
+
+  const corpus = [
+    approval?.diff_preview,
+    approval?.risk_reason,
+    approval?.spoken_summary,
+    typeof approval?.args?.subject === "string" ? approval.args.subject : "",
+    typeof approval?.args?.body === "string" ? approval.args.body : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const match = corpus.match(/(?:EUR|€)\s*([0-9]+(?:\.[0-9]+)?)/i);
+  if (match && match[1]) {
+    const parsed = parseFloat(match[1]);
+    if (!Number.isNaN(parsed) && parsed > 0) return parsed;
+  }
+  return 587.3;
+}
+
 let cachedRingtoneUrl: string | null = null;
 function getDualToneRingtoneUrl(): string {
   if (cachedRingtoneUrl) return cachedRingtoneUrl;
@@ -393,16 +423,7 @@ function OperatorEscalationCall({
     return typeof candidate === "string" && candidate.trim() ? candidate : DEFAULT_CLAIM_ID;
   }, [approval, consult?.claimId, localCompletion?.claimId]);
 
-  const claimAmount = useMemo(() => {
-    if (typeof consult?.claimAmount === "number" && consult.claimAmount > 0) return consult.claimAmount;
-    const argRow = approval?.args?.row as Record<string, unknown> | undefined;
-    const candidate =
-      (typeof approval?.args?.claim_amount === "number" ? approval.args.claim_amount : null) ??
-      (typeof approval?.args?.amount === "number" ? approval.args.amount : null) ??
-      (typeof argRow?.amount === "number" ? argRow.amount : null) ??
-      (typeof argRow?.total === "number" ? argRow.total : null);
-    return typeof candidate === "number" && candidate > 0 ? candidate : 587.3;
-  }, [approval, consult?.claimAmount]);
+  const claimAmount = useMemo(() => extractApprovalAmount(approval, consult), [approval, consult]);
 
   const callKey = sessionKey;
 
@@ -835,7 +856,7 @@ function OperatorEscalationCall({
       utteranceAbortRef.current?.abort();
       const abortCtrl = new AbortController();
       utteranceAbortRef.current = abortCtrl;
-      const timeoutId = window.setTimeout(() => abortCtrl.abort(), 14000);
+      const timeoutId = window.setTimeout(() => abortCtrl.abort(), 22000);
 
       setSubmitting(true);
       buzz(25);
@@ -2002,13 +2023,7 @@ function GateHome({
         {pausedCallDecision && (() => {
           const argRow = r.pendingApproval?.args?.row as Record<string, unknown> | undefined;
           const cardClaimId = (r.pendingApproval?.args?.claim_id ?? argRow?.id ?? DEFAULT_CLAIM_ID) as string;
-          const cardAmount = (
-            (typeof r.pendingApproval?.args?.claim_amount === "number" ? r.pendingApproval.args.claim_amount : null) ??
-            (typeof r.pendingApproval?.args?.amount === "number" ? r.pendingApproval.args.amount : null) ??
-            (typeof argRow?.amount === "number" ? argRow.amount : null) ??
-            (typeof argRow?.total === "number" ? argRow.total : null) ??
-            587.3
-          );
+          const cardAmount = extractApprovalAmount(r.pendingApproval, r.operatorConsult);
           return (
             <motion.div
               initial={{ opacity: 0, y: -8 }}
@@ -2045,13 +2060,7 @@ function GateHome({
         {!pausedCallDecision && r.pendingApproval && !isPhoneCallActive && r.pendingApproval.channel !== "notification" && (() => {
           const argRow = r.pendingApproval.args?.row as Record<string, unknown> | undefined;
           const cardClaimId = (r.pendingApproval.args?.claim_id ?? argRow?.id ?? DEFAULT_CLAIM_ID) as string;
-          const cardAmount = (
-            (typeof r.pendingApproval.args?.claim_amount === "number" ? r.pendingApproval.args.claim_amount : null) ??
-            (typeof r.pendingApproval.args?.amount === "number" ? r.pendingApproval.args.amount : null) ??
-            (typeof argRow?.amount === "number" ? argRow.amount : null) ??
-            (typeof argRow?.total === "number" ? argRow.total : null) ??
-            587.3
-          );
+          const cardAmount = extractApprovalAmount(r.pendingApproval, r.operatorConsult);
           const isDesktopVoice = r.operatorConsult?.channel === "desktop_voice";
           return (
             <motion.div
@@ -2361,6 +2370,22 @@ export function MobileGate({
     }
   }, [consult?.active, consult?.callId, consult?.ringing, isPhoneChannel]);
 
+  const rehearseStartCount = useMemo(
+    () => r.events.filter((e) => e.type === "rehearse_start").length,
+    [r.events]
+  );
+
+  // Clear stale call cards on server reset (`resetSeq`), empty stream, or a brand-new `rehearse_start` run
+  useEffect(() => {
+    setLocalCompletion(null);
+    setActiveCallId(null);
+    setDismissedCallKey(null);
+    setPausedCallDecision(false);
+    setMobileCallOwnsAudio(false);
+    stopSpeaking();
+    mutePersistentMicStream(true);
+  }, [r.resetSeq, rehearseStartCount]);
+
   useEffect(() => {
     if (r.events.length === 0) {
       setLocalCompletion(null);
@@ -2369,6 +2394,45 @@ export function MobileGate({
       setPausedCallDecision(false);
     }
   }, [r.events.length]);
+
+  // Keep iPhone screen awake while MobileGate is open so iOS Safari does not freeze background SSE
+  useEffect(() => {
+    type WakeLockSentinelLike = { release?: () => Promise<void> };
+    const nav = navigator as unknown as {
+      wakeLock?: { request: (type: "screen") => Promise<WakeLockSentinelLike> };
+    };
+    if (!nav?.wakeLock?.request) return;
+
+    let sentinel: WakeLockSentinelLike | null = null;
+    let active = true;
+
+    const requestWakeLock = async () => {
+      if (!active || document.visibilityState !== "visible") return;
+      try {
+        sentinel = await nav.wakeLock!.request("screen");
+      } catch {
+        // Ignore on unsupported iOS builds or low-power mode
+      }
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void requestWakeLock();
+      }
+    };
+
+    void requestWakeLock();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      active = false;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      try {
+        void sentinel?.release?.();
+      } catch {
+        // ignore
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (r.pendingApproval?.req_id && localCompletion && localCompletion.sessionKey !== r.pendingApproval.req_id) {

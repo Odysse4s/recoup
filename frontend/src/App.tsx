@@ -177,6 +177,7 @@ export default function App() {
             onReplayTurn={r.replayConsultTurn}
             irisGate={r.wsState?.iris_gate ?? r.wsState?.active_call?.iris_gate}
             activeCall={r.wsState?.active_call}
+            inspectionPaused={r.windows.some((w) => Boolean(w.manual || w.pinned))}
           />
           <DiffStack
             report={r.report}

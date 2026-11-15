@@ -1607,18 +1607,18 @@ export function useAutoVad({
         }
         const speakingFloor = speakingAmbientRmsRef.current;
 
-        // Require loud, deliberate close-mic speech (~80% perceptual mic intensity) well above live room chatter:
-        // 1) High RMS (>= 0.115 AND >= 2.65x live speaking-phase room baseline)
-        // 2) High time-domain crest peak (>= 0.34 full-scale) from close-mouth proximity
-        // 3) Strong vocal-band harmonic concentration (peakBinEnergy >= 148/255 & voiceBandRatio >= 0.46)
+        // Require loud, deliberate close-mic speech (~80%+ on-screen mic meter) well above live room chatter:
+        // 1) High RMS (>= 0.134 -> >=80% on 600*rms meter, AND >= 2.75x live speaking-phase room baseline)
+        // 2) High time-domain crest peak (>= 0.36 full-scale) from close-mouth proximity
+        // 3) Strong vocal-band harmonic concentration (peakBinEnergy >= 152/255 & voiceBandRatio >= 0.46)
         // 4) Sustained intentional phrase (~150-180ms = 9 frames), rejecting transient claps/shouts
         const bargeThreshold = isMobileAec
-          ? Math.max(0.115, Math.min(0.185, speakingFloor * 2.65))
-          : Math.max(0.13, Math.min(0.20, speakingFloor * 2.85));
+          ? Math.max(0.134, Math.min(0.20, speakingFloor * 2.75))
+          : Math.max(0.138, Math.min(0.21, speakingFloor * 2.9));
         const isHighVolumeRms = rms >= bargeThreshold;
-        const isHighCrestPeak = maxAbsSample >= (isMobileAec ? 0.34 : 0.38);
+        const isHighCrestPeak = maxAbsSample >= (isMobileAec ? 0.36 : 0.40);
         const isStrongCloseVocal =
-          voiceBandRatio >= 0.46 && peakBinEnergy >= (isMobileAec ? 148 : 158);
+          voiceBandRatio >= 0.46 && peakBinEnergy >= (isMobileAec ? 152 : 162);
         const requiredFrames = isMobileAec ? 9 : 10;
 
         if (isHighVolumeRms && isHighCrestPeak && isStrongCloseVocal) {

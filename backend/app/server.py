@@ -1609,7 +1609,9 @@ async def reset():
     FEEDBACK_PATH.unlink(missing_ok=True)
     BUS.history.clear()
     _EXTRA_VOICE_COST_EUR = 0.0
-    return {"ok": True, "fingerprint": fingerprint_env(REAL)[:12]}
+    fp = fingerprint_env(REAL)[:12]
+    BUS.broadcast_ephemeral(EventType.WORKSPACE_RESET, {"fingerprint": fp})
+    return {"ok": True, "fingerprint": fp}
 
 
 @app.get("/api/history")

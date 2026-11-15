@@ -80,6 +80,7 @@ const EVENT_TYPES = [
   "call_end",
   "offer",
   "run_done",
+  "workspace_reset",
 ] as const;
 
 const checkIsMobileRoute = (): boolean =>
@@ -163,6 +164,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
   const [operatorConsult, setOperatorConsult] = useState<OperatorConsultState | null>(null);
   const [requestedDeckView, setRequestedDeckView] = useState<{ view: "graph" | "db" | "split"; seq: number } | null>(null);
   const [requestedDbTable, setRequestedDbTable] = useState<{ table: string; seq: number } | null>(null);
+  const [resetSeq, setResetSeq] = useState(0);
   const executeUiActionRef = useRef<((uiAction: UiActionPayload) => void) | null>(null);
   const triggerGoalRef = useRef<((goalText: string) => Promise<void>) | null>(null);
   const acceptOfferRef = useRef<((offerId: string) => Promise<void>) | null>(null);
@@ -1404,6 +1406,12 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
         if (modeRef.current === "demo") setRunStatus("committed");
         if (modeRef.current !== "demo") refreshState();
         break;
+      case "workspace_reset":
+        clearWorkspaceUi();
+        setMode("live");
+        setResetSeq((n) => n + 1);
+        void refreshState();
+        break;
     }
   };
   const applyRef = useRef(applyEvent);
@@ -1548,7 +1556,11 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
             }
           };
 
-          if (parsed.type === "approval_result") {
+          if (parsed.type === "workspace_reset") {
+            queueRef.current.length = 0;
+            setQueued(0);
+            applyRef.current(parsed);
+          } else if (parsed.type === "approval_result") {
             drainRehearsalQueueSilently();
             deferredApprovalRef.current = null;
             applyRef.current(parsed);
@@ -1673,17 +1685,36 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     setRunStatus("running");
     const brandName = brandOf(wsStateRef.current?.domain).brand_name;
     setNarration(`Dispatching audit goal to ${brandName} safety runtime…`);
-    try {
-      const res = await fetch("/api/goal", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ goal: goalText }),
-      });
-      if (!res.ok) throw new Error("backend error");
+    let dispatched = false;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch("/api/goal", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ goal: goalText }),
+        });
+        if (res.ok) {
+          dispatched = true;
+          break;
+        }
+      } catch {
+        // retry once below on transient network/Wi-Fi blip
+      }
+      if (attempt === 0) {
+        await sleep(400);
+      }
+    }
+    if (dispatched) {
       setMode("live");
-    } catch {
+      return;
+    }
+    const isKappaHeroGoal = /\b(1042|kappa)\b/i.test(goalText);
+    if (isKappaHeroGoal) {
       setMode("demo");
       enqueue(mockEvents());
+    } else {
+      setRunStatus("error");
+      setNarration(`Backend temporarily unreachable for "${goalText.slice(0, 60)}" — click Run Agent to retry.`);
     }
   };
   triggerGoalRef.current = triggerGoal;
@@ -2748,6 +2779,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     togglePin,
     requestedDeckView,
     requestedDbTable,
+    resetSeq,
     pickupCall,
     executeUiAction,
   };

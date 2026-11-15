@@ -34,5 +34,16 @@ class EventBus:
             q.put_nowait(ev)
         return ev
 
+    def broadcast_ephemeral(
+        self, type_: EventType, payload: dict[str, Any] | None = None, run_id: str = "system"
+    ) -> ServerEvent:
+        """Push an out-of-band SSE control event without polluting BUS.history."""
+        ev = ServerEvent(
+            id=next(self._ids), run_id=run_id, ts=time.time(), type=type_, payload=payload or {}
+        )
+        for q in list(self._subs):
+            q.put_nowait(ev)
+        return ev
+
 
 BUS = EventBus()

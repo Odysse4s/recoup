@@ -47,6 +47,7 @@ export interface OperatorConsultPanelProps {
   onReject?: (reqId: string) => void;
   onReplayTurn?: (text: string) => void;
   irisGate?: OumiIrisGate | null;
+  inspectionPaused?: boolean;
   activeCall?: {
     turns?: {
       speaker: string;
@@ -94,6 +95,7 @@ export function OperatorConsultPanel({
   onReject,
   onReplayTurn,
   irisGate: propsIrisGate,
+  inspectionPaused = false,
   activeCall,
 }: OperatorConsultPanelProps) {
   const extConsult = consult as ExtendedConsultState | null;
@@ -125,6 +127,8 @@ export function OperatorConsultPanel({
   const [isDialing, setIsDialing] = useState(false);
   const [timerTick, setTimerTick] = useState(0);
   const [autoTransferSec, setAutoTransferSec] = useState<number | null>(null);
+  const [autoTransferPaused, setAutoTransferPaused] = useState(false);
+  const transferTimerPaused = Boolean(inspectionPaused || autoTransferPaused);
   const autoTransferCancelledReqRef = useRef<string | null>(null);
   const autoTransferFiredReqRef = useRef<string | null>(null);
 
@@ -613,6 +617,10 @@ export function OperatorConsultPanel({
     triggerPhoneTransfer(true);
   };
 
+  useEffect(() => {
+    setAutoTransferPaused(false);
+  }, [pendingApproval?.req_id]);
+
   // Start / reset 20-second auto-escalation countdown when Decision Gate opens with no user action
   useEffect(() => {
     const reqKey = pendingApproval?.req_id;
@@ -644,7 +652,7 @@ export function OperatorConsultPanel({
   ]);
 
   useEffect(() => {
-    if (autoTransferSec === null) return;
+    if (autoTransferSec === null || transferTimerPaused) return;
     if (autoTransferSec <= 0) {
       triggerPhoneTransfer(false);
       return;
@@ -653,7 +661,7 @@ export function OperatorConsultPanel({
       setAutoTransferSec((prev) => (prev !== null ? prev - 1 : null));
     }, 1000);
     return () => window.clearTimeout(t);
-  }, [autoTransferSec, triggerPhoneTransfer]);
+  }, [autoTransferSec, transferTimerPaused, triggerPhoneTransfer]);
 
   const sanitizedTurns = useMemo(() => {
     if (!consult?.turns) return [];
@@ -1193,13 +1201,8 @@ export function OperatorConsultPanel({
                   </div>
                 </button>
 
-                {/* 2. Call / Transfer to My iPhone Button (Auto-escalates after 20s of no action, or click anytime) */}
-                <button
-                  type="button"
-                  disabled={isDialing}
-                  onClick={handleTransferToPhone}
-                  className="group relative overflow-hidden flex items-center justify-between rounded-lg border border-purple-500/45 bg-purple-500/8 hover:border-purple-500/75 hover:bg-purple-500/15 dark:bg-purple-500/10 dark:hover:border-purple-400 dark:hover:bg-purple-500/20 p-2 text-left transition-all hover:shadow-[0_0_12px_rgba(168,85,247,0.18)] disabled:opacity-60"
-                >
+                {/* 2. Call / Transfer to My iPhone Button (Auto-escalates after 20s of no action, auto-pauses during inspection, or click pause pill) */}
+                <div className="group relative overflow-hidden flex items-center rounded-lg border border-purple-500/45 bg-purple-500/8 hover:border-purple-500/75 hover:bg-purple-500/15 dark:bg-purple-500/10 dark:hover:border-purple-400 dark:hover:bg-purple-500/20 p-2 transition-all hover:shadow-[0_0_12px_rgba(168,85,247,0.18)]">
                   {autoTransferSec !== null && !isDialing && (
                     <div
                       aria-hidden="true"
@@ -1214,7 +1217,12 @@ export function OperatorConsultPanel({
                       style={{ width: `${Math.max(0, Math.min(100, (autoTransferSec / 20) * 100))}%` }}
                     />
                   )}
-                  <div className="relative z-10 flex items-center gap-2 min-w-0">
+                  <button
+                    type="button"
+                    disabled={isDialing}
+                    onClick={handleTransferToPhone}
+                    className="relative z-10 flex min-w-0 flex-1 items-center gap-2 text-left disabled:opacity-60"
+                  >
                     <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-purple-500/15 text-purple-700 ring-1 ring-purple-500/35 dark:bg-purple-500/20 dark:text-purple-300 dark:ring-purple-400/40 transition-transform group-hover:scale-105">
                       <Smartphone className="h-4 w-4 text-purple-700 dark:text-purple-300" />
                     </div>
@@ -1229,15 +1237,37 @@ export function OperatorConsultPanel({
                       </div>
                       <p className="truncate text-[9px] text-purple-700/85 dark:text-purple-300/80">
                         {autoTransferSec !== null && !isDialing
-                          ? `Auto-calls in ${autoTransferSec}s · click now`
+                          ? inspectionPaused
+                            ? `Paused while inspecting (${autoTransferSec}s)`
+                            : autoTransferPaused
+                            ? `Timer paused (${autoTransferSec}s) · click badge`
+                            : `Auto-calls in ${autoTransferSec}s · click now`
                           : "Continue on /mobile with Grok Voice"}
                       </p>
                     </div>
-                  </div>
-                  <div
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isDialing || autoTransferSec === null || inspectionPaused}
+                    onClick={() => {
+                      soundFx.playUiClick();
+                      setAutoTransferPaused((p) => !p);
+                    }}
+                    title={
+                      autoTransferSec === null
+                        ? "Dial iPhone now"
+                        : inspectionPaused
+                        ? "Auto-paused while inspecting modal window"
+                        : autoTransferPaused
+                        ? "Resume 20s auto-transfer timer"
+                        : "Pause 20s auto-transfer timer"
+                    }
                     className={cx(
-                      "relative z-10 ml-1.5 flex shrink-0 items-center gap-1 rounded bg-purple-500/15 px-1.5 py-0.5 font-mono text-[9.5px] font-semibold text-purple-800 ring-1 ring-purple-500/30 dark:bg-purple-400/20 dark:text-purple-300 dark:ring-purple-400/30 tabular-nums",
-                      autoTransferSec !== null && autoTransferSec <= 5 && !isDialing && "animate-pulse ring-purple-500/70"
+                      "relative z-10 ml-1.5 flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[9.5px] font-semibold ring-1 transition-colors tabular-nums",
+                      transferTimerPaused && autoTransferSec !== null
+                        ? "bg-amber-500/15 text-amber-800 ring-amber-500/40 dark:bg-amber-400/20 dark:text-amber-200"
+                        : "bg-purple-500/15 text-purple-800 ring-purple-500/30 hover:bg-purple-500/25 dark:bg-purple-400/20 dark:text-purple-300 dark:ring-purple-400/30",
+                      autoTransferSec !== null && autoTransferSec <= 5 && !isDialing && !transferTimerPaused && "animate-pulse ring-purple-500/70"
                     )}
                   >
                     <PhoneCall className="h-2.5 w-2.5" />
@@ -1245,11 +1275,13 @@ export function OperatorConsultPanel({
                       {isDialing
                         ? "Calling…"
                         : autoTransferSec !== null
-                        ? `${autoTransferSec}s`
+                        ? transferTimerPaused
+                          ? `⏸ ${autoTransferSec}s`
+                          : `${autoTransferSec}s`
                         : "Call"}
                     </span>
-                  </div>
-                </button>
+                  </button>
+                </div>
               </div>
 
               {/* Quick-Ask Voice Hint Chips & Compact Quick-Ask Input */}

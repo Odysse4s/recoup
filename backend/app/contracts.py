@@ -32,6 +32,7 @@ class EventType(str, Enum):
     CALL_END = "call_end"
     ANTICIPATE_OFFER = "offer"
     RUN_DONE = "run_done"
+    WORKSPACE_RESET = "workspace_reset"
 
 
 class RiskDecision(str, Enum):
