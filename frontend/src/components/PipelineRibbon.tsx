@@ -132,10 +132,17 @@ export function PipelineRibbon({
 
       {/* Live Narration & Timer */}
       <div className="flex min-w-0 flex-1 items-center gap-2.5">
-        <span className="flex shrink-0 items-center gap-1.5 font-mono text-[10.5px] font-medium uppercase tracking-wider text-ink-3">
-          <Dot tone={liveTone} live={running || rewinding} />
-          <span>{rewinding ? "Rewind" : running ? "Live" : runStatus === "committed" ? "Done" : "Idle"}</span>
-        </span>
+        {runStatus === "committed" && !running && !rewinding ? (
+          <span className="flex shrink-0 items-center gap-1 rounded-full border border-ok/50 bg-ok/15 px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider text-ok shadow-[0_0_10px_rgba(16,185,129,0.2)]">
+            <Check className="h-3 w-3" strokeWidth={3} />
+            <span>Committed · All Done</span>
+          </span>
+        ) : (
+          <span className="flex shrink-0 items-center gap-1.5 font-mono text-[10.5px] font-medium uppercase tracking-wider text-ink-3">
+            <Dot tone={liveTone} live={running || rewinding} />
+            <span>{rewinding ? "Rewind" : running ? "Live" : runStatus === "committed" ? "Done" : "Idle"}</span>
+          </span>
+        )}
         <div className="relative h-5 min-w-0 flex-1 overflow-hidden">
           <AnimatePresence mode="popLayout" initial={false}>
             <motion.p

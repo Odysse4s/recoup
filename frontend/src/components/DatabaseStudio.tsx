@@ -380,6 +380,7 @@ export function DatabaseStudio({
   ghostRows,
   fileMarks,
   rewinding,
+  committed = false,
   pulseKey,
   onOpenFile,
   focusTable,
@@ -390,6 +391,7 @@ export function DatabaseStudio({
   ghostRows: Record<string, Row[]>;
   fileMarks: Record<string, "new" | "changed" | "removed">;
   rewinding: boolean;
+  committed?: boolean;
   pulseKey: number;
   onOpenFile: (path: string, content: string) => void;
   focusTable?: { table: string; seq: number } | null;
@@ -540,8 +542,9 @@ export function DatabaseStudio({
               <span className="font-mono text-[10px] text-ink-3 tabular">{tables[t]?.length ?? 0}</span>
               {isAade && <AadeBadge className="h-4 px-1 text-[8.5px]" />}
               {s && (s.inserted || s.updated || s.deleted) ? (
-                <Chip tone="warn" className="h-4 px-1 text-[9px]">
-                  staged {s.inserted ? `+${s.inserted}` : ""}
+                <Chip tone={committed ? "ok" : "warn"} className="h-4 px-1 text-[9px]">
+                  {committed ? "live " : "staged "}
+                  {s.inserted ? `+${s.inserted}` : ""}
                   {s.updated ? `~${s.updated}` : ""}
                   {s.deleted ? `−${s.deleted}` : ""}
                 </Chip>
@@ -624,8 +627,9 @@ export function DatabaseStudio({
                       </Chip>
                       {schema.isAade && <AadeBadge />}
                       {s && (s.inserted || s.updated || s.deleted) ? (
-                        <Chip tone="warn" className="h-[18px] text-[9.5px]">
-                          staged {s.inserted ? `+${s.inserted}` : ""}
+                        <Chip tone={committed ? "ok" : "warn"} className="h-[18px] text-[9.5px]">
+                          {committed ? "live " : "staged "}
+                          {s.inserted ? `+${s.inserted}` : ""}
                           {s.updated ? `~${s.updated}` : ""}
                           {s.deleted ? `−${s.deleted}` : ""}
                         </Chip>

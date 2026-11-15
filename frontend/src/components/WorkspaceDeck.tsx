@@ -120,7 +120,9 @@ export function WorkspaceDeck({ r }: { r: RecoupRuntime }) {
               label: label(
                 <Database />,
                 "Ledger & Schema",
-                liveChangeCount > 0 ? <CountPill n={liveChangeCount} active={view === "db"} tone="warn" /> : undefined
+                liveChangeCount > 0 ? (
+                  <CountPill n={liveChangeCount} active={view === "db"} tone={r.runStatus === "committed" ? "accent" : "warn"} />
+                ) : undefined
               ),
               title: "Live ERP tables, SQLite Schema DDL & staged workspace files",
             },
@@ -148,6 +150,7 @@ export function WorkspaceDeck({ r }: { r: RecoupRuntime }) {
           ghostRows={r.ghostRows}
           fileMarks={r.fileMarks}
           rewinding={!!r.rewind}
+          committed={r.runStatus === "committed"}
           pulseKey={r.pulses.db}
           onOpenFile={r.openFile}
           focusTable={r.requestedDbTable}

@@ -105,6 +105,11 @@ export default function App() {
           busy={r.runStatus === "running" || r.runStatus === "committing"}
           brandName={brand_name}
           pendingApproval={r.pendingApproval}
+          consultActive={Boolean(
+            r.operatorConsult?.active &&
+              !r.operatorConsult?.end &&
+              r.operatorConsult?.callStatus !== "ended"
+          )}
           onApprove={r.decide}
           onDesktopVoiceTurn={desktopVoiceTurnHandler}
           speaking={r.speaking}

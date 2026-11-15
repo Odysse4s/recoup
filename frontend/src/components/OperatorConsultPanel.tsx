@@ -16,7 +16,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ApprovalNeededPayload, OumiIrisGate, OumiIrisIntent } from "../contracts";
 import { soundFx } from "../lib/sound";
 import type { OperatorChoice, OperatorConsultState } from "../lib/types";
-import { stopSpeaking, useAutoVad, useSpeechInput } from "../lib/voice";
+import { getWarmMicStream, mutePersistentMicStream, stopSpeaking, useAutoVad, useSpeechInput } from "../lib/voice";
 import { btn, Chip, cx, Dot, Panel } from "./ui";
 import { VoiceOrb } from "./VoiceOrb";
 
@@ -271,12 +271,13 @@ export function OperatorConsultPanel({
 
   const callLive = isRinging || isConnected;
 
-  // Stop media tracks helper
+  // Stop media tracks helper (and release warm mic stream so browser tab mic indicator shuts off cleanly)
   const stopLaptopMic = useCallback(() => {
     if (mediaStream) {
       mediaStream.getTracks().forEach((t) => t.stop());
       setMediaStream(null);
     }
+    mutePersistentMicStream();
     setLaptopMicOn(false);
   }, [mediaStream]);
 
@@ -286,6 +287,7 @@ export function OperatorConsultPanel({
       if (mediaStream) {
         mediaStream.getTracks().forEach((t) => t.stop());
       }
+      mutePersistentMicStream();
     };
   }, [mediaStream]);
 
@@ -302,6 +304,32 @@ export function OperatorConsultPanel({
     }
   }, [isPhoneTransferred, consultSessionEnded, stopLaptopMic]);
 
+  // Auto-arm hands-free Laptop Mic when Recoup commits via voice (e.g. from CommandBar Voice) and asks "Need anything else?"
+  const autoArmedCallIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const callIdKey = consult?.callId ?? "default";
+    if (
+      hasCommitted &&
+      consult?.active &&
+      consult?.channel === "desktop_voice" &&
+      !consultSessionEnded &&
+      !isPhoneTransferred &&
+      !laptopMicOn &&
+      autoArmedCallIdRef.current !== callIdKey
+    ) {
+      autoArmedCallIdRef.current = callIdKey;
+      void (async () => {
+        try {
+          const stream = (await getWarmMicStream()) ?? (await navigator.mediaDevices.getUserMedia({ audio: true }));
+          setMediaStream(stream);
+          setLaptopMicOn(true);
+        } catch {
+          setLaptopMicOn(true);
+        }
+      })();
+    }
+  }, [hasCommitted, consult?.active, consult?.channel, consult?.callId, consultSessionEnded, isPhoneTransferred, laptopMicOn]);
+
   // Reset dialing state once call becomes live or pendingApproval changes
   useEffect(() => {
     if (callLive || !pendingApproval) {
@@ -310,17 +338,18 @@ export function OperatorConsultPanel({
   }, [callLive, pendingApproval?.req_id]);
 
   const isExecutedLive = Boolean(
-    (consult?.selectedChoice === "refund" || consult?.selectedChoice === "redelivery" || Boolean(committedClaimId)) &&
-      (consult?.active || isConnected || isRinging || consult?.channel === "desktop_voice")
+    !consultSessionEnded &&
+      (consult?.selectedChoice === "refund" || consult?.selectedChoice === "redelivery" || Boolean(committedClaimId)) &&
+      (consult?.active || isConnected || isRinging)
   );
 
   const callCompleted = Boolean(
     !callEndedWithoutDecision &&
       !isExecutedLive &&
-      ((!pendingApproval && committedClaimId) ||
+      (hasCommitted ||
+        (!pendingApproval && committedClaimId) ||
         (!pendingApproval && consult?.selectedChoice && !consult?.active) ||
-        (!pendingApproval && consult?.end?.outcome === "accepted") ||
-        (hasCommitted && consult?.end?.outcome === "accepted"))
+        consult?.end?.outcome === "accepted")
   );
 
   const isHighStakesApproval = Boolean(
@@ -463,7 +492,7 @@ export function OperatorConsultPanel({
     if (speaking) {
       echoGuardUntilRef.current = Date.now() + 8000;
     } else if (echoGuardUntilRef.current > Date.now()) {
-      echoGuardUntilRef.current = Date.now() + 650;
+      echoGuardUntilRef.current = Date.now() + 180;
     }
   }, [speaking]);
 
@@ -500,14 +529,17 @@ export function OperatorConsultPanel({
       }
       return;
     }
-    const delayMs = Math.max(80, echoGuardUntilRef.current - Date.now());
+    if (speechInput.listening || !speechInput.supported) {
+      return;
+    }
+    const delayMs = Math.max(60, echoGuardUntilRef.current - Date.now());
     const t = window.setTimeout(() => {
       if (laptopMicOn && !isPhoneTransferred && !consultSessionEnded && !speakingRef.current && speechInput.supported && !speechInput.listening) {
         speechInput.start();
       }
     }, delayMs);
     return () => window.clearTimeout(t);
-  }, [laptopMicOn, isPhoneTransferred, consultSessionEnded, speaking, speechInput]);
+  }, [laptopMicOn, isPhoneTransferred, consultSessionEnded, speaking, speechInput.listening, speechInput.supported, speechInput.start, speechInput.stop]);
 
   // Toggle Laptop Mic
   const toggleLaptopMic = async () => {
@@ -704,19 +736,19 @@ export function OperatorConsultPanel({
   const panelTitle = isExecutedLive
     ? isPhoneTransferred
       ? `On Call with You · ${callDurationStr}`
-      : "Executed Live · Undo Ready"
+      : "Executed Live · Awaiting Follow-Up"
+    : callCompleted
+    ? "✓ Audit & Settlement Complete"
     : callEndedWithoutDecision
     ? "Decision Gate · Awaiting PC Decision"
     : isConnected
     ? `On Call with You · ${callDurationStr}`
     : isRinging
     ? "Calling Your iPhone…"
-    : consult?.channel === "desktop_voice"
+    : consult?.channel === "desktop_voice" && !consultSessionEnded
     ? "Live Laptop Voice Consult"
     : laptopMicOn
     ? "Laptop Voice Gate Ready"
-    : callCompleted
-    ? "Resolution Committed"
     : "Decision Gate";
 
   return (
@@ -737,13 +769,15 @@ export function OperatorConsultPanel({
             ) : (
               <CheckCircle2 className="text-ok" />
             )
+          ) : callCompleted ? (
+            <CheckCircle2 className="text-ok" />
           ) : callEndedWithoutDecision ? (
             <Smartphone className="text-warn" />
           ) : isConnected ? (
             <Smartphone className="text-ok" />
           ) : isRinging ? (
             <Radio className="animate-pulse text-signal" />
-          ) : consult?.channel === "desktop_voice" || laptopMicOn ? (
+          ) : (!consultSessionEnded && consult?.channel === "desktop_voice") || laptopMicOn ? (
             <Mic className="text-accent animate-pulse" />
           ) : (
             <PhoneIncoming className="text-signal" />
@@ -752,7 +786,11 @@ export function OperatorConsultPanel({
         meta={
           isExecutedLive ? (
             <Chip tone="ok" className="font-mono text-[10px] font-bold ring-1 ring-ok/60 shadow-[0_0_12px_rgba(16,185,129,0.35)]">
-              <Dot tone="ok" live /> {isPhoneTransferred ? "✓ EXECUTED LIVE VIA IPHONE VOICE · UNDO READY" : "✓ EXECUTED LIVE VIA LAPTOP VOICE · UNDO READY"}
+              <Dot tone="ok" live /> {isPhoneTransferred ? "✓ EXECUTED LIVE · IPHONE OPEN" : "✓ EXECUTED LIVE · MIC OPEN FOR FOLLOW-UP"}
+            </Chip>
+          ) : callCompleted ? (
+            <Chip tone="ok" className="font-mono text-[10px] font-bold bg-ok/20 ring-1 ring-ok/70 shadow-[0_0_12px_rgba(16,185,129,0.3)]">
+              ✓ ALL DONE · MIC OFF · UNDO READY
             </Chip>
           ) : callEndedWithoutDecision ? (
             <Chip tone="warn" className="font-mono text-[10px]">
@@ -766,17 +804,13 @@ export function OperatorConsultPanel({
             <Chip tone="signal" className="font-mono text-[10px]">
               <Dot tone="signal" live /> RINGING
             </Chip>
-          ) : consult?.channel === "desktop_voice" ? (
+          ) : !consultSessionEnded && consult?.channel === "desktop_voice" ? (
             <Chip tone="accent" className="font-mono text-[10px]">
               <Dot tone="accent" live /> LIVE LAPTOP VOICE
             </Chip>
           ) : laptopMicOn ? (
             <Chip tone="accent" className="font-mono text-[10px]">
               <Dot tone="accent" live /> LAPTOP MIC ACTIVE
-            </Chip>
-          ) : callCompleted ? (
-            <Chip tone="ok" className="font-mono text-[10px]">
-              RESOLVED · UNDO READY
             </Chip>
           ) : (
             <Chip tone="danger" className="font-mono text-[10px]">
@@ -785,7 +819,11 @@ export function OperatorConsultPanel({
           )
         }
         actions={
-          voiceOn ? (
+          callCompleted || consultSessionEnded ? (
+            <Chip tone="neutral" className="font-mono text-[9.5px]">
+              Mic Off · Closed
+            </Chip>
+          ) : voiceOn ? (
             <Chip tone="accent" className="font-mono text-[9.5px]">
               Voice Ready
             </Chip>
@@ -981,14 +1019,43 @@ export function OperatorConsultPanel({
               <span className="font-mono text-[10px] text-ink-3">/mobile</span>
             </div>
           ) : callCompleted ? (
-            <div className="flex h-7 items-center justify-between rounded-lg border border-ok/40 bg-ok/10 px-2.5 text-[11.5px]">
-              <div className="flex min-w-0 items-center gap-1.5 font-medium text-ok">
-                <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                <span className="truncate">Resolution Committed · Claim {claimId}</span>
+            <div className="rounded-xl border border-ok/75 bg-gradient-to-r from-emerald-950/60 via-ok/15 to-emerald-950/60 p-2.5 shadow-[0_0_18px_rgba(16,185,129,0.22)] ring-1 ring-ok/45 space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-1.5 text-[12px] font-bold text-ok">
+                  <CheckCircle2 className="h-4 w-4 shrink-0 text-ok" />
+                  <span className="truncate">Process Finished Cleanly — Live ERP Updated</span>
+                </div>
+                <span className="shrink-0 rounded-md border border-ok/50 bg-ok/20 px-1.5 py-0.5 font-mono text-[9.5px] font-bold text-ok">
+                  ✓ MIC OFF · DONE
+                </span>
               </div>
-              <span className="shrink-0 font-mono text-[10px] text-ok">
-                {isKappa ? (resolvedChoice === "redelivery" ? "AADE 9.3" : "AADE 5.1") : "ERP SYNCED"}
-              </span>
+              <div className="flex flex-wrap items-center gap-1 font-mono text-[9.5px]">
+                {isKappa ? (
+                  resolvedChoice === "redelivery" ? (
+                    <>
+                      <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ 22 Hubs Redelivery</span>
+                      <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ €202.30 Credit</span>
+                      <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ AADE 9.3 XML</span>
+                      <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ Kappa Emailed</span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ €587.30 Claim</span>
+                      <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ INV-7781 Frozen</span>
+                      <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ AADE 5.1 XML</span>
+                      <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ Kappa Emailed</span>
+                    </>
+                  )
+                ) : (
+                  <>
+                    <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">
+                      ✓ {claimId} {formattedClaimAmount}
+                    </span>
+                    <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ AADE XML Filed</span>
+                    <span className="rounded border border-ok/35 bg-surface/85 px-1.5 py-0.5 font-semibold text-ok">✓ Supplier Emailed</span>
+                  </>
+                )}
+              </div>
             </div>
           ) : (
             /* Prominent Laptop Voice & iPhone Transfer Action Bar on Decision Gate */

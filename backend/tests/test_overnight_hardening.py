@@ -365,11 +365,13 @@ def test_post_commit_voice_close_and_stage_followup_offer_loop(tmp_path: Path, m
 
         r3 = client.post(
             "/api/call/user-respond",
-            json={"transcript": "No thanks, that's everything", "hangup": False},
+            json={"transcript": "no thats all", "hangup": False},
         )
         assert r3.status_code == 200
         assert r3.json()["keep_call_open"] is False
         assert r3.json()["call_status"] == "ended"
+        run_done_evs = [ev for ev in BUS.history if ev.type == EventType.RUN_DONE]
+        assert run_done_evs and run_done_evs[-1].payload.get("status") == "committed"
 
         # 2. Accept a stage-demo anticipated offer (`commit_plan=[]`) -> spawns full 2nd loop with Gate
         offer_id = "offer_stage_followup"
@@ -523,7 +525,8 @@ def test_stage_demo_report_clean_diffs_previews_and_counts(tmp_path: Path, monke
         assert "**Status:** `awaiting_approval`" in md_at_gate
         assert "D-1042_receiving_note.md" not in md_at_gate.split("## Rehearsal Diffs")[1].split("## Verification")[0]
         assert "`claims/CLM-D-1042.md`" in md_at_gate
-        assert "OK (0 ms): ``" not in md_at_gate
+        assert "- **File Modified:** `claims/CLM-D-1042.md`" not in md_at_gate
+        assert ": ``" not in md_at_gate
 
         req_id = next(iter(PENDING.keys()))
         PENDING[req_id].set_result(True)

@@ -128,16 +128,27 @@ export function narrate(ev: ServerEvent, brandName = "Recoup"): string {
     }
     case "call_end": {
       const c = ev.payload as unknown as CallEndPayload & { channel?: string };
+      if (c.outcome === "accepted") {
+        return "✓ Audit & voice session finished cleanly — all changes committed to live ERP & one-click undo ready.";
+      }
       const label = c.channel === "desktop_voice" ? "Voice consult" : "Decision call";
       return `${label} completed (${c.outcome}): ${c.summary}`;
     }
     case "run_done": {
-      const r = ev.payload as { status?: string; fingerprint?: string };
-      if (r.status === "committed") return `Run committed. Live workspace SHA-256 fingerprint is now ${r.fingerprint ?? "updated"}.`;
-      if (r.status === "aborted_by_human") return "Run aborted by manager. Live workspace preserved at its exact prior state.";
-      if (r.status === "timed_out") return "Risk Gate approval timed out before a decision arrived. Live workspace preserved unchanged.";
-      if (r.status === "blocked") return "Run blocked by deterministic governance policy. Zero live changes made.";
-      return `Run finished with status \`${r.status ?? "unknown"}\`.`;
+      const r = ev.payload as { status?: string; outcome?: string; fingerprint?: string; summary?: string };
+      const st = r.status ?? r.outcome;
+      if (st === "committed" || st === "done") {
+        if (r.fingerprint) {
+          return `✓ Settlement committed to live ERP (SHA-256 ${r.fingerprint}) — one-click undo ready.`;
+        }
+        return "✓ Settlement committed to live ERP — invoice frozen, AADE tax credit filed & one-click undo ready.";
+      }
+      if (st === "aborted_by_human" || st === "rejected" || st === "aborted") {
+        return "Run aborted by manager. Live workspace preserved at its exact prior state.";
+      }
+      if (st === "timed_out") return "Risk Gate approval timed out before a decision arrived. Live workspace preserved unchanged.";
+      if (st === "blocked") return "Run blocked by deterministic governance policy. Zero live changes made.";
+      return "✓ Audit execution completed cleanly.";
     }
     case "offer": {
       const o = ev.payload as unknown as AnticipateOfferPayload;

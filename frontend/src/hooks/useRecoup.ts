@@ -1019,6 +1019,7 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
                 ...prev,
                 active: false,
                 ringing: false,
+                callStatus: "ended",
                 activeSpeaker: null,
                 selectedChoice:
                   prev.selectedChoice ??
@@ -2207,6 +2208,33 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
     const claimId = extractedClaimId || "CLM-D-1042";
 
     const runDemoVoiceFallback = async () => {
+      if (/\b(no\s+thanks|nothing\s+else|that'?s\s+all|that\s+is\s+all|all\s+good|all\s+set|all\s+done|we'?re\s+good|i'?m\s+good|bye|goodbye|hang\s*up)\b/i.test(trimmed)) {
+        const closeReply = "Awesome—everything's applied and undo-protected. Talk soon!";
+        setOperatorConsult((prev) =>
+          prev
+            ? {
+                ...prev,
+                active: false,
+                ringing: false,
+                callStatus: "ended",
+                activeSpeaker: null,
+                turns: [
+                  ...prev.turns,
+                  { speaker: "user", text: trimmed, audioUrl: null, ts: Date.now() / 1000 },
+                  { speaker: "agent", text: closeReply, audioUrl: null, ts: Date.now() / 1000 + 0.05 },
+                ],
+                end: prev.end ?? {
+                  call_id: prev.callId || `CONSULT-${claimId}`,
+                  outcome: "accepted",
+                  agreed_amount: prev.claimAmount ?? 587.3,
+                  summary: "Operator consult session completed cleanly.",
+                },
+              }
+            : prev
+        );
+        setNarration("✓ Audit & voice session finished cleanly — all changes committed to live ERP & one-click undo ready.");
+        return;
+      }
       if (/redeliver|replace|re-deliver|22|hubs|tomorrow/i.test(trimmed)) {
         await respondOperatorConsult("redelivery", reqId, claimId);
         return;
@@ -2312,11 +2340,38 @@ export function useRecoup(opts: { liveWindows: boolean } = { liveWindows: true }
       if (!res.ok) throw new Error(`user-respond failed (${res.status})`);
       const data = (await res.json().catch(() => null)) as {
         ok?: boolean;
+        keep_call_open?: boolean;
+        call_status?: "ringing" | "connected" | "ended";
+        outcome?: "accepted" | "rejected" | "escalated";
+        agreed_amount?: number | null;
         reply_text?: string;
         confirmation_text?: string;
         ui_action?: UiActionPayload;
         turn?: CallTurnPayload;
       } | null;
+
+      if (data?.keep_call_open === false || data?.call_status === "ended") {
+        setOperatorConsult((prev) =>
+          prev
+            ? {
+                ...prev,
+                active: false,
+                ringing: false,
+                callStatus: "ended",
+                activeSpeaker: null,
+                end: prev.end ?? {
+                  call_id: prev.callId || `CONSULT-${claimId}`,
+                  outcome: data?.outcome ?? "accepted",
+                  agreed_amount: data?.agreed_amount ?? prev.claimAmount ?? null,
+                  summary: "Operator consult session completed cleanly.",
+                },
+              }
+            : prev
+        );
+        if ((data?.outcome ?? "accepted") === "accepted") {
+          setNarration("✓ Audit & voice session finished cleanly — all changes committed to live ERP & one-click undo ready.");
+        }
+      }
 
       if (data?.ui_action) {
         executeUiAction(data.ui_action);

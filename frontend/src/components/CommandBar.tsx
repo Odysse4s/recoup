@@ -139,6 +139,7 @@ export function CommandBar({
   onSubmit,
   busy,
   pendingApproval = null,
+  consultActive = false,
   onApprove,
   onDesktopVoiceTurn,
   speaking = false,
@@ -155,6 +156,7 @@ export function CommandBar({
   busy: boolean;
   brandName?: string;
   pendingApproval?: ApprovalNeededPayload | null;
+  consultActive?: boolean;
   onApprove?: (reqId: string, approved: boolean) => void;
   onDesktopVoiceTurn?: (text: string) => Promise<void> | void;
   speaking?: boolean;
@@ -230,13 +232,13 @@ export function CommandBar({
 
       soundFx.playUiClick();
 
-      // Case A — pendingApproval is active at the Risk Gate
-      if (pendingApproval) {
+      // Case A — pendingApproval is active at the Risk Gate OR an open post-commit voice consult is awaiting follow-up ("Need anything else?")
+      if (pendingApproval || consultActive) {
         if (onDesktopVoiceTurn) {
           void onDesktopVoiceTurn(clean);
           return;
         }
-        if (onApprove) {
+        if (pendingApproval && onApprove) {
           const lower = clean.toLowerCase();
           if (/^(approve|yes|confirm|authorize|commit|enforce)\b/.test(lower)) {
             onApprove(pendingApproval.req_id, true);
@@ -266,7 +268,7 @@ export function CommandBar({
         }, 1000);
       }
     },
-    [busy, onApprove, onChange, onDesktopVoiceTurn, onSubmit, pendingApproval]
+    [busy, consultActive, onApprove, onChange, onDesktopVoiceTurn, onSubmit, pendingApproval]
   );
 
   // Send recorded Audio Blob to /api/voice/stt fallback
@@ -298,7 +300,7 @@ export function CommandBar({
   // Web Speech API hook
   const speech = useSpeechInput((text, final) => {
     setTranscript(text);
-    if (!pendingApproval) {
+    if (!pendingApproval && !consultActive) {
       onChange(text);
     }
     if (final && text.trim()) {

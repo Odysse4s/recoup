@@ -806,9 +806,8 @@ async def _run_stage_demo(
         BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_c.model_dump()}, step=5, thought="Drafting CLM-D-1042 in claims ledger.")
         c_out = REGISTRY["upsert_row"].do(claims_args, rehearsal_env) if "upsert_row" in REGISTRY else {}
         previews[call_c.id] = (
-            REGISTRY["upsert_row"].preview(claims_args, rehearsal_env)
-            if "upsert_row" in REGISTRY
-            else "upsert claims[id='CLM-D-1042'] amount=587.30"
+            (REGISTRY["upsert_row"].preview(claims_args, rehearsal_env) if "upsert_row" in REGISTRY else "")
+            or "upsert claims[id='CLM-D-1042'] amount=587.30"
         )
         BUS.emit(
             run_id,
@@ -832,9 +831,8 @@ async def _run_stage_demo(
         BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_i.model_dump()}, step=5, thought="Placing invoice INV-7781 on dispute hold.")
         i_out = REGISTRY["upsert_row"].do(invoices_args, rehearsal_env) if "upsert_row" in REGISTRY else {}
         previews[call_i.id] = (
-            REGISTRY["upsert_row"].preview(invoices_args, rehearsal_env)
-            if "upsert_row" in REGISTRY
-            else "upsert invoices[id='INV-7781'] status='disputed'"
+            (REGISTRY["upsert_row"].preview(invoices_args, rehearsal_env) if "upsert_row" in REGISTRY else "")
+            or "upsert invoices[id='INV-7781'] status='disputed'"
         )
         BUS.emit(
             run_id,
@@ -867,9 +865,8 @@ async def _run_stage_demo(
         BUS.emit(run_id, EventType.TOOL_CALL, {"call": call_w.model_dump()}, step=6, thought="Staging credit memo document claims/CLM-D-1042.md.")
         w_out = REGISTRY["write_file"].do(write_args, rehearsal_env) if "write_file" in REGISTRY else {}
         previews[call_w.id] = (
-            REGISTRY["write_file"].preview(write_args, rehearsal_env)
-            if "write_file" in REGISTRY
-            else "write claims/CLM-D-1042.md (EUR 587.30 itemized memo)"
+            (REGISTRY["write_file"].preview(write_args, rehearsal_env) if "write_file" in REGISTRY else "")
+            or "write claims/CLM-D-1042.md (EUR 587.30 itemized memo)"
         )
         BUS.emit(
             run_id,
@@ -1720,13 +1717,15 @@ def _build_run_report_markdown(run_id: str | None = None) -> tuple[str, str]:
             rep = p.get("report", {})
             if isinstance(rep, dict):
                 created = rep.get("files_created", [])
+                created_set = set(created)
                 if created:
                     diffs_md.append(f"- **Files Created:** {', '.join(f'`{f}`' for f in created)}")
                 modified = rep.get("files_modified", [])
                 if modified:
                     for mod in modified:
                         m_path = mod.get("path") if isinstance(mod, dict) else str(mod)
-                        diffs_md.append(f"- **File Modified:** `{m_path}`")
+                        if m_path not in created_set:
+                            diffs_md.append(f"- **File Modified:** `{m_path}`")
                 deleted = rep.get("files_deleted", [])
                 if deleted:
                     diffs_md.append(f"- **Files Deleted:** {', '.join(f'`{f}`' for f in deleted)}")
@@ -3860,7 +3859,7 @@ class UserRespondBody(BaseModel):
 
 
 _HANGUP_INTENT_RE = re.compile(
-    r"\b(hang\s*up|bye|goodbye|no\s+thanks|nothing\s+else|that'?s\s+all|that\s+is\s+all|we'?re\s+good|we\s+are\s+good|all\s+good|close|call\s+(?:you\s+)?back|decide\s+later|not\s+now)\b",
+    r"\b(hang\s*up|bye|goodbye|no\s+thanks|no\s+thank\s+you|nothing\s+else|that'?s\s+all|that\s+is\s+all|that'?s\s+everything|that\s+is\s+everything|we'?re\s+good|we\s+are\s+good|i'?m\s+good|i\s+am\s+good|all\s+good|all\s+set|all\s+done|we'?re\s+done|close|call\s+(?:you\s+)?back|decide\s+later|not\s+now)\b",
     re.IGNORECASE,
 )
 _COMPARE_INTENT_RE = re.compile(
@@ -4186,9 +4185,17 @@ async def handle_user_consult_response(request: Request):
     is_post_commit_close = bool(
         has_committed
         and explicit_choice is None
-        and re.match(
-            r"^(no|nope|nah|no\s+thank\s+you|no\s+thanks|nothing|nothing\s+else|that'?s\s+all|that\s+is\s+all|all\s+good|all\s+set|i'?m\s+good|we'?re\s+good|done|thanks|thank\s+you|bye|goodbye)(?:\s+(?:thanks|thank\s+you|bye|for\s+now))?$",
-            clean_utt,
+        and (
+            re.match(
+                r"^(?:no|nope|nah)?\s*(?:thank\s+you|thanks|nothing\s+else|nothing|that'?s\s+all|thats\s+all|that\s+is\s+all|that'?s\s+everything|thats\s+everything|all\s+good|all\s+set|all\s+done|i'?m\s+good|im\s+good|we'?re\s+good|were\s+good|we'?re\s+done|were\s+done|done|bye|goodbye|no|nope|nah)(?:\s+(?:thanks|thank\s+you|bye|goodbye|for\s+now|that'?s\s+all|thats\s+all|nothing\s+else))*$",
+                clean_utt,
+            )
+            or bool(
+                re.search(
+                    r"\b(no\s+that'?s\s+all|no\s+thats\s+all|nope\s+that'?s\s+all|no\s+nothing\s+else|nothing\s+else|that'?s\s+everything|thats\s+everything|all\s+done|we'?re\s+done|i'?m\s+all\s+set)\b",
+                    clean_utt,
+                )
+            )
         )
     )
 
@@ -5136,10 +5143,12 @@ async def handle_user_consult_response(request: Request):
             run_id,
             EventType.RUN_DONE,
             {
+                "status": "committed",
                 "outcome": "committed",
                 "choice": choice,
                 "claim_id": claim_id,
                 "agreed_amount": agreed_amount,
+                "fingerprint": fingerprint_env(REAL)[:12],
                 "summary": summary_text,
             },
             thought=f"Live operator consult commit: {summary_text}",
